@@ -1,14 +1,17 @@
 # Ticket: RPT-2100
 
 ## Title
+
 Build advanced report builder with custom filters and export
 
 ## Description
+
 Users need a flexible reporting tool that lets them build custom queries
 against their data, apply filters, sort results, and export in multiple
 formats. This replaces the current static reports page.
 
 ## Acceptance Criteria
+
 - [ ] Users can select which columns to include in the report
 - [ ] Users can add filter conditions (equals, contains, greater than, less than, between)
 - [ ] Users can combine filters with AND/OR logic
@@ -27,11 +30,13 @@ formats. This replaces the current static reports page.
 - [ ] All exports include generation timestamp and filter summary
 
 ## Constraints
+
 - Must use existing query builder library (knex), not raw SQL
 - Export files must not exceed 50MB
 - Background jobs must use existing job queue (Bull)
 
 ## Out of Scope
+
 - Scheduled/recurring reports
 - Chart or visualization generation
 - Cross-team report sharing
