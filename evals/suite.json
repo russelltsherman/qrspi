@@ -1,0 +1,780 @@
+{
+  "name": "qrspi-agent-evals",
+  "version": "0.1.0",
+  "description": "Eval suite for QRSPI workflow agent prompts",
+  "split": {
+    "train_ratio": 0.65,
+    "test_ratio": 0.35,
+    "seed": 42
+  },
+  "defaults": {
+    "trials_per_case": 3,
+    "timeout_ms": 120000,
+    "max_tokens": 128000
+  },
+  "cases": [
+    {
+      "id": "case_001",
+      "name": "questions_happy_path",
+      "phase": "questions",
+      "prompt": "Generate questions for the following ticket.",
+      "context": {
+        "files": ["fixtures/ticket_rest_endpoint.md"],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('questions.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "section_count('questions.md', '## ') >= 5",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "question_count('questions.md') >= 8",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "question_count('questions.md') <= 15",
+          "weight": 0.5
+        },
+        {
+          "type": "programmatic",
+          "check": "all_questions_have_target('questions.md')",
+          "weight": 1.5
+        },
+        {
+          "type": "programmatic",
+          "check": "no_solution_language('questions.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('questions.md', 'Observability')",
+          "weight": 0.5
+        },
+        {
+          "type": "programmatic",
+          "check": "section_question_count('questions.md', 'Edge Cases') >= 2",
+          "weight": 0.5
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Questions are specific and answerable by reading code, not speculative or opinion-seeking",
+          "weight": 2.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Questions expose implicit contracts and hidden coupling rather than surface-level facts",
+          "weight": 1.5
+        }
+      ],
+      "tags": ["questions", "happy-path", "rest-endpoint"],
+      "difficulty": "easy",
+      "split": "train"
+    },
+    {
+      "id": "case_002",
+      "name": "questions_complex_ticket",
+      "phase": "questions",
+      "prompt": "Generate questions for the following ticket.",
+      "context": {
+        "files": ["fixtures/ticket_multi_tenancy.md"],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('questions.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "question_count('questions.md') >= 8",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "question_count('questions.md') <= 15",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "no_solution_language('questions.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Questions cover data isolation, tenant resolution, and cross-tenant edge cases without proposing architecture",
+          "weight": 2.0
+        }
+      ],
+      "tags": ["questions", "complex", "multi-tenancy"],
+      "difficulty": "hard",
+      "split": "test"
+    },
+    {
+      "id": "case_003",
+      "name": "research_factual_accuracy",
+      "phase": "research",
+      "prompt": "Research the codebase to answer these questions.",
+      "context": {
+        "files": ["fixtures/questions_rest_endpoint.md"],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('research.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "all_questions_answered('research.md', 'fixtures/questions_rest_endpoint.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "programmatic",
+          "check": "all_answers_have_evidence('research.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "programmatic",
+          "check": "all_evidence_has_file_citations('research.md')",
+          "weight": 1.5
+        },
+        {
+          "type": "programmatic",
+          "check": "no_solution_language('research.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('research.md', 'Discovered Patterns')",
+          "weight": 0.5
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('research.md', 'Inconsistencies')",
+          "weight": 0.5
+        },
+        {
+          "type": "programmatic",
+          "check": "code_snippets_under_limit('research.md', 20)",
+          "weight": 1.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Research contains only factual observations with code citations, no design opinions or recommendations",
+          "weight": 2.0
+        }
+      ],
+      "tags": ["research", "happy-path", "factual"],
+      "difficulty": "medium",
+      "split": "train"
+    },
+    {
+      "id": "case_004",
+      "name": "research_not_found_handling",
+      "phase": "research",
+      "prompt": "Research the codebase to answer these questions.",
+      "context": {
+        "files": ["fixtures/questions_websocket.md"],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('research.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "contains_not_found('research.md')",
+          "weight": 1.5
+        },
+        {
+          "type": "programmatic",
+          "check": "not_found_has_search_description('research.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "When a question cannot be answered from the codebase, the agent clearly states NOT FOUND and describes what it searched rather than fabricating an answer",
+          "weight": 2.5
+        }
+      ],
+      "tags": ["research", "edge-case", "not-found"],
+      "difficulty": "medium",
+      "split": "train"
+    },
+    {
+      "id": "case_005",
+      "name": "design_citation_compliance",
+      "phase": "design",
+      "prompt": "Produce a design document for this feature.",
+      "context": {
+        "files": [
+          "fixtures/ticket_rest_endpoint.md",
+          "fixtures/questions_rest_endpoint.md",
+          "fixtures/research_rest_endpoint.md"
+        ],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('design.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "line_count('design.md') <= 300",
+          "weight": 1.5
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('design.md', 'Current State')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('design.md', 'Desired End State')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('design.md', 'Delta')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('design.md', 'Pattern Decisions')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('design.md', 'Risk Register')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('design.md', 'Open Questions')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "current_state_has_citations('design.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "programmatic",
+          "check": "no_code_blocks('design.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "risk_register_min_entries('design.md', 2)",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "pattern_decisions_have_options('design.md', 2)",
+          "weight": 1.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Every claim in Current State is backed by a (ref: QN) citation to research.md — no uncited assertions about current behavior",
+          "weight": 2.5
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Pattern Decisions present genuine tradeoffs, not strawman alternatives designed to make one option look superior",
+          "weight": 2.0
+        }
+      ],
+      "tags": ["design", "happy-path", "citations"],
+      "difficulty": "hard",
+      "split": "train"
+    },
+    {
+      "id": "case_006",
+      "name": "design_new_pattern_flagging",
+      "phase": "design",
+      "prompt": "Produce a design document for this feature.",
+      "context": {
+        "files": [
+          "fixtures/ticket_websocket.md",
+          "fixtures/questions_websocket.md",
+          "fixtures/research_websocket.md"
+        ],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('design.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "contains_new_pattern_flag('design.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Agent correctly identifies WebSocket as a NEW PATTERN not present in the codebase and does not silently assume it will be approved",
+          "weight": 3.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Existing polling pattern is presented as a viable alternative, not dismissed",
+          "weight": 2.0
+        }
+      ],
+      "tags": ["design", "edge-case", "new-pattern", "legacy-conflict"],
+      "difficulty": "hard",
+      "split": "test"
+    },
+    {
+      "id": "case_007",
+      "name": "structure_vertical_slices",
+      "phase": "structure",
+      "prompt": "Produce a structural outline with vertical slices for this approved design.",
+      "context": {
+        "files": ["fixtures/design_rest_endpoint.md"],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('structure.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('structure.md', 'New Types')",
+          "weight": 0.5
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('structure.md', 'Contracts')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('structure.md', 'Unverified Assumptions')",
+          "weight": 0.5
+        },
+        {
+          "type": "programmatic",
+          "check": "slice_count('structure.md') >= 2",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "all_slices_have_verification('structure.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "programmatic",
+          "check": "all_slices_have_context_cost('structure.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "no_slice_exceeds_file_limit('structure.md', 10)",
+          "weight": 1.5
+        },
+        {
+          "type": "programmatic",
+          "check": "all_files_marked_new_or_modify('structure.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Each slice delivers a testable end-to-end path, not a horizontal layer like 'all DB changes' or 'all API changes'",
+          "weight": 3.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Slices are ordered so dependencies flow forward — no slice depends on a later slice",
+          "weight": 1.5
+        }
+      ],
+      "tags": ["structure", "happy-path", "vertical-slices"],
+      "difficulty": "medium",
+      "split": "train"
+    },
+    {
+      "id": "case_008",
+      "name": "structure_large_feature_splitting",
+      "phase": "structure",
+      "prompt": "Produce a structural outline with vertical slices for this approved design.",
+      "context": {
+        "files": ["fixtures/design_billing_migration.md"],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('structure.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "slice_count('structure.md') >= 5",
+          "weight": 1.5
+        },
+        {
+          "type": "programmatic",
+          "check": "no_large_slices_without_justification('structure.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Large slices are either broken into sub-slices or have explicit justification for why they cannot be split",
+          "weight": 2.0
+        }
+      ],
+      "tags": ["structure", "edge-case", "large-feature"],
+      "difficulty": "hard",
+      "split": "test"
+    },
+    {
+      "id": "case_009",
+      "name": "plan_atomicity",
+      "phase": "plan",
+      "prompt": "Write a step-by-step implementation plan for these vertical slices.",
+      "context": {
+        "files": [
+          "fixtures/structure_rest_endpoint.md",
+          "fixtures/design_rest_endpoint.md"
+        ],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('plan.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "total_steps('plan.md') <= 100",
+          "weight": 1.5
+        },
+        {
+          "type": "programmatic",
+          "check": "all_modify_steps_have_current_after('plan.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "programmatic",
+          "check": "all_slices_have_verify_checkpoint('plan.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('plan.md', 'Rollback Notes')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "all_steps_are_atomic('plan.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Every step is a single atomic action (create one file, modify one function, add one test) — no step says 'implement the feature' or 'finish the integration'",
+          "weight": 2.5
+        }
+      ],
+      "tags": ["plan", "happy-path", "atomicity"],
+      "difficulty": "medium",
+      "split": "train"
+    },
+    {
+      "id": "case_010",
+      "name": "worktree_session_boundaries",
+      "phase": "worktree",
+      "prompt": "Convert this implementation plan into a dependency-aware task DAG with session boundaries.",
+      "context": {
+        "files": ["fixtures/plan_rest_endpoint.md"],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('worktree.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_critical_path('worktree.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "all_tasks_have_required_fields('worktree.md')",
+          "weight": 1.5
+        },
+        {
+          "type": "programmatic",
+          "check": "session_boundaries_have_reasons('worktree.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "sessions_have_load_manifests('worktree.md')",
+          "weight": 1.5
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Session load manifests reference specific sections of artifacts, not entire documents — no session loads everything",
+          "weight": 2.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Tasks within a slice are sequential; tasks across independent slices are correctly identified as parallelizable",
+          "weight": 1.5
+        }
+      ],
+      "tags": ["worktree", "happy-path", "sessions"],
+      "difficulty": "medium",
+      "split": "train"
+    },
+    {
+      "id": "case_011",
+      "name": "implement_scope_enforcement",
+      "phase": "implement",
+      "prompt": "Implement the tasks assigned to this session. Do not touch code outside your scope.",
+      "context": {
+        "files": [
+          "fixtures/worktree_session1.md",
+          "fixtures/structure_rest_endpoint.md",
+          "fixtures/plan_rest_endpoint_slice1.md"
+        ],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('impl-log.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "impl_log_has_required_fields('impl-log.md')",
+          "weight": 1.5
+        },
+        {
+          "type": "script",
+          "check": "scripts/check_scope.py --log impl-log.md --allowed fixtures/worktree_session1.md",
+          "weight": 2.5
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Agent only modified files listed in the session task list — no opportunistic refactoring of unrelated code",
+          "weight": 3.0
+        }
+      ],
+      "tags": ["implement", "happy-path", "scope"],
+      "difficulty": "medium",
+      "split": "train"
+    },
+    {
+      "id": "case_012",
+      "name": "implement_deviation_reporting",
+      "phase": "implement",
+      "prompt": "Implement the tasks assigned to this session. The type signature in structure.md will not work as-is — report the deviation.",
+      "context": {
+        "files": [
+          "fixtures/worktree_session_broken_contract.md",
+          "fixtures/structure_broken_contract.md",
+          "fixtures/plan_broken_contract_slice1.md"
+        ],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('impl-log.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "impl_log_has_deviations('impl-log.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Agent stopped and reported the contract deviation rather than silently changing the type signature",
+          "weight": 3.0
+        }
+      ],
+      "tags": ["implement", "edge-case", "deviation"],
+      "difficulty": "hard",
+      "split": "test"
+    },
+    {
+      "id": "case_013",
+      "name": "pr_acceptance_criteria_mapping",
+      "phase": "pr",
+      "prompt": "Prepare a pull request summary for this completed implementation.",
+      "context": {
+        "files": [
+          "fixtures/impl_log_complete.md",
+          "fixtures/design_rest_endpoint.md",
+          "fixtures/structure_rest_endpoint.md",
+          "fixtures/git_diff_rest_endpoint.txt"
+        ],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('pr-summary.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "pr_title_under_limit('pr-summary.md', 72)",
+          "weight": 0.5
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('pr-summary.md', 'Acceptance Criteria Mapping')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('pr-summary.md', 'Changes by Slice')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('pr-summary.md', 'Testing Summary')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('pr-summary.md', 'Risks & Rollback')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "has_section('pr-summary.md', 'Deviations from Structure')",
+          "weight": 1.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Every acceptance criterion from the original ticket is mapped to an implementation file and a test",
+          "weight": 2.5
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Summary is 3-5 sentences explaining what changed and why, suitable for a human reviewer",
+          "weight": 1.5
+        }
+      ],
+      "tags": ["pr", "happy-path", "completeness"],
+      "difficulty": "medium",
+      "split": "train"
+    },
+    {
+      "id": "case_014",
+      "name": "plan_reading_illusion_detection",
+      "phase": "design",
+      "prompt": "Produce a design document for this feature.",
+      "context": {
+        "files": [
+          "fixtures/ticket_multi_tenancy.md",
+          "fixtures/questions_multi_tenancy.md",
+          "fixtures/research_multi_tenancy_sparse.md"
+        ],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('design.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "current_state_has_citations('design.md')",
+          "weight": 2.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Agent does NOT fabricate claims about current system behavior when research.md lacks evidence — every Current State claim has a (ref: QN) citation that maps to real research findings",
+          "weight": 3.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Open Questions section flags gaps where research was insufficient rather than filling them with assumptions",
+          "weight": 2.0
+        }
+      ],
+      "tags": ["design", "adversarial", "plan-reading-illusion"],
+      "difficulty": "hard",
+      "split": "test"
+    },
+    {
+      "id": "case_015",
+      "name": "instruction_budget_stress",
+      "phase": "questions",
+      "prompt": "Generate questions for the following ticket.",
+      "context": {
+        "files": ["fixtures/ticket_15_acceptance_criteria.md"],
+        "conversation_history": [],
+        "user_preferences": {}
+      },
+      "assertions": [
+        {
+          "type": "programmatic",
+          "check": "output_file_exists('questions.md')",
+          "weight": 1.0
+        },
+        {
+          "type": "programmatic",
+          "check": "question_count('questions.md') <= 15",
+          "weight": 2.0
+        },
+        {
+          "type": "programmatic",
+          "check": "question_count('questions.md') >= 8",
+          "weight": 1.0
+        },
+        {
+          "type": "llm_judge",
+          "criteria": "Agent respects the 15-question ceiling even though the ticket has 15+ acceptance criteria — questions are consolidated and prioritized, not 1:1 with criteria",
+          "weight": 2.5
+        }
+      ],
+      "tags": ["questions", "adversarial", "instruction-budget"],
+      "difficulty": "hard",
+      "split": "test"
+    }
+  ]
+}
