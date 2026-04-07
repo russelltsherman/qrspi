@@ -6,6 +6,7 @@ This project uses the QRSPI structured workflow for feature development.
 Artifacts are stored in `.qrspi/<ticket-id>/`.
 
 ### Available skills (invoke with / or let Claude auto-invoke)
+
 - `/qrspi-questions <ticket-id>` — Generate technical questions from a ticket
 - `/qrspi-research <ticket-id>` — Map the codebase (ticket is hidden)
 - `/qrspi-design <ticket-id>` — Produce a design document
@@ -16,6 +17,7 @@ Artifacts are stored in `.qrspi/<ticket-id>/`.
 - `/qrspi-pr <ticket-id>` — Prepare pull request summary
 
 ### Workflow rules
+
 - Phases run sequentially. Never skip ahead.
 - Each artifact must exist and be reviewed before the next phase starts.
 - Start a fresh `/clear` session between implementation slices.
@@ -23,6 +25,7 @@ Artifacts are stored in `.qrspi/<ticket-id>/`.
 - Use `/context` to check utilization. If over 40%, compact or start fresh.
 
 ### Codebase conventions
+
 - Agent prompt definitions live in `.qrspi/agents/`
 - Artifact templates live in `.qrspi/templates/`
 - Eval harness lives in `evals/` and `scripts/`

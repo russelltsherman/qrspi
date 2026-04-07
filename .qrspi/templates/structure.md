@@ -5,17 +5,22 @@
 **Status:** draft | approved
 
 ## New Types
+
 - `<TypeName> { field: type, field: type }`
 
 ## Modified Types
+
 - `<TypeName>` — add field `<field: type>` (ref: design.md §Delta)
 
 ## Contracts
+
 - `<functionName>(params): ReturnType` — <one-line purpose>
 
 ## Slice 1: <Name>
+
 **Goal:** <what this slice delivers as a testable end-to-end path>
 **Files touched:**
+
 - ✨ `<new file path>` — <purpose>
 - ⚠️ `<existing file path>` — <what changes>
 **Verification:**
@@ -24,8 +29,10 @@
 **Depends on:** none
 
 ## Slice 2: <Name>
+
 **Goal:** <what this slice delivers as a testable end-to-end path>
 **Files touched:**
+
 - ✨ `<new file path>` — <purpose>
 - ⚠️ `<existing file path>` — <what changes>
 **Verification:**
@@ -36,5 +43,6 @@
 ---
 
 ## Unverified Assumptions
+
 <Any claim from design.md that could not be mapped to a concrete type,
 file, or interface. These need human attention before planning.>

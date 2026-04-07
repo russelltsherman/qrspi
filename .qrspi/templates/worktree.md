@@ -7,6 +7,7 @@
 **Critical path:** <T1 → T2 → T3 → ...>
 
 ## Session 1
+
 **Load:** structure.md §Types, structure.md §Contracts, plan.md §Slice 1
 **Estimated context:** <% of window>
 
@@ -21,6 +22,7 @@
 **Reason:** Slice 1 complete. Fresh context for Slice 2.
 
 ## Session 2
+
 **Load:** structure.md §Types, structure.md §Contracts, plan.md §Slice 2,
         impl-log.md §Slice 1 (notes only)
 **Estimated context:** <% of window>
