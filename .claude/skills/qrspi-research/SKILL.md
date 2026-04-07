@@ -1,0 +1,47 @@
+---
+name: qrspi-research
+description: Map codebase facts by answering questions from the Questions phase. The feature ticket is intentionally hidden. Use after questions are approved.
+command: /qrspi-research
+argument-hint: <ticket-id>
+allowed-tools: Read, Glob, Grep, Bash(find:*), Bash(wc:*), Bash(head:*), Bash(tail:*)
+---
+
+# Research Phase (R)
+
+Read `.qrspi/$ARGUMENTS/questions.md`.
+
+CRITICAL: Do NOT read `.qrspi/$ARGUMENTS/ticket.md`. The ticket is intentionally hidden during this phase so you gather objective facts without forming implementation opinions.
+
+Produce `.qrspi/$ARGUMENTS/research.md`.
+
+## Rules
+1. Answer each question with FACTS: file paths, function signatures, data types, call chains.
+2. Include code snippets (< 20 lines) as evidence with `file:line` citations.
+3. Do NOT form opinions about what should change.
+4. If a question can't be answered, state "NOT FOUND" with search queries attempted.
+5. Document implicit contracts and dependency directions.
+6. Note inconsistencies between code and comments/docs.
+7. Include a "Discovered Patterns" section and an "Inconsistencies" section.
+
+## Output format
+```
+# Research — Codebase Map
+**Questions source:** questions.md @ <timestamp>
+**Generated:** <ISO-8601>
+**Status:** draft
+
+## Q1: <question text>
+**Answer:** <facts>
+**Evidence:** <code + file:line>
+**Dependencies:** <upstream/downstream>
+**Implicit contracts:** <conventions>
+...
+
+## Discovered Patterns
+...
+
+## Inconsistencies
+...
+```
+
+After writing, tell the user: "Research written to `.qrspi/<id>/research.md`. Review for factual accuracy, then tell me 'approved' to proceed to Design."
