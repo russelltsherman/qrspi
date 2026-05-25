@@ -1,0 +1,77 @@
+{
+  "name": "Archive Devcontainer",
+
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  "containerEnv": {
+    "http_proxy": "http://127.0.0.1:3128",
+    "https_proxy": "http://127.0.0.1:3128",
+    "HTTP_PROXY": "http://127.0.0.1:3128",
+    "HTTPS_PROXY": "http://127.0.0.1:3128",
+    "no_proxy": "host.docker.internal",
+    "NO_PROXY": "host.docker.internal",
+    // OMLX local model server on the host. Forwarded to the omlx/omlx-yolo
+    // shell functions which replicate the env that `omlx launch claude` sets.
+    // OMLX_MODEL is required — set it to the model id loaded in omlx
+    // (e.g. "qwen3-32b-4bit"). OMLX_CONTEXT_WINDOW is optional.
+    "OMLX_API_KEY": "${localEnv:OMLX_API_KEY}",
+    "OMLX_PORT": "${localEnv:OMLX_PORT}",
+    "OMLX_MODEL": "${localEnv:OMLX_MODEL}",
+    "OMLX_CONTEXT_WINDOW": "${localEnv:OMLX_CONTEXT_WINDOW}"
+  },
+
+  "initializeCommand": "bash .devcontainer/config/initialize.sh",
+
+  "mounts": [
+    // Mount host config repos for each AI coding tool so credentials
+    // and settings are available without being committed to the image.
+    // shared agents configuration
+    "source=${localEnv:HOME}/.agents/,target=/home/vscode/.agents/,type=bind",
+
+    // Claude Code
+    "source=${localEnv:HOME}/.claude/,target=/home/vscode/.claude/,type=bind",
+    "source=${localEnv:HOME}/.claude.json,target=/home/vscode/.claude.json,type=bind",
+
+    // Git config (readonly)
+    "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly",
+
+    // Graphite config
+    "source=${localEnv:HOME}/.config/graphite/aliases,target=/home/vscode/.config/graphite/aliases,type=bind,readonly",
+    "source=${localEnv:HOME}/.config/graphite/user_config,target=/home/vscode/.config/graphite/user_config,type=bind"
+
+    // Paths listed in .devcontainer/protected-paths are shadowed from inside
+    // the container at startup by /usr/local/sbin/protect-paths. See
+    // .devcontainer/SAFETY.md PC-04.
+  ],
+
+  // NET_ADMIN is required to apply iptables egress rules at startup (protect-egress).
+  // SYS_ADMIN is required by protect-paths to bind-mount /dev/null over the paths
+  // in .devcontainer/protected-paths inside the virtioFS-mounted workspace; the
+  // Docker daemon cannot create those mounts itself on macOS. Both capabilities
+  // are only exercised by root-owned scripts invoked via a tightly-scoped sudoers
+  // allowlist (see etc/sudoers.d/vscode).
+  "capAdd": ["NET_ADMIN", "SYS_ADMIN"],
+
+  // Hardened seccomp profile: fork of Docker's v27.5.1 default that keeps
+  // `mount` (needed by protect-paths) but blocks the other CAP_SYS_ADMIN
+  // unlocks (unshare, setns, pivot_root, bpf, perf_event_open, umount/umount2,
+  // move_mount, fs{open,config,mount}, open_tree, etc.) even when the
+  // capability is present. Defends against typical SYS_ADMIN-based container
+  // escape paths (e.g. cgroup release_agent, user-namespace privilege
+  // escalation) without removing the capability the startup scripts need.
+  // See SAFETY.md PC-05.
+  "runArgs": [
+    "--security-opt", "seccomp=${localWorkspaceFolder}/.devcontainer/etc/seccomp/hardened.json",
+    "--add-host=host.docker.internal:host-gateway"
+  ],
+
+  "postCreateCommand": "bash .devcontainer/config/post-create.sh",
+  "postStartCommand": "bash .devcontainer/config/post-start.sh",
+
+  "remoteUser": "vscode",
+
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind,consistency=cached"
+}
