@@ -1,0 +1,136 @@
+{
+  "skill_name": "using-argocd-cli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "sync my argocd app called payment-service to the latest commit",
+      "expected_output": "Runs argocd app diff first, then argocd app sync with --dry-run, then the actual sync. Follows the diff-before-sync convention.",
+      "files": [],
+      "assertions": [
+        {"text": "Runs argocd app diff before syncing", "type": "workflow_check"},
+        {"text": "Runs argocd app sync with --dry-run first", "type": "safety_check"},
+        {"text": "Runs argocd app sync payment-service", "type": "command_check"},
+        {"text": "Includes --prune flag or explains why it is omitted", "type": "flag_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 2,
+      "prompt": "my argocd app is showing degraded health, help me figure out what's wrong",
+      "expected_output": "Starts with argocd app get to inspect status, then argocd app resources to find unhealthy resources, then kubectl describe or argocd app logs for the specific failing resource.",
+      "files": [],
+      "assertions": [
+        {"text": "Runs argocd app get as the first diagnostic step", "type": "workflow_check"},
+        {"text": "Runs argocd app resources to identify degraded resources", "type": "command_check"},
+        {"text": "Checks logs or describes the failing resource", "type": "workflow_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 3,
+      "prompt": "I need to roll back the checkout-service argocd app to the previous deployment because the latest release broke payments",
+      "expected_output": "Recommends Git revert as the primary rollback path. Falls back to argocd app history and argocd app rollback only if Git revert is not feasible. Mentions post-rollback Git reconciliation.",
+      "files": [],
+      "assertions": [
+        {"text": "Recommends Git revert as the primary rollback method", "type": "content_check"},
+        {"text": "Mentions argocd app history to inspect previous deployments", "type": "command_check"},
+        {"text": "Mentions argocd app rollback as emergency fallback", "type": "command_check"},
+        {"text": "Mentions need to reconcile Git after emergency rollback", "type": "content_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 4,
+      "prompt": "create an argocd application for our new microservice that deploys from the gitops repo to the staging cluster",
+      "expected_output": "Runs argocd app create with --repo, --path, --dest-server, --dest-namespace, --project, and --sync-policy none. Explains why manual sync is the default.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses argocd app create command", "type": "command_check"},
+        {"text": "Includes --repo and --path flags", "type": "flag_check"},
+        {"text": "Includes --dest-server and --dest-namespace flags", "type": "flag_check"},
+        {"text": "Sets --sync-policy none and explains the reasoning", "type": "content_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 5,
+      "prompt": "check the diff between what's in git and what's running in the cluster for the api-gateway argocd app",
+      "expected_output": "Runs argocd app diff api-gateway. Explains exit code meaning (0 = no diff, 1 = differences). May also run argocd app get with --refresh for live comparison.",
+      "files": [],
+      "assertions": [
+        {"text": "Runs argocd app diff api-gateway", "type": "command_check"},
+        {"text": "Explains exit code semantics", "type": "content_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 6,
+      "prompt": "set up a project-scoped role token for our CI pipeline to sync apps in the frontend project",
+      "expected_output": "Creates a project role, adds sync and get policies, generates a JWT token with expiration. Recommends using ARGOCD_AUTH_TOKEN in CI.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses argocd proj role create to create the role", "type": "command_check"},
+        {"text": "Uses argocd proj role add-policy for sync and get permissions", "type": "command_check"},
+        {"text": "Uses argocd proj role create-token to generate the token", "type": "command_check"},
+        {"text": "Sets token expiration with --expires-in", "type": "flag_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 7,
+      "prompt": "we have 30 microservices that all need to deploy to 4 clusters, what's the best way to manage this with argocd",
+      "expected_output": "Recommends ApplicationSets over app-of-apps given the scale (>20 apps, >3 clusters). Suggests Matrix generator combining Git directory generator with Cluster generator. Mentions preserveResourcesOnDeletion for production safety.",
+      "files": [],
+      "assertions": [
+        {"text": "Recommends ApplicationSets based on the scale criteria", "type": "content_check"},
+        {"text": "Mentions Matrix generator for the cross-product use case", "type": "content_check"},
+        {"text": "Mentions preserveResourcesOnDeletion for safety", "type": "content_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 8,
+      "prompt": "deploy my application to kubernetes using kubectl apply",
+      "expected_output": "This is a kubectl operation, not an ArgoCD CLI operation. Should not trigger the using-argocd-cli skill.",
+      "files": [],
+      "assertions": [
+        {"text": "Does not invoke ArgoCD CLI commands", "type": "negative_check"},
+        {"text": "Uses kubectl apply as requested", "type": "command_check"}
+      ],
+      "should_trigger": false
+    },
+    {
+      "id": 9,
+      "prompt": "install the argocd server on my kubernetes cluster using helm",
+      "expected_output": "This is an ArgoCD server installation request, not an ArgoCD CLI application management request. Should not trigger the using-argocd-cli skill.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses helm install or helm upgrade for ArgoCD server installation", "type": "command_check"},
+        {"text": "Does not use argocd CLI commands for server installation", "type": "negative_check"}
+      ],
+      "should_trigger": false
+    },
+    {
+      "id": 10,
+      "prompt": "set up flux to sync my git repository with my kubernetes cluster",
+      "expected_output": "This is a Flux CD request, not an ArgoCD request. Should not trigger the using-argocd-cli skill.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses flux CLI or Flux CRDs, not ArgoCD", "type": "negative_check"},
+        {"text": "Does not suggest ArgoCD as a replacement", "type": "negative_check"}
+      ],
+      "should_trigger": false
+    },
+    {
+      "id": 11,
+      "prompt": "write a kubernetes deployment manifest for a node.js app with 3 replicas",
+      "expected_output": "This is a general Kubernetes manifest authoring request. Should not trigger the using-argocd-cli skill.",
+      "files": [],
+      "assertions": [
+        {"text": "Generates a Kubernetes Deployment YAML manifest", "type": "content_check"},
+        {"text": "Does not invoke ArgoCD CLI commands", "type": "negative_check"}
+      ],
+      "should_trigger": false
+    }
+  ]
+}
