@@ -1,0 +1,122 @@
+{
+  "skill_name": "using-argocd-cli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Sync my argocd application called backend-api to pick up the latest changes from Git",
+      "expected_output": "Runs argocd app diff before sync to preview changes, then runs argocd app sync backend-api. May include --refresh flag on diff.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses argocd app diff to preview changes before syncing", "type": "workflow_check"},
+        {"text": "Uses argocd app sync backend-api", "type": "command_check"},
+        {"text": "Does not use kubectl apply or helm upgrade", "type": "negative_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 2,
+      "prompt": "I need to roll back my ArgoCD deployment because the latest release broke the health checks",
+      "expected_output": "Recommends git revert as the primary approach. Shows argocd app history to identify the bad commit, then git revert and argocd app sync. Mentions argocd app rollback as emergency alternative with warning about Git drift.",
+      "files": [],
+      "assertions": [
+        {"text": "Recommends git revert as the preferred rollback approach", "type": "content_check"},
+        {"text": "Uses argocd app history to inspect deployment history", "type": "command_check"},
+        {"text": "Warns about Git drift if using argocd app rollback", "type": "content_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 3,
+      "prompt": "Create a new ArgoCD application for our frontend service that deploys from our GitHub repo to the staging namespace",
+      "expected_output": "Uses argocd app create with --repo, --path, --dest-server, --dest-namespace, and --project flags. Specifies staging namespace.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses argocd app create", "type": "command_check"},
+        {"text": "Includes --repo flag pointing to Git repository", "type": "flag_check"},
+        {"text": "Includes --dest-namespace for the staging namespace", "type": "flag_check"},
+        {"text": "Suggests using --project for RBAC isolation", "type": "content_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 4,
+      "prompt": "Check the health status of all our ArgoCD apps and find which ones are degraded",
+      "expected_output": "Uses argocd app list to show all applications with their health status, then filters or highlights degraded ones. May use jq to filter by health.status.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses argocd app list or argocd app get", "type": "command_check"},
+        {"text": "Filters or identifies apps with Degraded health status", "type": "content_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 5,
+      "prompt": "Show me the diff between what's in Git and what's deployed in the cluster for our payments service ArgoCD app",
+      "expected_output": "Uses argocd app diff payments-service with --refresh flag to compare Git desired state against cluster live state.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses argocd app diff", "type": "command_check"},
+        {"text": "Includes --refresh to force fresh comparison from Git", "type": "flag_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 6,
+      "prompt": "Set up argocd authentication for our CI/CD pipeline using a project-scoped token",
+      "expected_output": "Creates a project-scoped role, adds sync and get policies, generates a JWT token with argocd proj role create-token. Shows how to use ARGOCD_AUTH_TOKEN and ARGOCD_SERVER environment variables.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses argocd proj role create to create a role", "type": "command_check"},
+        {"text": "Uses argocd proj role create-token to generate a JWT", "type": "command_check"},
+        {"text": "Shows ARGOCD_AUTH_TOKEN environment variable usage", "type": "content_check"},
+        {"text": "Recommends project-scoped token over admin token", "type": "content_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 7,
+      "prompt": "My ArgoCD app is stuck in Progressing state and the sync won't complete",
+      "expected_output": "Starts with argocd app get to check operation state. Checks for stuck operations with operationState. Suggests argocd app terminate-op if stuck. Checks deployment rollout status and hook jobs.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses argocd app get to diagnose the issue", "type": "command_check"},
+        {"text": "Suggests argocd app terminate-op for stuck operations", "type": "content_check"},
+        {"text": "Checks for stuck hooks or rollouts", "type": "workflow_check"}
+      ],
+      "should_trigger": true
+    },
+    {
+      "id": 8,
+      "prompt": "Deploy this Kubernetes deployment manifest to the production cluster using kubectl apply",
+      "expected_output": "This is a kubectl operation, not ArgoCD. Should use kubectl apply -f to apply the manifest directly.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses kubectl apply, not argocd commands", "type": "command_check"},
+        {"text": "Does not invoke ArgoCD CLI", "type": "negative_check"}
+      ],
+      "should_trigger": false
+    },
+    {
+      "id": 9,
+      "prompt": "Package my application as a Helm chart with values files for dev and prod environments",
+      "expected_output": "This is Helm chart authoring. Should use helm create, edit Chart.yaml, templates, and values files. Not an ArgoCD operation.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses helm create or helm package commands", "type": "command_check"},
+        {"text": "Does not use argocd commands", "type": "negative_check"}
+      ],
+      "should_trigger": false
+    },
+    {
+      "id": 10,
+      "prompt": "Set up Flux CD to watch our Git repository and auto-deploy changes to the staging cluster",
+      "expected_output": "This is a Flux CD operation. Should use flux bootstrap, flux create source git, and flux create kustomization. Not ArgoCD.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses flux CLI commands, not argocd", "type": "command_check"},
+        {"text": "Does not invoke ArgoCD CLI", "type": "negative_check"}
+      ],
+      "should_trigger": false
+    }
+  ]
+}
