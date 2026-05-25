@@ -1,0 +1,68 @@
+{
+  "skill_name": "graphite",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I just made some changes to the auth module. commit my changes with a message about adding JWT validation",
+      "expected_output": "Uses gt create or gt modify with -a -m flags, --no-interactive, and includes co-authorship trailer. Checks git status first to determine whether to create or modify.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses gt create or gt modify (not raw git commit)", "type": "command_check"},
+        {"text": "Includes --no-interactive flag", "type": "flag_check"},
+        {"text": "Includes -m flag with a commit message", "type": "flag_check"},
+        {"text": "Includes -a or -u flag to stage changes", "type": "flag_check"},
+        {"text": "Includes Co-Authored-By trailer in the commit message", "type": "content_check"},
+        {"text": "Checks git status or git diff before committing", "type": "workflow_check"}
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "push my PR so the team can review it",
+      "expected_output": "Asks user for confirmation before running gt submit --no-edit --no-interactive. Does NOT just run it without asking.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses gt submit (not git push or gh pr create)", "type": "command_check"},
+        {"text": "Includes --no-edit flag to skip PR metadata prompts", "type": "flag_check"},
+        {"text": "Includes --no-interactive flag", "type": "flag_check"},
+        {"text": "Asks user for confirmation before submitting (safety rule)", "type": "safety_check"}
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "show me the current stack and what branch I'm on",
+      "expected_output": "Runs gt log short --no-interactive or gt log --no-interactive to display the stack visualization. May also run gt info --no-interactive for current branch details.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses gt log or gt log short (not just git branch or git log)", "type": "command_check"},
+        {"text": "Includes --no-interactive flag", "type": "flag_check"},
+        {"text": "Does not attempt any write/mutation operations", "type": "safety_check"}
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "move this branch so it stacks on top of feature-auth instead of main",
+      "expected_output": "Runs gt move --onto feature-auth --no-interactive. Shows gt log short after to confirm the new stack structure.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses gt move (not git rebase or git checkout)", "type": "command_check"},
+        {"text": "Includes --onto feature-auth flag", "type": "flag_check"},
+        {"text": "Includes --no-interactive flag", "type": "flag_check"},
+        {"text": "Runs gt log short after the move to show updated state", "type": "workflow_check"}
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "sync with main and clean up any merged branches",
+      "expected_output": "Checks git status for uncommitted changes first, then runs gt sync --force --delete-all --no-interactive. Shows gt log short after to display updated state.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses gt sync (not git pull or git fetch/merge)", "type": "command_check"},
+        {"text": "Includes --force flag", "type": "flag_check"},
+        {"text": "Includes --delete-all flag for cleaning merged branches", "type": "flag_check"},
+        {"text": "Includes --no-interactive flag", "type": "flag_check"},
+        {"text": "Checks git status for uncommitted changes before syncing", "type": "safety_check"},
+        {"text": "Runs gt log short after sync to show updated state", "type": "workflow_check"}
+      ]
+    }
+  ]
+}

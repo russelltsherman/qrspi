@@ -31,8 +31,9 @@ echo 'yolo() { clear; command claude --dangerously-skip-permissions "$@"; printf
 #   - Auth goes via ANTHROPIC_AUTH_TOKEN as a Bearer token
 #   - Large API_TIMEOUT_MS for local inference (model loading + generation)
 #   - Disable attribution header and non-essential traffic
-#   - Override all model slots so Claude Code doesn't request unavailable models
-# Set OMLX_MODEL on the host to the model id you want (e.g. "qwen3-32b-4bit").
+#   - Override model slots so Claude Code doesn't request unavailable models
+#     (OMLX_OPUS_MODEL / OMLX_SONNET_MODEL / OMLX_HAIKU_MODEL override
+#      individual tiers; OMLX_MODEL is the fallback for any tier not set)
 cat >> ~/.bashrc << 'BASHRC'
 omlx() {
   clear
@@ -44,16 +45,15 @@ omlx() {
     API_TIMEOUT_MS=3000000
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
   )
-  if [[ -n "${OMLX_MODEL:-}" ]]; then
-    _env+=(
-      ANTHROPIC_DEFAULT_OPUS_MODEL="$OMLX_MODEL"
-      ANTHROPIC_DEFAULT_SONNET_MODEL="$OMLX_MODEL"
-      ANTHROPIC_DEFAULT_HAIKU_MODEL="$OMLX_MODEL"
-      CLAUDE_CODE_SUBAGENT_MODEL="$OMLX_MODEL"
-    )
-    if [[ -n "${OMLX_CONTEXT_WINDOW:-}" ]]; then
-      _env+=(CLAUDE_CODE_AUTO_COMPACT_WINDOW="$OMLX_CONTEXT_WINDOW")
-    fi
+  local _opus="${OMLX_OPUS_MODEL:-${OMLX_MODEL:-}}"
+  local _sonnet="${OMLX_SONNET_MODEL:-${OMLX_MODEL:-}}"
+  local _haiku="${OMLX_HAIKU_MODEL:-${OMLX_MODEL:-}}"
+  [[ -n "$_opus" ]]   && _env+=(ANTHROPIC_DEFAULT_OPUS_MODEL="$_opus")
+  [[ -n "$_sonnet" ]] && _env+=(ANTHROPIC_DEFAULT_SONNET_MODEL="$_sonnet")
+  [[ -n "$_haiku" ]]  && _env+=(ANTHROPIC_DEFAULT_HAIKU_MODEL="$_haiku")
+  [[ -n "$_sonnet" ]] && _env+=(CLAUDE_CODE_SUBAGENT_MODEL="$_sonnet")
+  if [[ -n "${OMLX_CONTEXT_WINDOW:-}" ]]; then
+    _env+=(CLAUDE_CODE_AUTO_COMPACT_WINDOW="$OMLX_CONTEXT_WINDOW")
   fi
   env "${_env[@]}" claude "$@"
   printf '\x1b[>0u'

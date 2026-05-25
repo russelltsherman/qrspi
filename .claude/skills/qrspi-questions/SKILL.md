@@ -1,0 +1,46 @@
+---
+name: qrspi-questions
+description: Generate 8-15 targeted technical questions from a feature ticket. Use when starting a new QRSPI feature workflow or when the user says "questions for" a ticket.
+command: /qrspi-questions
+argument-hint: <ticket-id>
+allowed-tools: Read, Glob, Grep, Bash(wc:*), Bash(curl:*), mcp__linear-russelltsherman__get_issue, mcp__linear-russelltsherman__prepare_attachment_upload, mcp__linear-russelltsherman__create_attachment_from_upload
+---
+
+# Questions Phase (Q)
+
+Fetch the ticket from Linear: call `mcp__linear-russelltsherman__get_issue` with `id: "$ARGUMENTS"`. Use the returned `title` and `description` fields as the ticket content.
+
+Produce `.qrspi/$ARGUMENTS/questions.md` with 8-15 technical questions.
+
+## Rules
+1. Questions must be answerable by reading the codebase, not by speculation.
+2. Categorize into: Data Flow, API Surface, State Management, Edge Cases, Testing, Observability.
+3. Each question names a specific file, module, or "the module responsible for X".
+4. Do NOT propose solutions or architectures.
+5. Include at least 2 Edge Cases questions and 1 Observability question.
+6. No question uses solution language: "should we", "we could", "best way to".
+
+## Output format
+```
+# Questions — <ticket title>
+**Ticket:** <ticket-id>
+**Generated:** <ISO-8601>
+**Status:** draft
+
+## Data Flow
+- Q1: <question>
+  **Target:** <file or module>
+...
+```
+
+After writing the file, tell the user: "Questions written to `.qrspi/<id>/questions.md`. Review, edit, then tell me 'approved' to proceed to Research."
+
+## Upload artifact
+
+After the closing message, upload the artifact to the Linear issue:
+1. Get the file size: run `wc -c < .qrspi/$ARGUMENTS/questions.md` via Bash
+2. Call `mcp__linear-russelltsherman__prepare_attachment_upload` with `issue: "$ARGUMENTS"`, `filename: "questions.md"`, `contentType: "text/markdown"`, `size: <byte count from step 1>`
+3. Run the curl PUT via Bash: `curl -s -X PUT --data-binary @.qrspi/$ARGUMENTS/questions.md` with all headers from the upload response, to the signed upload URL
+4. Call `mcp__linear-russelltsherman__create_attachment_from_upload` with `issue: "$ARGUMENTS"`, `assetUrl` from step 2, and `title: "Questions — $ARGUMENTS"`
+
+If any upload step fails, report the error but do NOT fail the phase — the local artifact is already written.
