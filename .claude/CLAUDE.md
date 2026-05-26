@@ -20,6 +20,10 @@ attachments on phase approval.
 - `/qrspi-implement <ticket-id> <slice-number>` — Implement one vertical slice
 - `/qrspi-pr <ticket-id>` — Prepare pull request summary
 
+### Advisory skills
+
+- `/using-argo-workflows-cli <argo subcommand or task>` — Guide agents managing Argo Workflows via the argo CLI
+
 ### Workflow rules
 
 - Phases run sequentially. Never skip ahead.
