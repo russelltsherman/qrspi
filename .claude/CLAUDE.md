@@ -19,6 +19,7 @@ attachments on phase approval.
 - `/qrspi-worktree <ticket-id>` — Build a session-aware task DAG
 - `/qrspi-implement <ticket-id> <slice-number>` — Implement one vertical slice
 - `/qrspi-pr <ticket-id>` — Prepare pull request summary
+- `/using-claude-cli <topic>` — Claude CLI invocation patterns: modes, subagents, sessions, cost control, permissions
 
 ### Workflow rules
 
