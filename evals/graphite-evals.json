@@ -1,16 +1,16 @@
 {
-  "skill_name": "graphite",
+  "skill_name": "using-graphite-cli",
   "evals": [
     {
       "id": 1,
       "prompt": "I just made some changes to the auth module. commit my changes with a message about adding JWT validation",
-      "expected_output": "Uses gt create or gt modify with -a -m flags, --no-interactive, and includes co-authorship trailer. Checks git status first to determine whether to create or modify.",
+      "expected_output": "Uses gt create or gt modify with -m flag, --no-interactive, and includes co-authorship trailer. Requires explicit git add staging (never -a flag). Checks git status first to determine whether to create or modify.",
       "files": [],
       "assertions": [
         {"text": "Uses gt create or gt modify (not raw git commit)", "type": "command_check"},
         {"text": "Includes --no-interactive flag", "type": "flag_check"},
         {"text": "Includes -m flag with a commit message", "type": "flag_check"},
-        {"text": "Includes -a or -u flag to stage changes", "type": "flag_check"},
+        {"text": "Requires explicit git add before gt create/modify (never -a flag)", "type": "workflow_check"},
         {"text": "Includes Co-Authored-By trailer in the commit message", "type": "content_check"},
         {"text": "Checks git status or git diff before committing", "type": "workflow_check"}
       ]

@@ -1,0 +1,81 @@
+{
+  "skill_name": "using-graphite-cli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I've been working on user authentication with JWT tokens. Stage my changes and commit them on a new branch called feature-auth with message 'Add JWT token validation for user login'",
+      "expected_output": "The agent checks git status, stages specific files with git add, then runs gt create feature-auth --no-interactive -m with a co-authorship trailer. Does NOT use git commit or raw git on the new branch.",
+      "files": [],
+      "assertions": [
+        {"text": "Runs git status --short to check current state before staging", "type": "workflow_check"},
+        {"text": "Uses explicit git add <files> to stage changes, never -a flag", "type": "staging_check"},
+        {"text": "Uses gt create (not raw git commit) to create the branch with a commit", "type": "command_check"},
+        {"text": "Includes --no-interactive flag on the gt create command", "type": "flag_check"},
+        {"text": "Includes -m flag with a descriptive commit message", "type": "flag_check"},
+        {"text": "Includes a Co-Authored-By trailer in the commit message", "type": "content_check"},
+        {"text": "Runs gt log short --no-interactive after creating the branch", "type": "workflow_check"}
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "It's time to push my PR so the team can review my work. The branch is feature-auth and it stacks on main.",
+      "expected_output": "The agent asks the user for confirmation before submitting, then runs gt submit --no-edit --no-interactive. Does NOT use git push or gh pr create.",
+      "files": [],
+      "assertions": [
+        {"text": "Asks the user for confirmation before running gt submit", "type": "safety_check"},
+        {"text": "Uses gt submit (not git push or gh pr create)", "type": "command_check"},
+        {"text": "Includes --no-edit flag to skip PR metadata prompts", "type": "flag_check"},
+        {"text": "Includes --no-interactive flag on gt submit", "type": "flag_check"}
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Show me my current branch stack and what I'm working on. I need to see the full visualization.",
+      "expected_output": "The agent runs gt log --no-interactive or gt log short --no-interactive to display the stack. Does NOT use raw git branch or git log.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses gt log or gt log short (not raw git branch or git log)", "type": "command_check"},
+        {"text": "Includes --no-interactive flag", "type": "flag_check"},
+        {"text": "Does not attempt any write or mutation operations", "type": "safety_check"}
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I need to reorganize my stack. Move feature-auth so it stacks on top of feature-base instead of directly on main.",
+      "expected_output": "The agent runs gt move --onto feature-base --no-interactive, then verifies with gt log short --no-interactive. Does NOT use git rebase.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses gt move (not git rebase or git checkout) for stack reorganization", "type": "command_check"},
+        {"text": "Includes --onto feature-base flag to specify new parent", "type": "flag_check"},
+        {"text": "Includes --no-interactive flag", "type": "flag_check"},
+        {"text": "Runs gt log short --no-interactive after the move to verify stack structure", "type": "workflow_check"}
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Sync my current stack with the latest main branch and clean up any merged remote branches.",
+      "expected_output": "The agent checks git status first for uncommitted changes, then runs gt sync --force --delete-all --no-interactive. Shows updated state with gt log short afterward.",
+      "files": [],
+      "assertions": [
+        {"text": "Checks git status before syncing (safety step)", "type": "safety_check"},
+        {"text": "Uses gt sync (not git pull or git fetch)", "type": "command_check"},
+        {"text": "Includes --force flag for rebasing onto latest main", "type": "flag_check"},
+        {"text": "Includes --delete-all flag to clean merged branches", "type": "flag_check"},
+        {"text": "Includes --no-interactive flag", "type": "flag_check"},
+        {"text": "Runs gt log short after sync to show updated state", "type": "workflow_check"}
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "I made a mistake - I need to fix a typo in my last commit on the current branch. The change is in auth_service.py.",
+      "expected_output": "The agent stages the fix with git add, then runs gt modify --no-interactive -m with a description of the fix. Does NOT use git commit --amend.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses gt modify (not git commit --amend) to amend the current branch", "type": "command_check"},
+        {"text": "Runs git add <files> before gt modify", "type": "staging_check"},
+        {"text": "Includes --no-interactive flag", "type": "flag_check"},
+        {"text": "Includes -m flag with a commit message", "type": "flag_check"}
+      ]
+    }
+  ]
+}
