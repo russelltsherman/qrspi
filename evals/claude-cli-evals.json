@@ -1,0 +1,73 @@
+{
+  "skill_name": "claude-cli",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I need to run claude in an automated CI pipeline with no interactive prompts. What flags should I use?",
+      "expected_output": "Recommends `--headless` mode for CI automation, mentions `--bare` for machine-readable output, notes that headless does single-turn execution with no interactive permission prompts, and provides the example `claude --headless -p \"your prompt\"`.",
+      "files": [],
+      "assertions": [
+        {"text": "Mentions --headless flag as the primary mode for CI/automation", "type": "flag_check"},
+        {"text": "Mentions --bare flag as an alternative for machine-readable output", "type": "flag_check"},
+        {"text": "States headless mode runs single-turn execution", "type": "content_check"},
+        {"text": "Notes that headless mode has no interactive permission prompts", "type": "content_check"},
+        {"text": "Provides a command example with --headless and -p", "type": "workflow_check"}
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I want Claude to explore the codebase and then plan a feature. How do I spawn sub-agents?",
+      "expected_output": "Describes built-in sub-agents available in interactive sessions: @Explore for codebase exploration, @Plan for task planning, and @agent for general delegation. Notes that sub-agents run as child processes sharing the parent's context and permissions.",
+      "files": [],
+      "assertions": [
+        {"text": "Mentions @Explore for codebase exploration", "type": "command_check"},
+        {"text": "Mentions @Plan for task planning", "type": "command_check"},
+        {"text": "Mentions @agent for general-purpose delegation", "type": "command_check"},
+        {"text": "States sub-agents run as child processes within the CLI", "type": "content_check"},
+        {"text": "Notes sub-agents share parent context and permissions", "type": "content_check"},
+        {"text": "Indicates sub-agents require interactive session mode", "type": "safety_check"}
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I need to continue a Claude session from earlier today. How do I resume it?",
+      "expected_output": "Describes --continue to resume the most recent session, --session <name> to resume a named session, and --session-name <name> to name the current session. Mentions --fork to duplicate session state and --no-persist for ephemeral work.",
+      "files": [],
+      "assertions": [
+        {"text": "Mentions --continue flag to resume the most recent session", "type": "flag_check"},
+        {"text": "Mentions --session <name> to resume a named session", "type": "flag_check"},
+        {"text": "Mentions --session-name <name> to assign a name to the current session", "type": "flag_check"},
+        {"text": "Mentions --fork to duplicate session state", "type": "flag_check"},
+        {"text": "Mentions --no-persist for ephemeral tasks", "type": "flag_check"},
+        {"text": "States session data is stored locally and survives CLI restarts", "type": "content_check"}
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "How do I get claude output in JSON format so I can parse it with jq in a script?",
+      "expected_output": "Describes --output json for structured JSON per turn and --output stream-json for one JSON object per line. Provides a jq example showing how to extract assistant content from stream-json output. Notes this is useful in CI pipelines.",
+      "files": [],
+      "assertions": [
+        {"text": "Mentions --output json flag for structured JSON output", "type": "flag_check"},
+        {"text": "Mentions --output stream-json flag for streaming JSON", "type": "flag_check"},
+        {"text": "Provides a jq example with the pipe operator and select filter", "type": "workflow_check"},
+        {"text": "Notes JSON output is useful in CI pipelines", "type": "content_check"},
+        {"text": "States stream-json outputs one JSON object per line", "type": "content_check"}
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I want to cap Claude's spending in a session. How do I set a budget and turn limit?",
+      "expected_output": "Describes --max-budget-usd <amount> as a hard cap that terminates the session when reached, and --max-turns <n> to limit conversation turns. Mentions --model for cost control (e.g., haiku for simple queries, higher-effort models for complex tasks). Notes the CLI returns partial results when budget is reached.",
+      "files": [],
+      "assertions": [
+        {"text": "Mentions --max-budget-usd flag as a hard spending cap", "type": "flag_check"},
+        {"text": "Mentions --max-turns flag to limit conversation turns", "type": "flag_check"},
+        {"text": "Mentions --model flag for selecting lower-cost models", "type": "flag_check"},
+        {"text": "States --max-budget-usd terminates the session when the threshold is reached", "type": "content_check"},
+        {"text": "Notes the CLI returns partial results when budget is reached", "type": "content_check"},
+        {"text": "Mentions model cost tradeoffs (haiku for simple, higher-effort for complex)", "type": "content_check"}
+      ]
+    }
+  ]
+}

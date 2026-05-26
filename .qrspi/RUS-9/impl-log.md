@@ -21,3 +21,11 @@ permission-patterns.md
 **Deviations from structure.md:** none
 **Deviations from plan.md:** none
 **Notes for next session:** Slice 2 will need to reference evals/graphite-evals.json for the JSON schema and create evals/claude-cli-evals.json with 5 test cases.
+
+## Slice 2 — 2026-05-26
+**Tasks completed:** T10, T11
+**Tasks failed:** none
+**Tests:** python3 json verification → valid JSON, 5 evals; all 5 assertion types covered (command_check, content_check, flag_check, safety_check, workflow_check)
+**Deviations from structure.md:** none
+**Deviations from plan.md:** none
+**Notes for next session:** Slice 2 complete. All slices implemented.

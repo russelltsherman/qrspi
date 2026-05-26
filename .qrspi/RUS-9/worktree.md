@@ -33,5 +33,5 @@
 
 | Task ID | Description | Depends On | Plan Step | Cost | Status |
 |---------|-------------|------------|-----------|------|--------|
-| T10 | Create `evals/claude-cli-evals.json` with 5 test cases (CLI modes, sub-agents, sessions, output formats, cost control) | T9 | §2.10 | M | pending |
-| T11 | Verify Slice 2: valid JSON, 5+ cases, assertion types, distinct section coverage | T10 | §2.11 | S | pending |
+| T10 | Create `evals/claude-cli-evals.json` with 5 test cases (CLI modes, sub-agents, sessions, output formats, cost control) | T9 | §2.10 | M | done |
+| T11 | Verify Slice 2: valid JSON, 5+ cases, assertion types, distinct section coverage | T10 | §2.11 | S | done |
