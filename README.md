@@ -2,6 +2,10 @@
 
 A structured workflow for agentic feature development using Claude Code. QRSPI decomposes feature work into sequential phases — each producing a reviewable artifact — so that AI agents plan thoroughly before writing code and humans retain control at every decision point.
 
+## Inspiration
+
+This project was inspired by [Dex Horthy's talk](https://www.youtube.com/watch?v=YwZR6tc7qYg) on structured approaches to agentic software development.
+x
 ## Why
 
 LLMs are capable implementers but poor planners when given unbounded scope. They skip ahead, conflate problem definition with solution design, and lose coherence on large tasks. QRSPI constrains each phase to a specific job: the ticket defines the problem, questions probe the codebase, research gathers facts, design makes decisions, and implementation follows the plan. No phase sees more context than it needs.
