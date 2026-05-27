@@ -15,9 +15,10 @@ You are a state machine. Read the ticket's Linear status and execute the matchin
 1. Parse `$ARGUMENTS` to extract `<ticket-id>`.
 2. Fetch the ticket: call `mcp__linear-russelltsherman__get_issue` with identifier `<ticket-id>`.
 3. Read the ticket's status name.
-4. Set up the worktree (see [Worktree Setup](#worktree-setup)).
-5. Dispatch to the matching state section below.
-6. If the status doesn't match any known state, print the status and ask the user what to do.
+4. If status is `Done`, skip worktree setup and dispatch directly to [Cleanup](#state-done--cleanup).
+5. Set up the worktree (see [Worktree Setup](#worktree-setup)).
+6. Dispatch to the matching state section below.
+7. If the status doesn't match any known state, print the status and ask the user what to do.
 
 ---
 
@@ -91,7 +92,7 @@ When passing project root paths to sub-agents, use `WORKTREE_PATH` — NOT the m
 | `Plan Approved` | → [Run Implementation](#state-plan-approved--run-implementation) |
 | `Code Review` | → [Address Implementation Feedback](#state-code-review--address-feedback) |
 | `Code Approved` | → [Report Ready to Merge](#state-code-approved--ready-to-merge) |
-| `Done` | Print: "Ticket `<ticket-id>` is already complete." and exit. |
+| `Done` | → [Cleanup](#state-done--cleanup) |
 
 ---
 
@@ -329,15 +330,10 @@ After all slices are implemented, generate a PR summary for reviewers.
    - Paths to `impl-log.md`, `design.md` (risk register), `structure.md` (contracts)
    - Instruction: "Generate the PR summary. Write to `.qrspi/<ticket-id>/pr-summary.md`. Use `git diff main...HEAD --stat` and `git diff main...HEAD` to see all changes. Do not wait for approval."
 3. Verify `pr-summary.md` exists.
-4. Stage and commit the PR summary to the top slice branch:
+4. Stage and amend the PR summary into the last slice commit:
    ```bash
    git add .qrspi/<ticket-id>/pr-summary.md
-   gt modify -c --no-interactive -m "$(cat <<'EOF'
-   <ticket-id>: PR summary
-
-   Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-   EOF
-   )"
+   gt modify --no-interactive
    ```
 
 ### Submit and transition
@@ -433,12 +429,61 @@ To merge:
 5. Sync:
    gt sync --force --no-interactive
 
-6. Remove the worktree:
-   git worktree remove .worktrees/<ticket-id> --force
-   git worktree prune
+6. Update ticket status to Done in Linear.
 
-7. Update ticket status to Done in Linear.
+After marking Done, run `work on <ticket-id>` to clean up artifacts and worktree.
 ```
+
+---
+
+## State: Done → Cleanup
+
+Remove planning artifacts, impl-log, and PR summary from the repo after the ticket's PRs have been merged. This runs from `REPO_ROOT` on `main` — no worktree needed.
+
+1. Ensure you are on `main` in the main repo:
+   ```bash
+   cd "<REPO_ROOT>"
+   git checkout main
+   gt sync --force --no-interactive
+   ```
+
+2. Check whether artifacts still exist:
+   ```bash
+   ls -d .qrspi/<ticket-id>/ 2>/dev/null
+   ```
+   If the directory does not exist, print: "Ticket `<ticket-id>` is complete. No artifacts to clean up." and exit.
+
+3. Remove the artifact directory:
+   ```bash
+   git rm -r .qrspi/<ticket-id>/
+   ```
+
+4. Commit the removal:
+   ```bash
+   gt create <ticket-id>/cleanup --no-interactive -m "$(cat <<'EOF'
+   <ticket-id>: Remove planning artifacts
+
+   Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+   EOF
+   )"
+   ```
+
+5. Submit and merge the cleanup PR:
+   ```bash
+   gt submit --no-edit --no-interactive
+   gt merge --confirm --no-interactive
+   gt sync --force --no-interactive
+   ```
+
+6. Clean up the worktree if it still exists:
+   ```bash
+   if [ -d "<REPO_ROOT>/.worktrees/<ticket-id>" ]; then
+     git worktree remove "<REPO_ROOT>/.worktrees/<ticket-id>" --force
+     git worktree prune
+   fi
+   ```
+
+7. Print: "Ticket `<ticket-id>` cleanup complete. Artifacts removed, worktree pruned."
 
 ---
 
