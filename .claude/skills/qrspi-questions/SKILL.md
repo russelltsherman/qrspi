@@ -3,7 +3,7 @@ name: qrspi-questions
 description: Generate 8-15 targeted technical questions from a feature ticket. Use when starting a new QRSPI feature workflow or when the user says "questions for" a ticket.
 command: /qrspi-questions
 argument-hint: <ticket-id>
-allowed-tools: Read, Glob, Grep, Bash(wc:*), Bash(curl:*), mcp__linear-russelltsherman__get_issue, mcp__linear-russelltsherman__prepare_attachment_upload, mcp__linear-russelltsherman__create_attachment_from_upload
+allowed-tools: Read, Glob, Grep, mcp__linear-russelltsherman__get_issue
 ---
 
 # Questions Phase (Q)
@@ -34,13 +34,3 @@ Produce `.qrspi/$ARGUMENTS/questions.md` with 8-15 technical questions.
 ```
 
 After writing the file, tell the user: "Questions written to `.qrspi/<id>/questions.md`. Review, edit, then tell me 'approved' to proceed to Research."
-
-## Upload artifact
-
-After the closing message, upload the artifact to the Linear issue:
-1. Get the file size: run `wc -c < .qrspi/$ARGUMENTS/questions.md` via Bash
-2. Call `mcp__linear-russelltsherman__prepare_attachment_upload` with `issue: "$ARGUMENTS"`, `filename: "questions.md"`, `contentType: "text/markdown"`, `size: <byte count from step 1>`
-3. Run the curl PUT via Bash: `curl -s -X PUT --data-binary @.qrspi/$ARGUMENTS/questions.md` with all headers from the upload response, to the signed upload URL
-4. Call `mcp__linear-russelltsherman__create_attachment_from_upload` with `issue: "$ARGUMENTS"`, `assetUrl` from step 2, and `title: "Questions — $ARGUMENTS"`
-
-If any upload step fails, report the error but do NOT fail the phase — the local artifact is already written.

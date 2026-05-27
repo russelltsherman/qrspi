@@ -3,7 +3,7 @@ name: qrspi-implement
 description: Implement one vertical slice per invocation. Always start with a fresh context. Use after worktree is approved or after completing the previous slice.
 command: /qrspi-implement
 argument-hint: <ticket-id> <slice-number>
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash, mcp__linear-russelltsherman__prepare_attachment_upload, mcp__linear-russelltsherman__create_attachment_from_upload
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 ---
 
 # Implement Phase (I)
@@ -40,13 +40,3 @@ Do NOT read the full design, full plan, or earlier slice details beyond the note
 ```
 
 After completing, tell the user: "Slice <N> implemented. Tests: <result>. Run `/clear` then `/qrspi-implement <ticket-id> <next-slice>` for the next slice, or review the code first."
-
-## Upload artifact
-
-After the closing message, upload the implementation log to the Linear issue:
-1. Get the file size: run `wc -c < .qrspi/<ticket-id>/impl-log.md` via Bash
-2. Call `mcp__linear-russelltsherman__prepare_attachment_upload` with `issue: "<ticket-id>"`, `filename: "impl-log.md"`, `contentType: "text/markdown"`, `size: <byte count from step 1>`
-3. Run the curl PUT via Bash: `curl -s -X PUT --data-binary @.qrspi/<ticket-id>/impl-log.md` with all headers from the upload response, to the signed upload URL
-4. Call `mcp__linear-russelltsherman__create_attachment_from_upload` with `issue: "<ticket-id>"`, `assetUrl` from step 2, and `title: "Implementation Log — <ticket-id>"`
-
-If any upload step fails, report the error but do NOT fail the phase — the local artifact is already written.

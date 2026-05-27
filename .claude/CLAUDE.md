@@ -5,8 +5,8 @@
 This project uses the QRSPI structured workflow for feature development.
 Tickets are created as Linear issues (team: Russelltsherman, project: QRSPI).
 Ticket IDs follow Linear's format (e.g., RUS-42). Artifacts are stored locally
-in `.qrspi/<ticket-id>/` and uploaded to the corresponding Linear issue as
-attachments on phase approval.
+in `.qrspi/<ticket-id>/`. Linear is used for status tracking and phase-transition
+comments only — artifacts are not uploaded as attachments.
 
 ### Available skills (invoke with / or let Claude auto-invoke)
 
@@ -27,6 +27,12 @@ attachments on phase approval.
 - Start a fresh `/clear` session between implementation slices.
 - Use `/compact` if context grows large within a phase.
 - Use `/context` to check utilization. If over 40%, compact or start fresh.
+
+### Worktrees
+
+Each ticket gets an isolated git worktree at `.worktrees/<ticket-id>/`. This allows
+multiple agents to work on different tickets concurrently. The main repo checkout
+stays on `main`; all ticket work happens in worktrees. `.worktrees/` is gitignored.
 
 ### Codebase conventions
 
