@@ -14,6 +14,8 @@ CRITICAL: Do NOT read the ticket. The ticket is intentionally hidden during this
 
 Produce `.qrspi/$ARGUMENTS/research.md`.
 
+Read `.qrspi/templates/research.md` for the output format.
+
 ## Rules
 1. Answer each question with FACTS: file paths, function signatures, data types, call chains.
 2. Include code snippets (< 20 lines) as evidence with `file:line` citations.
@@ -22,26 +24,5 @@ Produce `.qrspi/$ARGUMENTS/research.md`.
 5. Document implicit contracts and dependency directions.
 6. Note inconsistencies between code and comments/docs.
 7. Include a "Discovered Patterns" section and an "Inconsistencies" section.
-
-## Output format
-```
-# Research — Codebase Map
-**Questions source:** questions.md @ <timestamp>
-**Generated:** <ISO-8601>
-**Status:** draft
-
-## Q1: <question text>
-**Answer:** <facts>
-**Evidence:** <code + file:line>
-**Dependencies:** <upstream/downstream>
-**Implicit contracts:** <conventions>
-...
-
-## Discovered Patterns
-...
-
-## Inconsistencies
-...
-```
 
 After writing, tell the user: "Research written to `.qrspi/<id>/research.md`. Review for factual accuracy, then tell me 'approved' to proceed to Design."

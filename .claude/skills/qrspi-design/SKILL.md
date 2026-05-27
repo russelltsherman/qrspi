@@ -15,6 +15,8 @@ Read ALL THREE inputs:
 
 Produce `.qrspi/$ARGUMENTS/design.md` — target ~200 lines, hard max 300.
 
+Read `.qrspi/templates/design.md` for the output format.
+
 ## Required sections
 1. **Current State** — every claim cites research.md: "(ref: Q1)"
 2. **Desired End State** — maps every acceptance criterion to system behavior

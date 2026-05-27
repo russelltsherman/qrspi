@@ -16,6 +16,8 @@ Read:
 
 Produce `.qrspi/$ARGUMENTS/pr-summary.md`.
 
+Read `.qrspi/templates/pr-summary.md` for the output format.
+
 ## Required sections
 1. **Summary** — 3-5 sentences: what changed, why, reviewer focus areas
 2. **Acceptance Criteria Mapping** — table: criterion -> implementation file -> test

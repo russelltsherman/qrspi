@@ -12,6 +12,8 @@ Read `.qrspi/$ARGUMENTS/plan.md`.
 
 Produce `.qrspi/$ARGUMENTS/worktree.md`.
 
+Read `.qrspi/templates/worktree.md` for the output format.
+
 ## Rules
 1. Each plan step maps to one task with: ID, Description, Depends On, Plan Step ref, Cost (S/M/L), Status.
 2. Group tasks into sessions. Each session has a Load manifest listing ONLY the artifacts needed.

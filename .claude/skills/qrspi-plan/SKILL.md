@@ -14,6 +14,8 @@ Read:
 
 Produce `.qrspi/$ARGUMENTS/plan.md`.
 
+Read `.qrspi/templates/plan.md` for the output format.
+
 ## Rules
 1. Each step is atomic: one file, one action.
 2. Steps reference exact types/signatures from structure.md.

@@ -25,18 +25,7 @@ Do NOT read the full design, full plan, or earlier slice details beyond the note
 4. If tests fail: fix (max 2 retries). If still failing, report failure with output, hypothesis, and whether it's your code or upstream.
 5. Follow existing codebase conventions.
 6. Do NOT refactor code outside your slice scope.
-7. Append results to `.qrspi/<ticket-id>/impl-log.md`.
+7. Append results to `.qrspi/<ticket-id>/impl-log.md` using the format in `.qrspi/templates/impl-log.md`.
 8. **HARD STOP on infrastructure errors.** If ANY command fails with permissions, auth, config, or tooling errors (EACCES, permission denied, token expired, command not found, config inaccessible): print the exact failing command and exact error output, then STOP. Do not execute another command. Do not investigate. Do not attempt workarounds of any kind — no alternate tools, no config changes, no env var overrides, no retries. Exit immediately. "Let me just try one thing" is explicitly forbidden.
-
-## impl-log entry format
-```
-## Slice <N> — <ISO-8601>
-**Tasks completed:** T1, T2, ...
-**Tasks failed:** none
-**Tests:** <command> → N passed, N failed
-**Deviations from structure.md:** none
-**Deviations from plan.md:** <describe or "none">
-**Notes for next session:** <facts the next slice needs>
-```
 
 After completing, tell the user: "Slice <N> implemented. Tests: <result>. Run `/clear` then `/qrspi-implement <ticket-id> <next-slice>` for the next slice, or review the code first."

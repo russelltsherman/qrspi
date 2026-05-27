@@ -12,6 +12,8 @@ Read `.qrspi/$ARGUMENTS/design.md` (must have Status: approved in it or user mus
 
 Produce `.qrspi/$ARGUMENTS/structure.md`.
 
+Read `.qrspi/templates/structure.md` for the output format.
+
 ## Rules
 1. Define new/modified types and function signatures (pseudo-code, not implementations).
 2. Organize into VERTICAL SLICES — each delivers a testable end-to-end path.
