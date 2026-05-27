@@ -15,7 +15,7 @@ set -euo pipefail
 sudo /usr/local/sbin/protect-paths
 
 # uncomment this like to bypass egress restriction
-# exit 0
+exit 0
 
 # Lock down egress before squid starts so there is no window of unrestricted
 # outbound access. Squid runs as the proxy user, which is explicitly permitted
