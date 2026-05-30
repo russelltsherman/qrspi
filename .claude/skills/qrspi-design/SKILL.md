@@ -3,33 +3,26 @@ name: qrspi-design
 description: Produce a design document by combining the ticket, answered questions, and codebase research. Use after research is approved. This is the brain-surgery phase.
 command: /qrspi-design
 argument-hint: <ticket-id>
-allowed-tools: Read, Glob, Grep, mcp__linear-russelltsherman__get_issue
+allowed-tools: Agent, Bash(pwd:*), mcp__linear-russelltsherman__get_issue
 ---
 
-# Design Discussion Phase (D)
+# /qrspi-design
 
-Read ALL THREE inputs:
-1. Fetch the ticket from Linear: call `mcp__linear-russelltsherman__get_issue` with `id: "$ARGUMENTS"`. Use the returned `title` and `description` fields.
-2. `.qrspi/$ARGUMENTS/questions.md`
-3. `.qrspi/$ARGUMENTS/research.md`
+Thin wrapper that fetches the ticket from Linear and spawns the `qrspi-design` agent. All prompt content lives in `.claude/agents/qrspi-design.md`.
 
-Produce `.qrspi/$ARGUMENTS/design.md` — target ~200 lines, hard max 300.
+## Steps
 
-Read `.qrspi/templates/design.md` for the output format.
-
-## Required sections
-1. **Current State** — every claim cites research.md: "(ref: Q1)"
-2. **Desired End State** — maps every acceptance criterion to system behavior
-3. **Delta** — concrete changes: new files, modified files, new queries
-4. **Pattern Decisions** — 2+ options per decision, table format, mark recommendation, flag any NEW PATTERN
-5. **Risk Register** — table with likelihood/impact/mitigation, minimum 2 entries
-6. **Open Questions** — things only a human can answer
-
-## Rules
-1. No code blocks. Prose and tables only.
-2. Every Current State sentence must have a `(ref: QN)` citation.
-3. Every acceptance criterion from the ticket appears in Desired End State.
-4. Pattern Decisions must reference existing codebase patterns from research. Flag new patterns explicitly.
-5. Write for editability, not persuasion. The human will rewrite sections.
-
-After writing, tell the user: "Design written to `.qrspi/<id>/design.md`. This is the highest-leverage review — check Pattern Decisions and Current State citations carefully. Edit anything that's wrong, then tell me 'approved'."
+1. Parse `$ARGUMENTS` to get `<ticket-id>`.
+2. Fetch the ticket: call `mcp__linear-russelltsherman__get_issue` with `id: "<ticket-id>"`. Capture `title` and `description` as `TICKET_CONTENT`.
+3. Resolve `REPO_ROOT` from `pwd`.
+4. Spawn the agent via the `Agent` tool:
+   - `subagent_type: qrspi-design`
+   - Prompt body containing the six inputs:
+     - `TICKET_ID = <ticket-id>`
+     - `TICKET_CONTENT = <title + description>`
+     - `QUESTIONS_PATH = <REPO_ROOT>/.qrspi/<ticket-id>/questions.md`
+     - `RESEARCH_PATH = <REPO_ROOT>/.qrspi/<ticket-id>/research.md`
+     - `DESIGN_PATH = <REPO_ROOT>/.qrspi/<ticket-id>/design.md`
+     - `TEMPLATE_PATH = <REPO_ROOT>/.qrspi/templates/design.md`
+5. Verify the artifact exists and is non-empty at `<REPO_ROOT>/.qrspi/<ticket-id>/design.md`.
+6. Tell the user: "Design written to `.qrspi/<ticket-id>/design.md`. This is the highest-leverage review — check Pattern Decisions and Current State citations carefully. Edit anything that's wrong, then tell me 'approved'."

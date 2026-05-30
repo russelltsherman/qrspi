@@ -3,26 +3,24 @@ name: qrspi-plan
 description: Write atomic implementation steps per vertical slice. Use after structure is approved.
 command: /qrspi-plan
 argument-hint: <ticket-id>
-allowed-tools: Read
+allowed-tools: Agent, Bash(pwd:*)
 ---
 
-# Plan Phase (P)
+# /qrspi-plan
 
-Read:
-1. `.qrspi/$ARGUMENTS/structure.md`
-2. `.qrspi/$ARGUMENTS/design.md` (for reference only)
+Thin wrapper that spawns the `qrspi-plan` agent. All prompt content lives in `.claude/agents/qrspi-plan.md`.
 
-Produce `.qrspi/$ARGUMENTS/plan.md`.
+## Steps
 
-Read `.qrspi/templates/plan.md` for the output format.
-
-## Rules
-1. Each step is atomic: one file, one action.
-2. Steps reference exact types/signatures from structure.md.
-3. Steps that modify existing code include Current and After signatures.
-4. Steps that create new files name the file and its purpose.
-5. Each slice ends with a Verify checkpoint with a runnable command.
-6. Total steps must be 100 or fewer. If exceeded, structure slices are too large — stop and say so.
-7. Include Rollback Notes for DB migrations, config changes, destructive ops.
-
-After writing, tell the user: "Plan written to `.qrspi/<id>/plan.md`. This should be a spot-check, not a deep review — alignment happened during Design. Tell me 'approved' to proceed to WorkTree."
+1. Parse `$ARGUMENTS` to get `<ticket-id>`.
+2. Resolve `REPO_ROOT` from `pwd`.
+3. Spawn the agent via the `Agent` tool:
+   - `subagent_type: qrspi-plan`
+   - Prompt body containing the five inputs:
+     - `TICKET_ID = <ticket-id>`
+     - `STRUCTURE_PATH = <REPO_ROOT>/.qrspi/<ticket-id>/structure.md`
+     - `DESIGN_PATH = <REPO_ROOT>/.qrspi/<ticket-id>/design.md`
+     - `PLAN_PATH = <REPO_ROOT>/.qrspi/<ticket-id>/plan.md`
+     - `TEMPLATE_PATH = <REPO_ROOT>/.qrspi/templates/plan.md`
+4. Verify the artifact exists and is non-empty at `<REPO_ROOT>/.qrspi/<ticket-id>/plan.md`.
+5. Tell the user: "Plan written to `.qrspi/<ticket-id>/plan.md`. This should be a spot-check, not a deep review — alignment happened during Design. Tell me 'approved' to proceed to WorkTree."

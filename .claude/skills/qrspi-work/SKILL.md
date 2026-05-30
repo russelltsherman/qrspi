@@ -13,12 +13,15 @@ You are a state machine. Read the ticket's Linear status and execute the matchin
 ## Entry Point
 
 1. Parse `$ARGUMENTS` to extract `<ticket-id>`.
-2. Fetch the ticket: call `mcp__linear-russelltsherman__get_issue` with identifier `<ticket-id>`.
-3. Read the ticket's status name.
-4. If status is `Done`, skip worktree setup and dispatch directly to [Cleanup](#state-done--cleanup).
-5. Set up the worktree (see [Worktree Setup](#worktree-setup)).
-6. Dispatch to the matching state section below.
-7. If the status doesn't match any known state, print the status and ask the user what to do.
+2. **ALWAYS re-read the Linear ticket status, even if you have it in context from a prior invocation.** The ticket's state machine is authoritative and may have changed since the last call. Never skip this step or trust cached context.
+3. Fetch the ticket: call `mcp__linear-russelltsherman__get_issue` with identifier `<ticket-id>`.
+   - If the call fails, retry **once**.
+   - If the retry fails, this is a **hard stop error** — print the exact error and exit. Do not proceed with any other work.
+4. Read the ticket's status name.
+5. If status is `Done`, skip worktree setup and dispatch directly to [Cleanup](#state-done--cleanup).
+6. Set up the worktree (see [Worktree Setup](#worktree-setup)).
+7. Dispatch to the matching state section below.
+8. If the status doesn't match any known state, print the status and ask the user what to do.
 
 ---
 
@@ -114,9 +117,9 @@ The worktree setup (above) has already placed you on the correct branch:
    ```bash
    pwd | grep -q '.worktrees/<ticket-id>' || { echo "ERROR: not in worktree"; exit 1; }
    ```
-2. Sync the branch with remote:
+2. Sync the branch with remote (non-destructive — never use `gt sync` here; it deletes branches whose PRs are merged/closed, destroying ticket work-in-progress):
    ```bash
-   gt sync --force --no-interactive
+   gt get --no-interactive 2>&1 || true
    ```
 3. Check for existing artifacts to determine resume point (see [Resumability](#resumability)).
 
@@ -128,13 +131,12 @@ Save the ticket content from the Linear fetch — you'll pass it to some sub-age
 
 **Phase 1 — Questions**
 
-1. Read `.claude/skills/qrspi-questions/SKILL.md` for the phase instructions.
-2. Spawn a sub-agent (Agent tool) with:
-   - The core instructions from the skill file (omit frontmatter and approval messaging)
-   - The ticket content
-   - Instruction: "Write `<WORKTREE_PATH>/.qrspi/<ticket-id>/questions.md`. Do not wait for approval. Do not run any git commands."
-   - Instruction: "Generate questions FROM the ticket content only. Do NOT explore the codebase — that is the research phase's job. Do not use Read, Glob, Grep, or Bash to look at files. Your only input is the ticket. Your questions should ask what to investigate, not pre-answer by looking."
-3. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/questions.md` exists and is non-empty.
+1. Spawn the questions agent via the Agent tool with `subagent_type: qrspi-questions` and `mode: "auto"`. Build the prompt as an input contract:
+   - `TICKET_ID = <ticket-id>`
+   - `TICKET_CONTENT = <title + description from the Linear fetch>`
+   - `ARTIFACT_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/questions.md`
+   - `TEMPLATE_PATH = <WORKTREE_PATH>/.qrspi/templates/questions.md`
+2. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/questions.md` exists and is non-empty.
 4. Stage and create the planning commit (this is the ONLY `gt modify -c` during planning — all subsequent artifacts amend this commit):
    ```bash
    git add .qrspi/<ticket-id>/questions.md
@@ -145,17 +147,18 @@ Save the ticket content from the Linear fetch — you'll pass it to some sub-age
    EOF
    )"
    ```
-5. Print: "Questions generated. Moving to Research..."
+4. Print: "Questions generated. Moving to Research..."
 
 **Phase 2 — Research**
 
-1. Read `.claude/skills/qrspi-research/SKILL.md` for the phase instructions.
-2. Spawn a sub-agent with:
-   - The core instructions from the skill file
-   - Absolute path to `<WORKTREE_PATH>/.qrspi/<ticket-id>/questions.md`
-   - **DO NOT include the ticket content.** The research firewall is critical — the research agent works only from questions, never from the ticket. This prevents anchoring bias.
-   - Instruction: "Write `<WORKTREE_PATH>/.qrspi/<ticket-id>/research.md`. Do not call any Linear MCP tools. Do not wait for approval. Do not run any git commands."
-3. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/research.md` exists and is non-empty.
+1. Spawn the research agent via the Agent tool with `subagent_type: qrspi-research` and `mode: "auto"`. Build the prompt as an input contract — **DO NOT include the ticket content.** The research firewall is critical and is also enforced by the agent's tool definition (no Linear MCP, no ticket reads):
+   - `TICKET_ID = <ticket-id>`
+   - `QUESTIONS_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/questions.md`
+   - `RESEARCH_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/research.md`
+   - `TEMPLATE_PATH = <WORKTREE_PATH>/.qrspi/templates/research.md`
+   - `REPO_ROOT = <WORKTREE_PATH>`
+   - Append the project scope restriction block from the section below to the end of the prompt. Replace `REPO_ROOT_VALUE` with the actual `REPO_ROOT` path.
+2. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/research.md` exists and is non-empty.
 4. Stage and amend the planning commit:
    ```bash
    git add .qrspi/<ticket-id>/research.md
@@ -166,39 +169,54 @@ Save the ticket content from the Linear fetch — you'll pass it to some sub-age
    EOF
    )"
    ```
-5. Print: "Research complete. Moving to Design..."
+3. Print: "Research complete. Moving to Design..."
 
 **Phase 3 — Design**
 
-1. Read `.claude/skills/qrspi-design/SKILL.md`.
-2. Spawn a sub-agent with: ticket content, absolute paths to `<WORKTREE_PATH>/.qrspi/<ticket-id>/questions.md` and `<WORKTREE_PATH>/.qrspi/<ticket-id>/research.md`. Instruction: "Write `<WORKTREE_PATH>/.qrspi/<ticket-id>/design.md`."
-3. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/design.md` exists.
-4. Stage and amend the planning commit: `git add .qrspi/<ticket-id>/design.md` then `gt modify --no-interactive -m "$(cat <<'EOF'`... `<ticket-id>: Planning` ...`EOF`)"`
-5. Print: "Design complete. Moving to Structure..."
+1. Spawn the design agent via the Agent tool with `subagent_type: qrspi-design` and `mode: "auto"`. Input contract:
+   - `TICKET_ID = <ticket-id>`
+   - `TICKET_CONTENT = <title + description from the Linear fetch>`
+   - `QUESTIONS_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/questions.md`
+   - `RESEARCH_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/research.md`
+   - `DESIGN_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/design.md`
+   - `TEMPLATE_PATH = <WORKTREE_PATH>/.qrspi/templates/design.md`
+2. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/design.md` exists.
+3. Stage and amend the planning commit: `git add .qrspi/<ticket-id>/design.md` then `gt modify --no-interactive -m "$(cat <<'EOF'`... `<ticket-id>: Planning` ...`EOF`)"`
+4. Print: "Design complete. Moving to Structure..."
 
 **Phase 4 — Structure**
 
-1. Read `.claude/skills/qrspi-structure/SKILL.md`.
-2. Spawn a sub-agent with: absolute path to `<WORKTREE_PATH>/.qrspi/<ticket-id>/design.md`. Instruction: "Write `<WORKTREE_PATH>/.qrspi/<ticket-id>/structure.md`."
-3. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/structure.md` exists.
-4. Stage and amend the planning commit: `git add .qrspi/<ticket-id>/structure.md` then amend with message `<ticket-id>: Planning`.
-5. Print: "Structure complete. Moving to Plan..."
+1. Spawn the structure agent via the Agent tool with `subagent_type: qrspi-structure` and `mode: "auto"`. Input contract:
+   - `TICKET_ID = <ticket-id>`
+   - `DESIGN_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/design.md`
+   - `STRUCTURE_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/structure.md`
+   - `TEMPLATE_PATH = <WORKTREE_PATH>/.qrspi/templates/structure.md`
+2. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/structure.md` exists.
+3. Stage and amend the planning commit: `git add .qrspi/<ticket-id>/structure.md` then amend with message `<ticket-id>: Planning`.
+4. Print: "Structure complete. Moving to Plan..."
 
 **Phase 5 — Plan**
 
-1. Read `.claude/skills/qrspi-plan/SKILL.md`.
-2. Spawn a sub-agent with: absolute paths to `<WORKTREE_PATH>/.qrspi/<ticket-id>/structure.md` and `<WORKTREE_PATH>/.qrspi/<ticket-id>/design.md`. Instruction: "Write `<WORKTREE_PATH>/.qrspi/<ticket-id>/plan.md`."
-3. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/plan.md` exists.
-4. Stage and amend the planning commit: `git add .qrspi/<ticket-id>/plan.md` then amend with message `<ticket-id>: Planning`.
-5. Print: "Plan complete. Moving to Work Tree..."
+1. Spawn the plan agent via the Agent tool with `subagent_type: qrspi-plan` and `mode: "auto"`. Input contract:
+   - `TICKET_ID = <ticket-id>`
+   - `STRUCTURE_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/structure.md`
+   - `DESIGN_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/design.md`
+   - `PLAN_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/plan.md`
+   - `TEMPLATE_PATH = <WORKTREE_PATH>/.qrspi/templates/plan.md`
+2. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/plan.md` exists.
+3. Stage and amend the planning commit: `git add .qrspi/<ticket-id>/plan.md` then amend with message `<ticket-id>: Planning`.
+4. Print: "Plan complete. Moving to Work Tree..."
 
 **Phase 6 — Work Tree**
 
-1. Read `.claude/skills/qrspi-worktree/SKILL.md`.
-2. Spawn a sub-agent with: absolute path to `<WORKTREE_PATH>/.qrspi/<ticket-id>/plan.md`. Instruction: "Write `<WORKTREE_PATH>/.qrspi/<ticket-id>/worktree.md`."
-3. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/worktree.md` exists.
-4. Stage and amend the planning commit: `git add .qrspi/<ticket-id>/worktree.md` then amend with message `<ticket-id>: Planning`.
-5. Print: "Work tree complete. Submitting planning PR..."
+1. Spawn the worktree agent via the Agent tool with `subagent_type: qrspi-worktree` and `mode: "auto"`. Input contract:
+   - `TICKET_ID = <ticket-id>`
+   - `PLAN_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/plan.md`
+   - `WORKTREE_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/worktree.md`
+   - `TEMPLATE_PATH = <WORKTREE_PATH>/.qrspi/templates/worktree.md`
+2. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/worktree.md` exists.
+3. Stage and amend the planning commit: `git add .qrspi/<ticket-id>/worktree.md` then amend with message `<ticket-id>: Planning`.
+4. Print: "Work tree complete. Submitting planning PR..."
 
 ### Submit and transition
 
@@ -236,8 +254,14 @@ Check the planning PR for review comments. If there are actionable comments, add
    ```
 
 5. If no reviews, or all reviews are approvals with no unresolved comments:
-   Print: "Planning PR has no actionable feedback. Waiting for human review."
-   Exit.
+   a. Re-check Linear status (it may have been updated by the human between calls):
+      ```bash
+      mcp__linear-russelltsherman__get_issue --id "<ticket-id>"
+      ```
+      (Call `mcp__linear-russelltsherman__get_issue` with the ticket ID and read the `status` field.)
+   b. If status is now `Plan Approved`, print: "PR approved. Moving to implementation…" and dispatch to [Run Implementation](#state-plan-approved--run-implementation).
+   c. If status is still `Plan Review`, print: "Planning PR approved with no comments. Waiting for Linear status to transition to Plan Approved — update it manually in Linear, or the next invocation will proceed automatically."
+   d. Exit.
 
 6. If there are actionable review comments:
    a. Ensure you're on the planning branch:
@@ -272,9 +296,21 @@ Implement all slices from `structure.md` and submit a stacked PR per slice.
    ```bash
    git branch --show-current | grep -q '<ticket-id>/planning' || gt checkout <ticket-id>/planning --no-interactive
    ```
-2. Read `.qrspi/<ticket-id>/structure.md` to count slices and extract each slice's goal.
-3. Read `.qrspi/<ticket-id>/plan.md` and `.qrspi/<ticket-id>/worktree.md`.
-4. Check for existing slice branches (for resumability).
+2. Validate planning artifacts exist:
+   ```bash
+   for f in structure.md plan.md worktree.md; do
+     if [ ! -f ".qrspi/<ticket-id>/$f" ] || [ ! -s ".qrspi/<ticket-id>/$f" ]; then
+       echo "ERROR: Planning artifact missing or empty: .qrspi/<ticket-id>/$f"
+       echo "Ticket status is Plan Approved but planning artifacts are missing."
+       echo "This can happen if the planning branch was deleted by gt sync."
+       echo "Please regenerate planning artifacts by running /qrspi-work <ticket-id> again."
+       exit 1
+     fi
+   done
+   ```
+3. Read `.qrspi/<ticket-id>/structure.md` to count slices and extract each slice's goal.
+4. Read `.qrspi/<ticket-id>/plan.md` and `.qrspi/<ticket-id>/worktree.md`.
+5. Check for existing slice branches (for resumability).
 
 ### Slice execution
 
@@ -289,15 +325,22 @@ For each slice N (starting from 1):
    gt checkout <parent-branch> --no-interactive
    ```
 
-3. Read `.claude/skills/qrspi-implement/SKILL.md` for implementation instructions.
+3. Extract slice-scoped sections from the planning artifacts:
+   - `STRUCTURE_SLICE` ← Types + Contracts + Slice N sections from `<WORKTREE_PATH>/.qrspi/<ticket-id>/structure.md`
+   - `PLAN_SLICE` ← Slice N section from `<WORKTREE_PATH>/.qrspi/<ticket-id>/plan.md`
+   - `WORKTREE_SESSION` ← session for slice N from `<WORKTREE_PATH>/.qrspi/<ticket-id>/worktree.md`
+   - `PREVIOUS_NOTES` ← "Notes for next session" from the previous slice's impl-log entry, or empty for slice 1
 
-4. Spawn a sub-agent with ONLY these inputs (context firewall):
-   - From `structure.md`: the Types, Contracts, and Slice N sections only
-   - From `plan.md`: the Slice N section only
-   - From `worktree.md`: the session for this slice only
-   - From `impl-log.md`: the "Notes for next session" from the previous slice (if exists)
-   - Instruction: "Before any other command, run: `cd <WORKTREE_PATH>`. ALL file paths must be absolute, prefixed with `<WORKTREE_PATH>/`."
-   - Instruction: "Implement slice N. Write code, run tests, append results to `<WORKTREE_PATH>/.qrspi/<ticket-id>/impl-log.md`. Do not commit. Do not run git commands."
+4. Spawn the implement agent via the Agent tool with `subagent_type: qrspi-implement` and `mode: "auto"`. Input contract (see [Project scope](#project-scope) for the scope restriction block to append):
+   - `TICKET_ID = <ticket-id>`
+   - `SLICE_NUMBER = N`
+   - `WORKTREE_DIR = <WORKTREE_PATH>`
+   - `STRUCTURE_SLICE = <extracted text>`
+   - `PLAN_SLICE = <extracted text>`
+   - `WORKTREE_SESSION = <extracted text>`
+   - `PREVIOUS_NOTES = <extracted text or empty>`
+   - `IMPL_LOG_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/impl-log.md`
+   - `IMPL_LOG_TEMPLATE_PATH = <WORKTREE_PATH>/.qrspi/templates/impl-log.md`
 
 5. After the sub-agent completes, identify ALL changed files, stage them, and create the slice branch:
    ```bash
@@ -329,13 +372,15 @@ For each slice N (starting from 1):
 
 After all slices are implemented, generate a PR summary for reviewers.
 
-1. Read `.claude/skills/qrspi-pr/SKILL.md` for the PR summary instructions.
-2. Spawn a sub-agent with:
-   - The PR skill instructions (omit frontmatter and approval messaging)
-   - Absolute paths to `<WORKTREE_PATH>/.qrspi/<ticket-id>/impl-log.md`, `<WORKTREE_PATH>/.qrspi/<ticket-id>/design.md` (risk register), `<WORKTREE_PATH>/.qrspi/<ticket-id>/structure.md` (contracts)
-   - Instruction: "Before any other command, run: `cd <WORKTREE_PATH>`. ALL file paths must be absolute, prefixed with `<WORKTREE_PATH>/`."
-   - Instruction: "Generate the PR summary. Write to `<WORKTREE_PATH>/.qrspi/<ticket-id>/pr-summary.md`. Use `git diff main...HEAD --stat` and `git diff main...HEAD` to see all changes. Do not wait for approval."
-3. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/pr-summary.md` exists.
+1. Spawn the PR agent via the Agent tool with `subagent_type: qrspi-pr` and `mode: "auto"`. Input contract:
+   - `TICKET_ID = <ticket-id>`
+   - `IMPL_LOG_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/impl-log.md`
+   - `DESIGN_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/design.md`
+   - `STRUCTURE_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/structure.md`
+   - `PR_SUMMARY_PATH = <WORKTREE_PATH>/.qrspi/<ticket-id>/pr-summary.md`
+   - `TEMPLATE_PATH = <WORKTREE_PATH>/.qrspi/templates/pr-summary.md`
+   - `REPO_ROOT = <WORKTREE_PATH>`
+2. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/pr-summary.md` exists.
 4. Stage and amend the PR summary into the last slice commit:
    ```bash
    git add .qrspi/<ticket-id>/pr-summary.md
@@ -382,8 +427,14 @@ Check the implementation PR stack for review comments and address them.
    ```
 
 4. If no actionable comments on any PR:
-   Print: "Implementation PRs have no actionable feedback. Waiting for human review."
-   Exit.
+   a. Re-check Linear status (it may have been updated by the human between calls):
+      ```bash
+      mcp__linear-russelltsherman__get_issue --id "<ticket-id>"
+      ```
+      (Call `mcp__linear-russelltsherman__get_issue` with the ticket ID and read the `status` field.)
+   b. If status is now `Code Approved`, print: "PRs approved. Moving to merge instructions…" and dispatch to [Report Ready to Merge](#state-code-approved--ready-to-merge).
+   c. If status is still `Code Review`, print: "Implementation PRs have no actionable feedback. Waiting for Linear status to transition to Code Approved — update it manually in Linear, or the next invocation will proceed automatically."
+   d. Exit.
 
 5. If there are actionable comments:
    a. Group comments by slice.
@@ -513,38 +564,68 @@ If slice branches partially exist, resume from the first missing slice.
 
 ## Sub-Agent Rules
 
-1. Read the per-phase SKILL.md for the phase you're about to run.
-2. Extract core instructions — skip frontmatter and "After writing" approval messaging.
-3. Build the prompt with the extracted instructions, specific inputs, and these directives:
-   - "Before any other command, run: `cd <WORKTREE_PATH>`"
-   - "ALL file paths must be absolute, prefixed with `<WORKTREE_PATH>/`. This includes paths passed to Read, Write, Edit, Glob, and Grep tools. Never use relative paths."
-   - "Write the artifact to `<WORKTREE_PATH>/.qrspi/<ticket-id>/<artifact>.md`. Do not wait for approval. Do not commit or run any git/gt commands."
-   - "Do not read, write, or explore files outside `<WORKTREE_PATH>/`."
-4. Use the Agent tool with `mode: "auto"`.
-5. After the sub-agent completes, verify the output file exists at its **absolute** worktree path (`<WORKTREE_PATH>/.qrspi/<ticket-id>/<artifact>.md`) and is non-empty.
-6. If the sub-agent fails, print the error and STOP. Do not update Linear status on failure.
+The orchestrator dispatches each phase to a purpose-built agent defined in `.claude/agents/qrspi-<phase>.md`. Each agent has its own tool lockdown and hard-constraint block. The orchestrator does NOT read phase SKILL.md files or hand-engineer prompts — it spawns by `subagent_type` with a structured input contract.
 
-### Error surfacing (MUST include verbatim in every sub-agent prompt)
-
-Include this exact block in every sub-agent prompt:
-
-> HARD CONSTRAINT: If any command fails with a permissions error, auth failure, config error, or tooling error (EACCES, permission denied, token expired, command not found, config inaccessible): STOP IMMEDIATELY. Print the exact failing command and exact error output. Do not execute any further commands. Do not investigate. Do not attempt workarounds. Do not use alternate tools. Do not modify configuration. Exit and report the error. This is non-negotiable — "let me just try one thing" is the exact failure mode this rule prevents.
-
-### Project scope
-
-All sub-agents are scoped to the ticket's worktree directory (`WORKTREE_PATH`). Every sub-agent prompt must include the absolute `WORKTREE_PATH` and instruct the agent to:
-1. Run `cd <WORKTREE_PATH>` before any other command
-2. Use absolute paths (prefixed with `<WORKTREE_PATH>/`) for ALL file operations
-
-Sub-agents must not read, explore, or reference files outside the worktree. If the ticket references external systems or repos, the sub-agent should note the reference but not navigate to those locations.
-
-### Questions phase — no codebase exploration
-
-The questions sub-agent generates questions FROM the ticket content alone. It does not explore the codebase — that is the research phase's job. The questions agent should not use Read, Glob, Grep, or Bash to look at project files. Its only input is the ticket content, and its only output is questions about what to investigate.
+1. Spawn via the `Agent` tool with `subagent_type: qrspi-<phase>` and `mode: "auto"`.
+2. Build the prompt as a labelled input contract — see each phase section above for the exact inputs that agent expects.
+3. Use absolute paths prefixed with `<WORKTREE_PATH>/` for every artifact, template, and repo-root reference.
+4. After the agent returns, verify the output artifact exists at its absolute worktree path and is non-empty.
+5. If the sub-agent fails or its artifact is missing, print the error and STOP. Do not update Linear status on failure.
 
 ### Research firewall
 
-The research sub-agent must never receive ticket content or have access to Linear MCP tools. Its only input is `questions.md`. This is a deliberate design constraint to prevent anchoring bias — the research phase maps the codebase from questions alone.
+The research agent's tool definition includes no Linear MCP and forbids reading the ticket. The orchestrator must also NOT include `TICKET_CONTENT` in the research agent's input contract — only `QUESTIONS_PATH`, `RESEARCH_PATH`, `TEMPLATE_PATH`, and `REPO_ROOT`. Defense in depth.
+
+### Project scope firewall (research)
+
+The research agent MUST NOT read files outside the project repo. When building the research agent prompt, append this constraint block. **Replace all occurrences of `REPO_ROOT_VALUE` with the actual `REPO_ROOT` value** (e.g., `/workspaces/qrspi/.worktrees/RUS-5`) before including it.
+
+```
+## Project scope restriction
+
+You are researching the codebase for a specific ticket. ALL file reads must be inside the project repository at REPO_ROOT_VALUE/.
+
+BEFORE reading ANY file, validate its path starts with REPO_ROOT_VALUE/. If it does not, skip it and note the gap.
+
+DO NOT read:
+- ~/.claude/, ~/.config/, ~/ (home directory)
+- System config files (/etc/, /usr/, /var/)
+- Files in any other project's directories
+- Global skill definitions outside the repo
+- Any path that does not start with REPO_ROOT_VALUE/
+
+This is a hard boundary. If the questions imply information that may live outside the repo, note it as an unanswerable gap rather than escaping the project.
+```
+
+Always include this block in every research agent prompt. It is the orchestrator-level complement to the agent's own tool-level restrictions.
+
+### Questions firewall
+
+The questions agent's tool definition excludes `Glob`, `Grep`, and `Bash` so codebase exploration is structurally impossible. No special orchestrator handling required.
+
+### Project scope
+
+Every agent's hard-constraints block forbids reads outside its inputs. Pass absolute worktree-prefixed paths only; do not pass relative paths to sub-agents.
+
+**When spawning implement agents, append this constraint block to their prompt. Replace all occurrences of `WORKTREE_DIR_VALUE` with the actual `WORKTREE_DIR` value before including it.**
+
+```
+## Project scope restriction
+
+You are implementing work for a ticket. ALL file reads and modifications must be inside the project repository at WORKTREE_DIR_VALUE/.
+
+BEFORE reading or writing ANY file, validate its path starts with WORKTREE_DIR_VALUE/. If it does not, skip it and report the error.
+
+DO NOT modify:
+- ~/.claude/, ~/.config/, ~/ (home directory)
+- System config files (/etc/, /usr/, /var/)
+- Global skill definitions in ~/.claude/skills/
+- Any path that does not start with WORKTREE_DIR_VALUE/
+
+The plan may contain paths like `~/.claude/skills/...`. If the plan targets global scope, refuse to make those changes and report the issue. The deliverable for a ticket must live within the project repo.
+
+This is a hard boundary. If the plan references files outside the project, report the error and STOP.
+```
 
 ---
 
