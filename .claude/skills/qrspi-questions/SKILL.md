@@ -3,23 +3,24 @@ name: qrspi-questions
 description: Generate 8-15 targeted technical questions from a feature ticket. Use when starting a new QRSPI feature workflow or when the user says "questions for" a ticket.
 command: /qrspi-questions
 argument-hint: <ticket-id>
-allowed-tools: Read, Glob, Grep, mcp__linear-russelltsherman__get_issue
+allowed-tools: Agent, Bash(pwd:*), mcp__linear-russelltsherman__get_issue
 ---
 
-# Questions Phase (Q)
+# /qrspi-questions
 
-Fetch the ticket from Linear: call `mcp__linear-russelltsherman__get_issue` with `id: "$ARGUMENTS"`. Use the returned `title` and `description` fields as the ticket content.
+Thin wrapper that fetches the ticket from Linear and spawns the `qrspi-questions` agent. All prompt content lives in `.claude/agents/qrspi-questions.md`.
 
-Produce `.qrspi/$ARGUMENTS/questions.md` with 8-15 technical questions.
+## Steps
 
-Read `.qrspi/templates/questions.md` for the output format.
-
-## Rules
-1. Questions must be answerable by reading the codebase, not by speculation.
-2. Categorize into: Data Flow, API Surface, State Management, Edge Cases, Testing, Observability.
-3. Each question names a specific file, module, or "the module responsible for X".
-4. Do NOT propose solutions or architectures.
-5. Include at least 2 Edge Cases questions and 1 Observability question.
-6. No question uses solution language: "should we", "we could", "best way to".
-
-After writing the file, tell the user: "Questions written to `.qrspi/<id>/questions.md`. Review, edit, then tell me 'approved' to proceed to Research."
+1. Parse `$ARGUMENTS` to get `<ticket-id>` (e.g., `RUS-42`).
+2. Fetch the ticket: call `mcp__linear-russelltsherman__get_issue` with `id: "<ticket-id>"`. Capture `title` and `description` as `TICKET_CONTENT`.
+3. Resolve `REPO_ROOT` from `pwd` (or the worktree path if running inside one).
+4. Spawn the agent via the `Agent` tool:
+   - `subagent_type: qrspi-questions`
+   - Prompt body containing the four inputs:
+     - `TICKET_ID = <ticket-id>`
+     - `TICKET_CONTENT = <title + description>`
+     - `ARTIFACT_PATH = <REPO_ROOT>/.qrspi/<ticket-id>/questions.md`
+     - `TEMPLATE_PATH = <REPO_ROOT>/.qrspi/templates/questions.md`
+5. After the agent returns, verify the artifact exists and is non-empty at `<REPO_ROOT>/.qrspi/<ticket-id>/questions.md`. If missing or empty, report the error and stop.
+6. Tell the user: "Questions written to `.qrspi/<ticket-id>/questions.md`. Review, edit, then tell me 'approved' to proceed to Research."

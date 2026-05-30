@@ -3,29 +3,33 @@ name: qrspi-implement
 description: Implement one vertical slice per invocation. Always start with a fresh context. Use after worktree is approved or after completing the previous slice.
 command: /qrspi-implement
 argument-hint: <ticket-id> <slice-number>
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash
+allowed-tools: Agent, Read, Bash(pwd:*)
 ---
 
-# Implement Phase (I)
+# /qrspi-implement
 
-Parse $ARGUMENTS to extract <ticket-id> and <slice-number>.
+Thin wrapper that extracts slice-scoped sections from the planning artifacts and spawns the `qrspi-implement` agent in a fresh context. All implementation logic lives in `.claude/agents/qrspi-implement.md`.
 
-Read ONLY these files (context firewall):
-1. `.qrspi/<ticket-id>/structure.md` — only the Types, Contracts, and Slice <slice-number> sections
-2. `.qrspi/<ticket-id>/plan.md` — only the Slice <slice-number> section
-3. `.qrspi/<ticket-id>/worktree.md` — only the session for this slice
-4. `.qrspi/<ticket-id>/impl-log.md` — only the "Notes for next session" from the previous slice (if any)
+## Steps
 
-Do NOT read the full design, full plan, or earlier slice details beyond the notes.
-
-## Rules
-1. Implement ONLY the tasks in this session. Do not anticipate future slices.
-2. Match types and signatures from structure.md exactly. If you must deviate, STOP and report before changing.
-3. After completing tasks, run the verification command from the plan.
-4. If tests fail: fix (max 2 retries). If still failing, report failure with output, hypothesis, and whether it's your code or upstream.
-5. Follow existing codebase conventions.
-6. Do NOT refactor code outside your slice scope.
-7. Append results to `.qrspi/<ticket-id>/impl-log.md` using the format in `.qrspi/templates/impl-log.md`.
-8. **HARD STOP on infrastructure errors.** If ANY command fails with permissions, auth, config, or tooling errors (EACCES, permission denied, token expired, command not found, config inaccessible): print the exact failing command and exact error output, then STOP. Do not execute another command. Do not investigate. Do not attempt workarounds of any kind — no alternate tools, no config changes, no env var overrides, no retries. Exit immediately. "Let me just try one thing" is explicitly forbidden.
-
-After completing, tell the user: "Slice <N> implemented. Tests: <result>. Run `/clear` then `/qrspi-implement <ticket-id> <next-slice>` for the next slice, or review the code first."
+1. Parse `$ARGUMENTS` to get `<ticket-id>` and `<slice-number>`.
+2. Resolve `REPO_ROOT` from `pwd`. The wrapper expects to be invoked from the worktree directory; `REPO_ROOT` equals the worktree path.
+3. Read these files and extract only the slice-scoped sections:
+   - `.qrspi/<ticket-id>/structure.md` → Types + Contracts + Slice `<slice-number>` sections → `STRUCTURE_SLICE`
+   - `.qrspi/<ticket-id>/plan.md` → Slice `<slice-number>` section → `PLAN_SLICE`
+   - `.qrspi/<ticket-id>/worktree.md` → session for this slice → `WORKTREE_SESSION`
+   - `.qrspi/<ticket-id>/impl-log.md` → "Notes for next session" from the previous slice's entry, if any → `PREVIOUS_NOTES`
+4. Spawn the agent via the `Agent` tool:
+   - `subagent_type: qrspi-implement`
+   - Prompt body containing the nine inputs:
+     - `TICKET_ID = <ticket-id>`
+     - `SLICE_NUMBER = <slice-number>`
+     - `WORKTREE_DIR = <REPO_ROOT>`
+     - `STRUCTURE_SLICE = <extracted text>`
+     - `PLAN_SLICE = <extracted text>`
+     - `WORKTREE_SESSION = <extracted text>`
+     - `PREVIOUS_NOTES = <extracted text or empty>`
+     - `IMPL_LOG_PATH = <REPO_ROOT>/.qrspi/<ticket-id>/impl-log.md`
+     - `IMPL_LOG_TEMPLATE_PATH = <REPO_ROOT>/.qrspi/templates/impl-log.md`
+5. After the agent returns, verify `<REPO_ROOT>/.qrspi/<ticket-id>/impl-log.md` was updated with a new entry for this slice.
+6. Tell the user: "Slice `<slice-number>` implemented. Tests: `<result from agent summary>`. Run `/clear` then `/qrspi-implement <ticket-id> <next-slice>` for the next slice, or review the code first."
