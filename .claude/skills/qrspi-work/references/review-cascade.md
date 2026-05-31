@@ -5,7 +5,20 @@ may be invalidated. The planning artifacts form a dependency chain:
 
 ```
 Questions → Research → Design → Structure → Plan → Work Tree
+└────────── design half ──────┘└──────── plan half ────────┘
 ```
+
+## Two gates, two cascade scopes
+
+Planning has two human review gates. Which artifacts exist — and therefore how far a
+cascade can reach — depends on which gate the feedback came from:
+
+- **Design Review** (after the design half): only Questions, Research, and Design exist.
+  Cascade is bounded to those three. There is no Structure/Plan/Work Tree to re-run yet,
+  so a design-decision change here simply lands in `design.md` and is carried into the
+  plan half when the ticket reaches `Design Approved`.
+- **Plan Review** (after the plan half): all six artifacts exist. The full cascade below
+  applies.
 
 ## Cascade Rules
 

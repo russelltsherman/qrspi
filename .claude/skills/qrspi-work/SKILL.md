@@ -8,7 +8,7 @@ allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, mcp__linear-russellts
 
 # QRSPI Work Orchestrator
 
-You are a state machine. Read the ticket's Linear status and execute the matching action. Run autonomously — no approval gates between phases. Print verbose progress so the operator can observe.
+You are a state machine. Read the ticket's Linear status and execute the matching action. Run autonomously within a stage, but stop at the two human review gates — **Design Review** (after the design half: questions, research, design) and **Plan Review** (after the plan half: structure, plan, work tree). Print verbose progress so the operator can observe.
 
 ## Entry Point
 
@@ -94,7 +94,9 @@ Never pass relative paths like `.qrspi/<ticket-id>/...` to a sub-agent — alway
 
 | Linear Status | Action |
 |---|---|
-| `Backlog` or `Selected` | → [Run Planning](#state-backlog--selected--run-planning) |
+| `Backlog` or `Selected` | → [Run Design](#state-backlog--selected--run-design) |
+| `Design Review` | → [Address Design Feedback](#state-design-review--address-design-feedback) |
+| `Design Approved` | → [Run Plan](#state-design-approved--run-plan) |
 | `Plan Review` | → [Address Planning Feedback](#state-plan-review--address-feedback) |
 | `Plan Approved` | → [Run Implementation](#state-plan-approved--run-implementation) |
 | `Code Review` | → [Address Implementation Feedback](#state-code-review--address-feedback) |
@@ -103,9 +105,9 @@ Never pass relative paths like `.qrspi/<ticket-id>/...` to a sub-agent — alway
 
 ---
 
-## State: Backlog / Selected → Run Planning
+## State: Backlog / Selected → Run Design
 
-Produce all six planning artifacts and submit a planning PR for review.
+Produce the three design-half artifacts (questions, research, design) and submit a planning PR for **design** review. Structure, Plan, and Work Tree are produced later, after the Design Review gate (see [Run Plan](#state-design-approved--run-plan)).
 
 ### Preflight
 
@@ -182,7 +184,115 @@ Save the ticket content from the Linear fetch — you'll pass it to some sub-age
    - `TEMPLATE_PATH = <WORKTREE_PATH>/.qrspi/templates/design.md`
 2. Verify `<WORKTREE_PATH>/.qrspi/<ticket-id>/design.md` exists.
 3. Stage and amend the planning commit: `git add .qrspi/<ticket-id>/design.md` then `gt modify --no-interactive -m "$(cat <<'EOF'`... `<ticket-id>: Planning` ...`EOF`)"`
-4. Print: "Design complete. Moving to Structure..."
+4. Print: "Design half complete. Submitting for design review..."
+
+### Submit and transition (design review)
+
+1. Check for a stale PR association before submitting (handles a rejected/reworked ticket
+   whose earlier planning PR was closed):
+   ```bash
+   gt info <ticket-id>/planning --no-interactive
+   ```
+   - If the output shows an associated PR marked `(Closed)` or `(Merged)`: follow
+     [Resubmitting when the prior PR was closed or merged](#resubmitting-when-the-prior-pr-was-closed-or-merged)
+     — that procedure detaches the dead PR **and** submits with `--force`. Then skip to step 3.
+   - Otherwise (open PR, or no PR yet): continue to step 2 with a normal submit.
+2. Push and create the PR:
+   ```bash
+   gt submit --no-edit --no-interactive
+   ```
+3. Capture the PR URL from the output.
+4. Update Linear status to `Design Review`:
+   Call `mcp__linear-russelltsherman__save_issue` with `id: "<ticket-id>"` and `state: "Design Review"`.
+5. Print: "Design submitted for review. PR: `<url>`. Ticket moved to Design Review."
+
+---
+
+## State: Design Review → Address Design Feedback
+
+Check the planning PR for review comments on the design-half artifacts. If there are
+actionable comments, address them. The cascade at this gate is **bounded to Questions →
+Research → Design** — Structure, Plan, and Work Tree do not exist yet. Otherwise, report
+waiting or advance to the plan half.
+
+1. Get the repo identifier:
+   ```bash
+   gh repo view --json nameWithOwner --jq '.nameWithOwner'
+   ```
+
+2. Find the planning PR:
+   ```bash
+   gh pr list --head <ticket-id>/planning --json number,reviewDecision --jq '.[0]'
+   ```
+
+3. If no PR exists, something went wrong — report the error and stop.
+
+4. Read review comments:
+   ```bash
+   gh pr view <number> --json reviews,comments --jq '.reviews[] | select(.state != "APPROVED")'
+   gh api repos/<owner>/<repo>/pulls/<number>/comments --jq '.[] | {path, body, line}'
+   ```
+
+5. If no reviews, or all reviews are approvals with no unresolved comments:
+   a. Re-check Linear status (it may have been updated by the human between calls):
+      Call `mcp__linear-russelltsherman__get_issue` with the ticket ID and read the `status` field.
+   b. If status is now `Design Approved`, print: "Design approved. Moving to the plan half…" and dispatch to [Run Plan](#state-design-approved--run-plan).
+   c. If status is still `Design Review`, print: "Design PR approved with no comments. Waiting for Linear status to transition to Design Approved — update it manually in Linear, or the next invocation will proceed automatically."
+   d. Exit.
+
+6. If there are actionable review comments:
+   a. Ensure you're on the planning branch:
+      ```bash
+      git branch --show-current | grep -q '<ticket-id>/planning' || gt checkout <ticket-id>/planning --no-interactive
+      ```
+   b. Analyze which design-half artifacts are affected (questions, research, design only).
+   c. Read `references/review-cascade.md` for cascade logic. At this gate the cascade is bounded: there are no Structure/Plan/Work Tree artifacts to re-run yet.
+   d. Address feedback starting from the earliest affected artifact (Questions → Research → Design).
+   e. Stage and amend the planning commit:
+      ```bash
+      git add .qrspi/<ticket-id>/*.md
+      gt modify --no-interactive -m "$(cat <<'EOF'
+      <ticket-id>: Address design review feedback
+
+      Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+      EOF
+      )"
+      ```
+   f. Push: `gt submit --no-edit --no-interactive`
+   g. Print: "Design review feedback addressed. Updated artifacts: `<list>`. PR updated."
+
+---
+
+## State: Design Approved → Run Plan
+
+Produce the three plan-half artifacts (structure, plan, work tree) by amending the existing
+planning commit, then submit the completed planning PR for plan review.
+
+### Preflight
+
+1. Ensure you're on the planning branch (worktree setup should have placed you there):
+   ```bash
+   git branch --show-current | grep -q '<ticket-id>/planning' || gt checkout <ticket-id>/planning --no-interactive
+   ```
+2. Sync non-destructively (never `gt sync` here — it deletes branches whose PRs are merged/closed):
+   ```bash
+   gt get --no-interactive 2>&1 || true
+   ```
+3. Verify the design-half artifacts exist and are non-empty:
+   ```bash
+   for f in questions.md research.md design.md; do
+     if [ ! -f ".qrspi/<ticket-id>/$f" ] || [ ! -s ".qrspi/<ticket-id>/$f" ]; then
+       echo "ERROR: Design-half artifact missing or empty: .qrspi/<ticket-id>/$f"
+       echo "Ticket is Design Approved but design-half artifacts are missing — regenerate the design half by running /qrspi-work <ticket-id> against a Selected ticket."
+       exit 1
+     fi
+   done
+   ```
+4. Check for existing plan-half artifacts to determine resume point (see [Resumability](#resumability)).
+
+### Phase execution
+
+Run each phase by spawning a sub-agent. After each, verify the artifact exists and amend the planning commit.
 
 **Phase 4 — Structure**
 
@@ -573,10 +683,12 @@ Before creating any branch or artifact, check if it already exists:
 - **Branch exists?** Check `gt log short --no-interactive` output.
 - **Artifact exists?** Check if `<WORKTREE_PATH>/.qrspi/<ticket-id>/<artifact>.md` is present and non-empty.
 
-If the planning branch exists but not all artifacts are written:
+**The planning artifacts are gated into two halves.** The Linear status — not artifact presence — decides which half to run: `Backlog`/`Selected` → design half (questions, research, design); `Design Approved` → plan half (structure, plan, work tree). `Design Review` and `Plan Review` are human turns — wait or address feedback, never advance autonomously. Never produce a plan-half artifact while the status is still `Selected` or `Design Review`.
+
+If the planning branch exists but not all artifacts in the current half are written:
 1. The worktree setup already placed you on the planning branch.
-2. Find the last completed artifact (in order: questions, research, design, structure, plan, worktree).
-3. Resume from the next incomplete phase.
+2. Find the last completed artifact within the current half (design half: questions → research → design; plan half: structure → plan → work tree).
+3. Resume from the next incomplete phase in that half.
 
 If all artifacts exist but the PR hasn't been submitted, just submit.
 
