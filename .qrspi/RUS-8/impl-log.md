@@ -62,3 +62,37 @@
 - Slice 1 complete and structurally verified. Skill lives at `.claude/skills/using-argocd-cli/` (SKILL.md + 6 references/).
 - Open for human review before merge: (1) confirm skill name `using-argocd-cli` (first non-`qrspi-` skill); (2) confirm `Bash(kubectl:*)` belongs in `allowed-tools`; (3) decide whether the `skill-creator`-authored + eval-loop criterion must be satisfied strictly (currently partially met).
 - Slice 2 (eval-suite integration in `evals/suite.json` + `scripts/grade.py`) is optional/gated on OQ3 and touches unrelated files — not implemented here.
+
+---
+
+## Session 3 — Slice 2 (SKIPPED — gate not satisfied)
+
+**Timestamp:** 2026-05-31
+
+**Tasks completed:** none
+
+**Tasks failed:** none
+
+**Tasks skipped:** T29, T30, T31 — Slice 2 is hard-gated on human confirmation of OQ3, and no confirmation exists.
+
+**Tests:** not run (slice not executed).
+
+**Reason for skip:**
+
+- Slice 2's first verification item is "Confirmed with human first (OQ3)" (structure §Slice 2; plan §31; worktree T31). The WORKTREE_SESSION and plan both state: "Only execute if the human confirms (OQ3)."
+- OQ3 is still an OPEN question in `design.md` line 108 ("Should this skill ship with an `evals/suite.json` case now...") with no recorded resolution anywhere in the ticket artifacts (verified via `grep -rin OQ3 .qrspi/RUS-8/` — every hit is the gate/question itself, none is a confirmation).
+- Per Implement-phase rules the agent cannot emit approval prompts (the caller handles user-facing messaging), and no confirmation signal was passed in the spawn prompt. Fabricating the confirmation to clear the gate is not permitted.
+- The gate exists to protect shared eval state (`evals/suite.json`, `scripts/grade.py`); the design also flags the slice as currently moot because the eval execution layer is a stub returning empty output (design §Risk Register row 4). No code was touched.
+
+**Deviations from structure.md:**
+
+- none (the structure explicitly makes this slice optional and gated; skipping when the gate is unmet conforms to the structure).
+
+**Deviations from plan.md:**
+
+- none (plan §Slice 2 preamble: "Only execute this slice if the human confirms (OQ3)").
+
+**Notes for next session:**
+
+- To pursue Slice 2 later: a human must first resolve OQ3 (design.md line 108). On confirmation, re-run this slice — T29 inspect `evals/suite.json` existing case shape before editing, T30 inspect `scripts/grade.py` `CHECKS` registry shape before adding any check (both shapes are listed as Unverified Assumptions in structure.md and must be verified at edit time).
+- Acknowledge at planning time that the harness execution layer returns empty output by design, so Slice 2 only makes the case parse/register — it cannot produce end-to-end scores today.
