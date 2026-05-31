@@ -26,16 +26,21 @@ Result: Agent output is plausible but broken. Engineer spends 2x time fixing tha
 **With QRSPI:**
 
 ```txt
-Engineer guides agent through 9 phases:
-  Phase 0: What are we building? (10-20 min, conversational ticket authoring)
-  Phase 1: What questions do we need to ask? (20 min)
-  Phase 2: What does the codebase actually do? (45 min)
-  Phase 3: How does this fit? (40 min with human feedback)
-  Phase 4: How do we build this in testable chunks? (30 min)
-  Phase 5: What's the detailed plan? (40 min)
-  Phase 6: What are the individual tasks? (varies per phase)
-  Phase 7: Build it (follows plan exactly)
-  Phase 8: Review (no surprises)
+Engineer guides agent through the QRSPI phases, gated by two human reviews:
+  Ticket:     What are we building? (10-20 min, conversational ticket authoring → Linear issue)
+  --- Design half (runs autonomously, then stops for review) ---
+  Questions:  What do we need to ask? (20 min)
+  Research:   What does the codebase actually do? (45 min, ticket hidden)
+  Design:     How does this fit? (40 min)
+  ==> DESIGN REVIEW gate (human reviews the design-half PR)
+  --- Plan half (runs autonomously after Design Approved, then stops for review) ---
+  Structure:  How do we build this in testable slices? (30 min)
+  Plan:       What's the atomic step-by-step plan? (40 min)
+  Worktree:   What's the session-aware task DAG? (varies)
+  ==> PLAN REVIEW gate (human reviews the full planning PR)
+  --- Implementation ---
+  Implement:  Build it, one slice per fresh session (follows plan exactly)
+  PR:         Summarize for reviewers (no surprises)
 
 Result: Code integrates seamlessly, estimates are accurate, PRs have zero surprises.
 
@@ -74,30 +79,53 @@ QRSPI:
 
 ## Part 2: How to Start (Quickstart)
 
-### The Minimal Viable QRSPI Flow
+### The Fastest Path: Two Commands
 
-You don't have to do all 9 phases. Start with the core flow:
+In day-to-day use you don't drive the phases by hand. Two commands cover almost everything:
 
-**Minimal QRSPI (Core Phases Only):**
+1. **`/qrspi-ticket <brief description>`** — author a Linear ticket through guided conversation.
+2. **`/qrspi-work <ticket-id>`** — the autonomous orchestrator. It reads the ticket's Linear
+   status, figures out which phase is next, and runs it. Call it repeatedly to push the ticket
+   forward; it stops on its own at the two human review gates (Design Review, Plan Review).
 
-0. Ticket (T) - 10-20 min (conversational; auto-assigns ticket ID)
-1. Questions (Q) - 20 min
-2. Research (R) - 45 min
-3. Design (D) - 40 min (with human feedback)
-4. Structure (S) - 30 min
-5. Plan (P) - 40 min
-6. Implement (I) - Implementation time varies
-7. PR (P) - Review time
+The rest of this Part walks the phases one at a time, because understanding what `/qrspi-work`
+does under the hood is how you learn to review its output well. Every individual phase also has
+its own slash command (`/qrspi-questions`, `/qrspi-research`, etc.) if you want to re-run a single
+step manually.
 
-**Skip these initially (add later as you mature):**
+### The Phase Map
 
-- Work Tree (Phase 6) - Useful for large features, overkill for small ones
-- Implementation Commit Log (Phase 7) - Useful for team coordination, not needed solo
-- Metrics (JSON artifacts) - Useful for measuring improvement over time
+There are nine phases, grouped into a ticket, a two-half planning stage, and implementation:
+
+```txt
+Ticket (T)         → Linear issue, authored conversationally
+--- DESIGN HALF ---
+Questions (Q)      → questions.md      (20 min)
+Research  (R)      → research.md       (45 min; ticket hidden)
+Design    (D)      → design.md         (40 min)
+  ==> DESIGN REVIEW gate (human)
+--- PLAN HALF ---
+Structure (S)      → structure.md      (30 min)
+Plan      (P)      → plan.md           (40 min)
+Worktree  (W)      → worktree.md       (varies)
+  ==> PLAN REVIEW gate (human)
+--- IMPLEMENTATION ---
+Implement (I)      → code + impl-log.md (one slice per fresh session)
+PR        (PR)     → pr-summary.md
+```
+
+The planning artifacts are NOT optional add-ons — all six (questions, research, design,
+structure, plan, worktree) live together on one `<ticket-id>/planning` branch as a single
+amended commit. The first three are reviewed at the Design Review gate; the planning PR then
+grows with the last three and is re-reviewed at the Plan Review gate.
 
 ### Step 1: Draft Your Ticket
 
-Run `/qrspi-ticket <brief description>` and work with the agent conversationally until `ticket.md` is written. The ticket ID is assigned automatically. You don't need to create directories or files manually.
+Run `/qrspi-ticket <brief description>` and work with the agent conversationally until a
+**Linear issue** is created in the Russelltsherman team, QRSPI project. The agent assigns the
+Linear ID (e.g., `RUS-42`) — there is no local `ticket.md`. The ticket holds the problem
+statement; QRSPI artifacts are stored locally under `.qrspi/<ticket-id>/`, while Linear holds
+only status and phase-transition comments.
 
 ### Step 2: Identify Your Feature
 
@@ -113,52 +141,61 @@ Confirm the ticket reflects a medium-complexity feature. Avoid:
 - Implement rate limiting (infrastructure change, multiple touch points)
 - Add real-time notifications (distributed systems complexity)
 
-### Step 3: Find Your Agent
+### Step 3: Set Up Your Tooling
 
-You'll be prompting Claude (or another AI agent). The agent needs:
+QRSPI runs in the Claude Code CLI. The phases need:
 
-- **Access to your codebase** (read-only, for research phase)
-- **Clear instructions** (use the prompts I provided)
-- **Human feedback loop** (you'll review and correct designs)
+- **Access to your codebase** (the research phase reads it; the ticket is hidden from research)
+- **Linear MCP** configured for the Russelltsherman workspace (ticket status drives the workflow)
+- **Graphite (`gt`)** for stacked PRs and **GitHub CLI (`gh`)** for PR operations
+- **A human feedback loop** at the two review gates (you review and correct the planning PR)
 
-#### **Two ways to set this up:**
+The phase logic lives in purpose-built agents under `.claude/agents/qrspi-<phase>.md`, each with
+its own per-phase tool lockdown. The slash commands you type (`/qrspi-questions`, `/qrspi-design`,
+…) are thin wrappers under `.claude/skills/qrspi-<phase>/SKILL.md` that invoke those agents. You
+rarely call the per-phase commands directly — `/qrspi-work` spawns the typed agents for you.
 
-##### **Option A: Claude Code (Recommended)**
+#### **Two ways to drive the workflow:**
 
-If you have Claude Code installed, use the built-in skills:
+##### **Option A: Autonomous orchestrator (recommended)**
+
+Let `/qrspi-work` run the state machine for you:
 
 ```txt
-1. Run /qrspi-ticket <brief description> to author a ticket
-2. Run /qrspi-questions <ticket-id> for Phase 1
-3. /clear, then /qrspi-research <ticket-id> for Phase 2
-4. Continue phase by phase — each skill writes its artifact automatically
+1. Run /qrspi-ticket <brief description> to author the Linear ticket
+2. Run /qrspi-work <ticket-id> — it runs the design half, opens the planning PR,
+   and moves the ticket to Design Review
+3. Review the design-half PR; move the ticket to Design Approved in Linear
+4. Run /qrspi-work <ticket-id> again — it runs the plan half and moves to Plan Review
+5. Review the full planning PR; move to Plan Approved
+6. Run /qrspi-work <ticket-id> once more — it implements all slices as stacked PRs
 ```
 
-##### **Option B: Claude API (Programmatic)**
+##### **Option B: Phase-by-phase (manual / learning)**
 
-```python
-import anthropic
+Invoke each phase command yourself, starting a fresh `/clear` session where noted:
 
-client = anthropic.Anthropic()
-
-# Phase 1: Questions
-response = client.messages.create(
-    model="claude-opus-4-6",
-    max_tokens=2000,
-    messages=[
-        {"role": "user", "content": QUESTIONS_PROMPT}
-    ]
-)
-questions = response.content[0].text
-
-# Save to file
-with open("artifacts/questions.md", "w") as f:
-    f.write(questions)
-
-# Phase 2: Research (feed questions to agent)
-research_prompt = RESEARCH_PROMPT + "\n\n" + questions
-# ... continue
+```txt
+1. /qrspi-questions <ticket-id>   for Questions
+2. /clear, then /qrspi-research <ticket-id>   for Research (ticket hidden)
+3. /qrspi-design <ticket-id>      for Design  → review, get Design Approved
+4. /qrspi-structure <ticket-id>   for Structure
+5. /qrspi-plan <ticket-id>        for Plan
+6. /qrspi-worktree <ticket-id>    for Worktree  → review, get Plan Approved
+7. /qrspi-implement <ticket-id> <slice-number>   one slice per fresh session
+8. /qrspi-pr <ticket-id>          for the PR summary
 ```
+
+Each command fetches the inputs it needs (the ticket from Linear, prior artifacts from
+`.qrspi/<ticket-id>/`) and writes its artifact automatically.
+
+##### **Driving many tickets at once: batch**
+
+`.claude/workflows/qrspi-batch.js` drives every assigned ticket that sits in one of the
+autonomously-runnable statuses — `Selected`, `Design Approved`, `Plan Approved` — by spawning the
+typed phase agents directly from the workflow script. It deliberately stops at the human review
+gates: it never moves a ticket out of `Design Review` or `Plan Review`. Use it after you've moved
+a batch of tickets into those runnable states.
 
 ### Step 4: Run Phase 1 (Questions)
 
@@ -182,7 +219,7 @@ research_prompt = RESEARCH_PROMPT + "\n\n" + questions
 
 **How to validate it's good:**
 
-- [ ] 12+ questions (count them)
+- [ ] 8-15 questions (count them)
 - [ ] Each references specific files
 - [ ] Zero "should" language
 - [ ] Spans multiple system areas (auth, DB, API, services)
@@ -203,6 +240,11 @@ research_prompt = RESEARCH_PROMPT + "\n\n" + questions
 
 1. Run `/clear`, then `/qrspi-research <ticket-id>` (or provide questions.md to Claude and ask for a factual codebase map)
 2. Wait for output
+
+**The research firewall:** the research phase cannot read the ticket and has no Linear access.
+This is deliberate — it prevents the agent from anchoring its codebase map to the feature's
+intended shape. Research answers the questions purely from what the code actually does. (The
+questions phase has the complementary firewall: it cannot explore the codebase.)
 
 **What you'll get:**
 
@@ -277,7 +319,12 @@ Rationale: Lower latency, better for real-time
 [...more decisions...]
 ```
 
-**Your job (the "brain surgery"):**
+**Your job at the Design Review gate (the "brain surgery"):**
+
+Design is the last artifact in the design half. Once it's written, the orchestrator submits the
+planning PR (containing questions, research, and design) and moves the ticket to **Design Review**.
+This is a human gate — the orchestrator stops here and will not advance on its own. You review the
+design-half PR now, before any structure or plan exists.
 
 Read the design. For each decision, ask:
 
@@ -317,13 +364,22 @@ Agent's response (bad): "But WebSocket is better for real-time..."
 - Integration points vague? → "Which service calls this? Where do events publish?"
 - Risky approach? → "This approach has this risk. How do you mitigate?"
 
-**Important:** After feedback, agent rewrites design. This is the "brain surgery"—agent accepts your corrections cleanly without arguing.
+**Important:** After feedback, agent rewrites design. This is the "brain surgery"—agent accepts your corrections cleanly without arguing. Feedback you leave on the planning PR is addressed by re-running the affected design-half artifacts (Questions → Research → Design), and the planning commit is amended in place.
+
+**Advancing past the gate:** when you're satisfied, move the Linear ticket to **Design Approved**.
+That transition is what unlocks the plan half — the orchestrator never moves past Design Review by
+itself. The next `/qrspi-work <ticket-id>` (or batch run) then produces Structure, Plan, and
+Worktree.
 
 **Time investment:** 40 minutes (30 min agent work + 10 min your feedback)
 
 ---
 
-### Step 7: Run Phase 4 (Structure)
+### Step 7: Run Phase 4 (Structure) — first step of the plan half
+
+Structure runs only after the ticket reaches **Design Approved**. It opens the plan half
+(structure → plan → worktree), all of which amend the existing planning commit rather than
+starting a new branch.
 
 **Your action:**
 
@@ -451,28 +507,40 @@ Design never mentioned caching.
 
 ---
 
-### Step 9: Run Phase 6-8 (Implementation + Review)
+### Step 9: Worktree, the Plan Review gate, then Implementation + PR
 
-**For medium complexity features (which is what you're learning on):**
+**Phase 6 (Worktree):** The third and final plan-half artifact. The worktree agent turns the
+plan into a session-aware task DAG with a per-session context budget, so implementation can run
+one slice per fresh session without blowing the context window. This produces `worktree.md` and
+amends the planning commit. (Do not confuse this artifact with the *git worktree* the orchestrator
+checks out at `.worktrees/<ticket-id>/` — same word, different thing.)
 
-**Phase 6 (Work Tree):** Optional. Skip if feature is straightforward.
+**The Plan Review gate:** once the worktree artifact exists, the orchestrator re-submits the
+planning PR — now grown with structure, plan, and worktree — and moves the ticket to **Plan
+Review**. This is the second human gate. Review the full planning PR; leave feedback on the PR if
+needed (it cascades back through the affected planning artifacts). When satisfied, move the Linear
+ticket to **Plan Approved**. The orchestrator never advances past Plan Review on its own.
 
-**Phase 7 (Implement):**
+**Phase 7 (Implement):** runs only after **Plan Approved**.
 
-- Agent writes code following plan.md exactly
-- You run it: `npm test`, `npm run type-check`, `npm run lint`
-- Code should pass all gates
-- If code diverges from plan, ask agent to fix
+- The orchestrator implements each vertical slice in its own fresh session, following plan.md and
+  the worktree DAG exactly.
+- Each slice becomes its own commit/branch, submitted as a **stacked PR** via Graphite (`gt`).
+- You run the gates: `npm test`, `npm run type-check`, `npm run lint`. Code should pass all of them.
+- If code diverges from plan, send it back to be fixed.
+- An `impl-log.md` records what each slice did and any notes for the next session.
 
 **Phase 8 (PR):**
 
-- Agent writes PR description
-- You review for:
+- Agent writes `pr-summary.md`, mapping acceptance criteria to implementation and tests.
+- Submitting moves the ticket to **Code Review**. You review for:
   - No surprises (everything aligns with prior artifacts)
   - Code follows patterns
   - Tests pass
   - No architectural changes
-- Approve and merge
+- When the PRs are approved, move the ticket to **Code Approved**. The orchestrator then reports
+  the stack is ready to merge — **the merge itself is human-owned.** After merge, move to **Done**,
+  which triggers cleanup of the artifacts and the git worktree.
 
 **Time investment:**
 
@@ -497,7 +565,7 @@ Write a per-phase prompt describing the expected behavior and output format. Bel
 ```txt
 You are an expert code archaeologist. Your job is NOT to plan or implement anything yet.
 
-Your goal is to generate 12-15 specific, technical questions that will force you to understand:
+Your goal is to generate 8-15 specific, technical questions that will force you to understand:
 1. The current payment flow and all existing integrations
 2. How user sessions and authentication work
 [etc.]
@@ -523,7 +591,7 @@ Provide examples of good and bad outputs for each phase.
 - src/db/schema.prisma - What fields does the Payment table have?
   Why this matters: Refund record needs to reference Payment table.
 
-[12-15 examples]
+[8-15 examples]
 
 # BAD Questions Phase Output (Don't do this)
 - How does the API work?
@@ -543,21 +611,32 @@ If you're using Claude API programmatically:
 SYSTEM_PROMPT = """
 You are implementing the QRSPI workflow for AI-assisted software engineering.
 
-QRSPI has 9 phases:
-0. TICKET (T): Author a well-formed ticket through guided conversation (assign sequential ID)
-1. QUESTIONS (Q): Generate 12-15 specific exploration questions
-2. RESEARCH (R): Document facts about current system (zero recommendations)
-3. DESIGN (D): Propose architecture with explicit trade-offs (accept human feedback)
-4. STRUCTURE (S): Break into vertical slices (each testable end-to-end)
-5. PLAN (P): File-by-file implementation plan (zero new decisions)
-6. WORK TREE (W): Task breakdown (30-minute tasks with dependencies)
-7. IMPLEMENT (I): Write code following plan exactly
-8. PULL REQUEST (PR): Code review document with zero surprises
+QRSPI has nine phases, gated by two human reviews:
+
+  TICKET (T): Author a well-formed ticket as a Linear issue (guided conversation)
+
+  --- Design half ---
+  QUESTIONS (Q): Generate 8-15 specific exploration questions
+  RESEARCH  (R): Document facts about the current system (zero recommendations; ticket hidden)
+  DESIGN    (D): Propose architecture with explicit trade-offs (accept human feedback)
+  ==> DESIGN REVIEW gate: human reviews the design-half PR; advances ticket to Design Approved
+
+  --- Plan half ---
+  STRUCTURE (S): Break into vertical slices (each testable end-to-end)
+  PLAN      (P): Atomic implementation steps per slice (zero new decisions)
+  WORKTREE  (W): Session-aware task DAG with per-session context budgets
+  ==> PLAN REVIEW gate: human reviews the full planning PR; advances ticket to Plan Approved
+
+  --- Implementation ---
+  IMPLEMENT    (I): Write code following the plan exactly, one slice per fresh session
+  PULL REQUEST (PR): PR summary with zero surprises
 
 Key principles:
-- Each phase produces a standalone artifact
+- Each phase produces a standalone artifact stored under .qrspi/<ticket-id>/
+- All six planning artifacts live on one <ticket-id>/planning branch as a single amended commit
 - Later phases ONLY introduce execution details, never new architecture
-- Human provides feedback (especially in Design phase)
+- Human provides feedback at the two review gates (Design Review, Plan Review)
+- Never advance past a review gate autonomously — the human owns those transitions
 - All decisions reference previous phase findings
 - Uncertainty is flagged explicitly (don't hide unknowns)
 
@@ -569,18 +648,18 @@ When prompted to execute a phase:
 5. Stop—wait for next phase prompt
 
 Never skip phases or combine them.
-Never introduce architectural decisions outside Design phase.
+Never introduce architectural decisions outside the Design phase.
 """
 
 response = client.messages.create(
-    model="claude-opus-4-6",
+    model="claude-opus-4-8",
     max_tokens=4000,
     system=SYSTEM_PROMPT,
     messages=[{"role": "user", "content": phase_prompt}]
 )
 ```
 
-This teaches agent the entire workflow in one instruction.
+This teaches the agent the entire workflow in one instruction.
 
 ---
 
@@ -605,7 +684,7 @@ Research (if done) would have revealed: "User table uses email as primary key, n
 
 **How to avoid:**
 
-- Do all 5 alignment phases (Q-R-D-S-P) every time
+- Do all six planning phases (Q-R-D in the design half, S-P-W in the plan half) every time
 - No exceptions for "simple" features
 - No shortcuts for teams that "know the codebase"
 
@@ -742,37 +821,30 @@ Each slice is independently reviewable and deployable.
 
 ---
 
-### Mistake 6: Not Saving Artifacts
+### Mistake 6: Losing the Artifacts
 
 **What happens:**
 
 ```txt
-Agent generates research.md in chat.
-Engineer reads it.
-Engineer closes chat.
-Agent context clears.
+Agent generates research in chat only.
+Engineer reads it, closes the session, context clears.
 
-Later in Design phase, agent needs to reference research.
-Agent has to re-generate from scratch (or hallucinates).
+Later in the Design phase, the agent needs to reference research
+and has to re-generate it from scratch (or hallucinates).
 ```
 
 **How to avoid:**
 
-- **Save every artifact to disk immediately**
-- After Phase 1: Save questions.md
-- After Phase 2: Save research.md
-- After Phase 3: Save design.md
-- etc.
-
-- **In next phase, load artifacts from disk**
-
-  ```txt
-  "Here's the research from Phase 2: [paste research.md]
-   
-  Now generate design.md using this as foundation."
-  ```
-
-- **Never rely on agent memory across sessions**
+- **Let QRSPI persist artifacts for you.** Each phase writes its artifact to
+  `.qrspi/<ticket-id>/` automatically (questions.md, research.md, design.md, …). You don't
+  copy-paste between phases — the next phase reads the prior artifact from disk.
+- **The planning artifacts live in git, not just on disk.** All six sit on the
+  `<ticket-id>/planning` branch as a single amended commit, so they survive a closed session and
+  are reviewable as a PR.
+- **The ticket itself lives in Linear**, not in a local file — its status is the source of truth
+  for which phase comes next.
+- **Never rely on agent memory across sessions** — rely on the artifacts on disk and the Linear
+  status.
 
 ---
 
@@ -885,7 +957,9 @@ QRSPI is a framework, not a law. Adapt it.
 **Adapt this way:**
 
 - Use QRSPI for all features >Medium complexity
-- For small features: Skip phases, just do Q-R-D-P (skip S and W)
+- For small features: keep the full planning sequence (the canonical workflow runs all six
+  planning phases — skipping Structure or Worktree means stepping outside QRSPI), but expect each
+  phase to be short
 - For simple features: Just discuss in Slack, no QRSPI needed
 
 **Time allocation:**
@@ -947,16 +1021,17 @@ QRSPI is a framework, not a law. Adapt it.
 
 **Adapt this way:**
 
-- Add human checkpoint after each phase
-- Use work_tree.md (Phase 6) as explicit task hand-off
+- Lean on the two built-in human gates (Design Review, Plan Review) as the formal checkpoints
+- Use `worktree.md` (the session-aware task DAG) as the explicit per-session task hand-off
 - Track metrics (hallucination rate, estimate accuracy)
-- Feed metrics back into prompts for next feature
+- Feed metrics back into the phase agents for the next feature
 
 **Additional considerations:**
 
-- Save all artifacts to version control
+- The planning artifacts are already in version control (on the `<ticket-id>/planning` branch);
+  keep them there for review
 - Build up a library of good design.md examples to show agents
-- Track which agent prompts worked vs. which didn't
+- Tune the phase agents under `.claude/agents/` based on what worked vs. what didn't
 - Measure context window usage (keep under 40%)
 
 ---
@@ -970,7 +1045,7 @@ How do you make this part of how your team works?
 **Your job:**
 
 1. Pick a medium-complexity feature
-2. Do QRSPI manually with Claude (all 8 phases)
+2. Do QRSPI end-to-end with Claude (ticket → both planning halves → implementation → PR)
 3. Compare to how you normally build
 4. Document what worked, what didn't
 
@@ -1271,33 +1346,38 @@ QRSPI is slower upfront to be faster overall.
 ### The 30-Second Version
 
 ```txt
-0. Run /qrspi-ticket to author a ticket through conversation
-1. Prompt agent through Q-R-D-S-P phases (one per prompt)
-2. Save each artifact
-3. Load prior artifacts into next phase
-4. Human provides feedback (especially Design phase)
-5. Agent implements per plan
-6. Review code (should have no surprises)
-7. Merge
+0. /qrspi-ticket <description>   → author the Linear ticket
+1. /qrspi-work <ticket-id>       → runs the design half (Q-R-D), opens the planning PR,
+                                    moves the ticket to Design Review
+2. Review the design-half PR     → move ticket to Design Approved
+3. /qrspi-work <ticket-id>       → runs the plan half (S-P-W), grows the planning PR,
+                                    moves the ticket to Plan Review
+4. Review the full planning PR   → move ticket to Plan Approved
+5. /qrspi-work <ticket-id>       → implements all slices as stacked PRs, moves to Code Review
+6. Review code (no surprises)    → move ticket to Code Approved
+7. Merge (human-owned), then mark Done → cleanup
 ```
+
+(Artifacts persist automatically under `.qrspi/<ticket-id>/`; the ticket and its status live in
+Linear. You provide feedback at the two human gates — Design Review and Plan Review.)
 
 ### The Decision Tree
 
 ```txt
-Is feature complex? → YES → Use full QRSPI (all 8 phases)
-                    → NO → Skip Work Tree and Implementation Log
+Is feature complex? → YES → Use QRSPI (run the full planning sequence)
+                    → NO  → Still run the full sequence, but each phase is short
 
 Is codebase unfamiliar? → YES → Spend more time on Research
-                        → NO → Research can be shorter
+                        → NO  → Research can be shorter
 
 Do you have time for alignment? → YES → Do QRSPI
-                                → NO → Use unstructured (but expect more rework)
+                                → NO  → Use unstructured (but expect more rework)
 
 Is this a refactor or migration? → YES → Use QRSPI (critical for complex changes)
-                                 → NO → Maybe skip for simple features
+                                 → NO  → Maybe skip for simple features
 
 Are you trying to improve code quality? → YES → Use QRSPI (catches issues early)
-                                        → NO → Unstructured is fine
+                                        → NO  → Unstructured is fine
 
 ```
 

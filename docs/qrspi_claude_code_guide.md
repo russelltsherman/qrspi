@@ -1,6 +1,8 @@
 # QRSPI Implementation Guide for Claude Code
 
-Step-by-step instructions for installing and running the QRSPI workflow using Claude Code skills, subagents, hooks, and `CLAUDE.md`.
+Step-by-step instructions for installing and running the QRSPI workflow using Claude Code agents, skills, worktrees, and `CLAUDE.md`.
+
+QRSPI decomposes feature work into sequential phases, each producing a reviewable artifact. Phase logic lives in purpose-built **agents** (`.claude/agents/qrspi-<phase>.md`) with per-phase tool lockdowns; thin slash-command **skills** (`.claude/skills/qrspi-<phase>/SKILL.md`) wrap them. The `/qrspi-work` orchestrator drives a single ticket through its Linear-status state machine by spawning the typed phase agents, and `.claude/workflows/qrspi-batch.js` drives many tickets at once.
 
 ---
 
@@ -12,26 +14,50 @@ Create this directory tree at your project root:
 your-project/
 ├── .claude/
 │   ├── CLAUDE.md                          # Project-level persistent instructions
-│   └── skills/
-│       ├── qrspi-questions/
-│       │   └── SKILL.md                   # /qrspi-questions slash command
-│       ├── qrspi-research/
-│       │   └── SKILL.md                   # /qrspi-research
-│       ├── qrspi-design/
-│       │   └── SKILL.md                   # /qrspi-design
-│       ├── qrspi-structure/
-│       │   └── SKILL.md                   # /qrspi-structure
-│       ├── qrspi-plan/
-│       │   └── SKILL.md                   # /qrspi-plan
-│       ├── qrspi-worktree/
-│       │   └── SKILL.md                   # /qrspi-worktree
-│       ├── qrspi-implement/
-│       │   └── SKILL.md                   # /qrspi-implement
-│       └── qrspi-pr/
-│           └── SKILL.md                   # /qrspi-pr
-├── .qrspi/                                # Artifact output directory (gitignored or committed)
-│   └── <ticket-id>/                       # Created per feature
-│       ├── ticket.md
+│   ├── agents/                            # Phase agents — the actual phase logic the orchestrator spawns
+│   │   ├── qrspi-questions.md
+│   │   ├── qrspi-research.md
+│   │   ├── qrspi-design.md
+│   │   ├── qrspi-structure.md
+│   │   ├── qrspi-plan.md
+│   │   ├── qrspi-worktree.md
+│   │   ├── qrspi-implement.md
+│   │   └── qrspi-pr.md
+│   ├── skills/                            # Slash-command wrappers (thin) + orchestrator + ticket creation
+│   │   ├── qrspi-ticket/
+│   │   │   └── SKILL.md                   # /qrspi-ticket — guided Linear ticket creation
+│   │   ├── qrspi-questions/
+│   │   │   └── SKILL.md                   # /qrspi-questions
+│   │   ├── qrspi-research/
+│   │   │   └── SKILL.md                   # /qrspi-research
+│   │   ├── qrspi-design/
+│   │   │   └── SKILL.md                   # /qrspi-design
+│   │   ├── qrspi-structure/
+│   │   │   └── SKILL.md                   # /qrspi-structure
+│   │   ├── qrspi-plan/
+│   │   │   └── SKILL.md                   # /qrspi-plan
+│   │   ├── qrspi-worktree/
+│   │   │   └── SKILL.md                   # /qrspi-worktree
+│   │   ├── qrspi-implement/
+│   │   │   └── SKILL.md                   # /qrspi-implement
+│   │   ├── qrspi-pr/
+│   │   │   └── SKILL.md                   # /qrspi-pr
+│   │   └── qrspi-work/
+│   │       └── SKILL.md                   # /qrspi-work — autonomous orchestrator (state machine)
+│   └── workflows/
+│       └── qrspi-batch.js                 # Batch orchestrator — many tickets through autonomous states
+├── .qrspi/
+│   ├── templates/                         # Canonical output formats (reference only — single source of truth)
+│   │   ├── ticket.md
+│   │   ├── questions.md
+│   │   ├── research.md
+│   │   ├── design.md
+│   │   ├── structure.md
+│   │   ├── plan.md
+│   │   ├── worktree.md
+│   │   ├── impl-log.md
+│   │   └── pr-summary.md
+│   └── <ticket-id>/                       # Per-ticket artifacts, created at runtime
 │       ├── questions.md
 │       ├── research.md
 │       ├── design.md
@@ -40,16 +66,23 @@ your-project/
 │       ├── worktree.md
 │       ├── impl-log.md
 │       └── pr-summary.md
+├── .worktrees/                            # Isolated git worktrees per ticket (gitignored)
 └── src/
     └── ...
 ```
 
-Create it:
+Note there is **no `ticket.md`** in a ticket's artifact directory: the ticket is a **Linear issue**, not a local file. Artifacts are local files under `.qrspi/<ticket-id>/`; Linear holds status and phase-transition comments only — artifacts are not uploaded to Linear.
+
+Create the scaffolding:
 
 ```bash
-mkdir -p .claude/skills/{qrspi-questions,qrspi-research,qrspi-design,qrspi-structure,qrspi-plan,qrspi-worktree,qrspi-implement,qrspi-pr}
-mkdir -p .qrspi
+mkdir -p .claude/agents
+mkdir -p .claude/skills/{qrspi-ticket,qrspi-questions,qrspi-research,qrspi-design,qrspi-structure,qrspi-plan,qrspi-worktree,qrspi-implement,qrspi-pr,qrspi-work}
+mkdir -p .claude/workflows
+mkdir -p .qrspi/templates
 ```
+
+`.worktrees/` and per-ticket `.qrspi/<ticket-id>/` directories are created at runtime by the orchestrator — do not create them by hand.
 
 ---
 
@@ -65,11 +98,33 @@ Create `.claude/CLAUDE.md`:
 ## QRSPI Workflow
 
 This project uses the QRSPI structured workflow for feature development.
-Artifacts are stored in `.qrspi/<ticket-id>/`.
+Tickets are created as Linear issues (team: <your-team>, project: <your-project>).
+Ticket IDs follow Linear's format (e.g., RUS-42). Artifacts are stored locally
+in `.qrspi/<ticket-id>/`. Linear is used for status tracking and phase-transition
+comments only — artifacts are not uploaded as attachments.
+
+### Lifecycle and review gates
+
+Planning is split into two halves, each ending at a human review gate. The Linear
+status is the authoritative state machine:
+
+    Selected → [Questions·Research·Design] → Design Review → Design Approved
+      → [Structure·Plan·WorkTree] → Plan Review → Plan Approved
+      → [Implementation] → Code Review → Code Approved → Done
+
+- Design Review / Design Approved gate the design half; Plan Review / Plan Approved
+  gate the plan half. The two review statuses are human turns — the orchestrator
+  waits (or addresses PR feedback) and never advances autonomously past them.
+- All six planning artifacts live on one `<ticket-id>/planning` branch as a single
+  amended commit. The PR is submitted at Design Review and re-submitted (grown with
+  the plan-half artifacts) at Plan Review.
 
 ### Available skills (invoke with / or let Claude auto-invoke)
-- `/qrspi-questions <ticket-id>` — Generate technical questions from a ticket
-- `/qrspi-research <ticket-id>` — Map the codebase (ticket is hidden)
+
+- `/qrspi-ticket <description>` — Create a Linear issue through guided conversation
+- `/qrspi-work <ticket-id>` — Autonomous orchestrator: reads Linear status, runs the matching phase
+- `/qrspi-questions <ticket-id>` — Generate technical questions from a ticket (fetched from Linear)
+- `/qrspi-research <ticket-id>` — Map the codebase (ticket is hidden from this phase)
 - `/qrspi-design <ticket-id>` — Produce a design document
 - `/qrspi-structure <ticket-id>` — Define vertical slices and contracts
 - `/qrspi-plan <ticket-id>` — Write tactical implementation steps
@@ -78,6 +133,7 @@ Artifacts are stored in `.qrspi/<ticket-id>/`.
 - `/qrspi-pr <ticket-id>` — Prepare pull request summary
 
 ### Workflow rules
+
 - Phases run sequentially. Never skip ahead.
 - Each artifact must exist and be reviewed before the next phase starts.
 - Start a fresh `/clear` session between implementation slices.
@@ -91,453 +147,167 @@ test runner commands, directory layout, naming patterns, etc.>
 
 ---
 
-## 3. Skill Files
+## 3. Agents and Skills
 
-Each skill is a `SKILL.md` file with YAML frontmatter and markdown instructions. Below are all eight. Copy each into its respective directory.
+QRSPI's phase logic lives in two layers:
 
-### 3a. `.claude/skills/qrspi-questions/SKILL.md`
+- **Agents** (`.claude/agents/qrspi-<phase>.md`) hold the heavy phase logic and a per-phase tool lockdown. The orchestrator spawns them via the `Agent` tool with `subagent_type: qrspi-<phase>` and a structured input contract — it never reads the phase SKILL.md files or hand-engineers prompts. This is the agent-vs-skill split: the substance is in agents; skills are thin wrappers.
+- **Skills** (`.claude/skills/qrspi-<phase>/SKILL.md`) are the slash-command wrappers (`/qrspi-questions`, etc.) that let a human invoke a single phase directly. They exist primarily for the orchestrator's surface area and for manual re-runs.
 
-```markdown
----
-name: qrspi-questions
-description: Generate 8-15 targeted technical questions from a feature ticket. Use when starting a new QRSPI feature workflow or when the user says "questions for" a ticket.
-command: /qrspi-questions
-argument-hint: <ticket-id>
-allowed-tools: Read, Glob, Grep
----
+Two skills are not phase wrappers:
 
-# Questions Phase (Q)
+- `.claude/skills/qrspi-work/SKILL.md` is the autonomous **orchestrator** — a state machine keyed on the ticket's Linear status (see §5).
+- `.claude/skills/qrspi-ticket/SKILL.md` creates a new Linear ticket through guided conversation.
 
-Read the ticket file at `.qrspi/$ARGUMENTS/ticket.md`.
+### Per-phase tool lockdowns (firewalls)
 
-Produce `.qrspi/$ARGUMENTS/questions.md` with 8-15 technical questions.
+Each agent restricts its own tools so a phase structurally cannot do something it shouldn't:
 
-## Rules
-1. Questions must be answerable by reading the codebase, not by speculation.
-2. Categorize into: Data Flow, API Surface, State Management, Edge Cases, Testing, Observability.
-3. Each question names a specific file, module, or "the module responsible for X".
-4. Do NOT propose solutions or architectures.
-5. Include at least 2 Edge Cases questions and 1 Observability question.
-6. No question uses solution language: "should we", "we could", "best way to".
+- **Questions** has no `Glob`, `Grep`, or `Bash` — codebase exploration is structurally impossible. It works from the ticket alone.
+- **Research** has read/search tools but **no Linear MCP and cannot read the ticket**. The ticket is hidden during research to gather objective codebase facts without anchoring on a proposed solution. The orchestrator reinforces this by never passing ticket content into the research agent's input contract (defense in depth), and by appending a project-scope restriction that confines all reads to the repo.
+- **Design, Structure, Plan, Worktree** are read-only planning phases.
+- **Implement** opens up `Write`/`Edit`/`Bash` but is scoped to a single slice and forbidden from reading the full design or unrelated slices.
 
-## Output format
-```
-# Questions — <ticket title>
-**Ticket:** <ticket-id>
-**Generated:** <ISO-8601>
-**Status:** draft
-
-## Data Flow
-- Q1: <question>
-  **Target:** <file or module>
-...
-```
-
-After writing the file, tell the user: "Questions written to `.qrspi/<id>/questions.md`. Review, edit, then tell me 'approved' to proceed to Research."
-```
-
-### 3b. `.claude/skills/qrspi-research/SKILL.md`
-
-```markdown
----
-name: qrspi-research
-description: Map codebase facts by answering questions from the Questions phase. The feature ticket is intentionally hidden. Use after questions are approved.
-command: /qrspi-research
-argument-hint: <ticket-id>
-allowed-tools: Read, Glob, Grep, Bash(find:*), Bash(wc:*), Bash(head:*), Bash(tail:*)
----
-
-# Research Phase (R)
-
-Read `.qrspi/$ARGUMENTS/questions.md`.
-
-CRITICAL: Do NOT read `.qrspi/$ARGUMENTS/ticket.md`. The ticket is intentionally hidden during this phase so you gather objective facts without forming implementation opinions.
-
-Produce `.qrspi/$ARGUMENTS/research.md`.
-
-## Rules
-1. Answer each question with FACTS: file paths, function signatures, data types, call chains.
-2. Include code snippets (< 20 lines) as evidence with `file:line` citations.
-3. Do NOT form opinions about what should change.
-4. If a question can't be answered, state "NOT FOUND" with search queries attempted.
-5. Document implicit contracts and dependency directions.
-6. Note inconsistencies between code and comments/docs.
-7. Include a "Discovered Patterns" section and an "Inconsistencies" section.
-
-## Output format
-```
-# Research — Codebase Map
-**Questions source:** questions.md @ <timestamp>
-**Generated:** <ISO-8601>
-**Status:** draft
-
-## Q1: <question text>
-**Answer:** <facts>
-**Evidence:** <code + file:line>
-**Dependencies:** <upstream/downstream>
-**Implicit contracts:** <conventions>
-...
-
-## Discovered Patterns
-...
-
-## Inconsistencies
-...
-```
-
-After writing, tell the user: "Research written to `.qrspi/<id>/research.md`. Review for factual accuracy, then tell me 'approved' to proceed to Design."
-```
-
-### 3c. `.claude/skills/qrspi-design/SKILL.md`
-
-```markdown
----
-name: qrspi-design
-description: Produce a design document by combining the ticket, answered questions, and codebase research. Use after research is approved. This is the brain-surgery phase.
-command: /qrspi-design
-argument-hint: <ticket-id>
-allowed-tools: Read, Glob, Grep
----
-
-# Design Discussion Phase (D)
-
-Read ALL THREE inputs:
-1. `.qrspi/$ARGUMENTS/ticket.md`
-2. `.qrspi/$ARGUMENTS/questions.md`
-3. `.qrspi/$ARGUMENTS/research.md`
-
-Produce `.qrspi/$ARGUMENTS/design.md` — target ~200 lines, hard max 300.
-
-## Required sections
-1. **Current State** — every claim cites research.md: "(ref: Q1)"
-2. **Desired End State** — maps every acceptance criterion to system behavior
-3. **Delta** — concrete changes: new files, modified files, new queries
-4. **Pattern Decisions** — 2+ options per decision, table format, mark recommendation, flag any NEW PATTERN
-5. **Risk Register** — table with likelihood/impact/mitigation, minimum 2 entries
-6. **Open Questions** — things only a human can answer
-
-## Rules
-1. No code blocks. Prose and tables only.
-2. Every Current State sentence must have a `(ref: QN)` citation.
-3. Every acceptance criterion from the ticket appears in Desired End State.
-4. Pattern Decisions must reference existing codebase patterns from research. Flag new patterns explicitly.
-5. Write for editability, not persuasion. The human will rewrite sections.
-
-After writing, tell the user: "Design written to `.qrspi/<id>/design.md`. This is the highest-leverage review — check Pattern Decisions and Current State citations carefully. Edit anything that's wrong, then tell me 'approved'."
-```
-
-### 3d. `.claude/skills/qrspi-structure/SKILL.md`
-
-```markdown
----
-name: qrspi-structure
-description: Define vertical slices, types, and contracts from the approved design. Use after design is approved.
-command: /qrspi-structure
-argument-hint: <ticket-id>
-allowed-tools: Read, Glob, Grep
----
-
-# Structure Outline Phase (S)
-
-Read `.qrspi/$ARGUMENTS/design.md` (must have Status: approved in it or user must have said approved).
-
-Produce `.qrspi/$ARGUMENTS/structure.md`.
-
-## Rules
-1. Define new/modified types and function signatures (pseudo-code, not implementations).
-2. Organize into VERTICAL SLICES — each delivers a testable end-to-end path.
-   - CORRECT: "Slice 1: Mock API → UI component → hardcoded data"
-   - WRONG: "Phase 1: All database changes"
-3. Each slice has: Goal, Files touched (✨ new / ⚠️ modify), Verification step, Context cost (S/M/L), Dependencies.
-4. No slice touches > 10 files. Split if it does.
-5. Order slices so dependencies flow forward.
-6. Include a Contracts section for cross-slice interfaces.
-7. Include an Unverified Assumptions section — claims from design.md you can't map to concrete code.
-
-After writing, tell the user: "Structure written to `.qrspi/<id>/structure.md`. Check slice boundaries and contracts. If any slice is too large, I'll split it. Tell me 'approved' to proceed to Plan."
-```
-
-### 3e. `.claude/skills/qrspi-plan/SKILL.md`
-
-```markdown
----
-name: qrspi-plan
-description: Write atomic implementation steps per vertical slice. Use after structure is approved.
-command: /qrspi-plan
-argument-hint: <ticket-id>
-allowed-tools: Read
----
-
-# Plan Phase (P)
-
-Read:
-1. `.qrspi/$ARGUMENTS/structure.md`
-2. `.qrspi/$ARGUMENTS/design.md` (for reference only)
-
-Produce `.qrspi/$ARGUMENTS/plan.md`.
-
-## Rules
-1. Each step is atomic: one file, one action.
-2. Steps reference exact types/signatures from structure.md.
-3. ⚠️ steps (modify) include Current and After signatures.
-4. ✨ steps (new) name the file and its purpose.
-5. Each slice ends with a Verify checkpoint with a runnable command.
-6. Total steps ≤ 100. If exceeded, structure slices are too large — stop and say so.
-7. Include Rollback Notes for DB migrations, config changes, destructive ops.
-
-After writing, tell the user: "Plan written to `.qrspi/<id>/plan.md`. This should be a spot-check, not a deep review — alignment happened during Design. Tell me 'approved' to proceed to WorkTree."
-```
-
-### 3f. `.claude/skills/qrspi-worktree/SKILL.md`
-
-```markdown
----
-name: qrspi-worktree
-description: Build a session-aware task DAG from the plan. Use after plan is approved.
-command: /qrspi-worktree
-argument-hint: <ticket-id>
-allowed-tools: Read
----
-
-# Work Tree Phase (W)
-
-Read `.qrspi/$ARGUMENTS/plan.md`.
-
-Produce `.qrspi/$ARGUMENTS/worktree.md`.
-
-## Rules
-1. Each plan step maps to one task with: ID, Description, Depends On, Plan Step ref, Cost (S/M/L), Status.
-2. Group tasks into sessions. Each session has a Load manifest listing ONLY the artifacts needed.
-3. Load manifests reference sections, not whole files (e.g., "structure.md §Contracts").
-4. Estimated context per session must stay under 40%.
-5. Insert SESSION BOUNDARY markers with a Reason between sessions.
-6. Identify and list the critical path at the top.
-
-After writing, tell the user: "Work tree written to `.qrspi/<id>/worktree.md`. Review session boundaries — each session will be a fresh `/clear`. Tell me 'approved' to start implementation."
-```
-
-### 3g. `.claude/skills/qrspi-implement/SKILL.md`
-
-```markdown
----
-name: qrspi-implement
-description: Implement one vertical slice per invocation. Always start with a fresh context. Use after worktree is approved or after completing the previous slice.
-command: /qrspi-implement
-argument-hint: <ticket-id> <slice-number>
-allowed-tools: Read, Write, Glob, Grep, Bash
----
-
-# Implement Phase (I)
-
-Parse $ARGUMENTS to extract <ticket-id> and <slice-number>.
-
-Read ONLY these files (context firewall):
-1. `.qrspi/<ticket-id>/structure.md` — only §Types, §Contracts, and §Slice <slice-number>
-2. `.qrspi/<ticket-id>/plan.md` — only §Slice <slice-number>
-3. `.qrspi/<ticket-id>/worktree.md` — only the session for this slice
-4. `.qrspi/<ticket-id>/impl-log.md` — only the "Notes for next session" from the previous slice (if any)
-
-Do NOT read the full design, full plan, or earlier slice details beyond the notes.
-
-## Rules
-1. Implement ONLY the tasks in this session. Do not anticipate future slices.
-2. Match types and signatures from structure.md exactly. If you must deviate, STOP and report before changing.
-3. After completing tasks, run the verification command from the plan.
-4. If tests fail: fix (max 2 retries). If still failing, report failure with output, hypothesis, and whether it's your code or upstream.
-5. Follow existing codebase conventions.
-6. Do NOT refactor code outside your slice scope.
-7. Append results to `.qrspi/<ticket-id>/impl-log.md`.
-
-## impl-log entry format
-```
-## Slice <N> — <ISO-8601>
-**Tasks completed:** T1, T2, ...
-**Tasks failed:** none
-**Tests:** <command> → N passed, N failed
-**Deviations from structure.md:** none
-**Deviations from plan.md:** <describe or "none">
-**Notes for next session:** <facts the next slice needs>
-```
-
-After completing, tell the user: "Slice <N> implemented. Tests: <result>. Run `/clear` then `/qrspi-implement <ticket-id> <next-slice>` for the next slice, or review the code first."
-```
-
-### 3h. `.claude/skills/qrspi-pr/SKILL.md`
-
-```markdown
----
-name: qrspi-pr
-description: Prepare a pull request summary after all slices are implemented. Use when implementation is complete.
-command: /qrspi-pr
-argument-hint: <ticket-id>
-allowed-tools: Read, Bash(git diff:*), Bash(git log:*)
----
-
-# PR Phase
-
-Read:
-1. `.qrspi/$ARGUMENTS/impl-log.md` (full)
-2. `.qrspi/$ARGUMENTS/design.md` (for risk register)
-3. `.qrspi/$ARGUMENTS/structure.md` (for contracts)
-4. Git diff: run `git diff main...HEAD --stat` and `git diff main...HEAD`
-
-Produce `.qrspi/$ARGUMENTS/pr-summary.md`.
-
-## Required sections
-1. **Summary** — 3-5 sentences: what changed, why, reviewer focus areas
-2. **Acceptance Criteria Mapping** — table: criterion → implementation file → test
-3. **Changes by Slice** — table per slice: file, change type, lines changed
-4. **Testing Summary** — checklist of verification commands and results
-5. **Deviations from Structure** — table (even if empty)
-6. **Risks & Rollback** — from design.md risk register, updated with implementation findings
-7. **Open Items** — deferred work, tech debt, follow-up tickets
-
-## Rules
-1. PR title under 72 characters.
-2. Every acceptance criterion from the ticket maps to a file and a test.
-3. Every file in the git diff is accounted for in Changes by Slice.
-
-After writing, tell the user: "PR summary at `.qrspi/<id>/pr-summary.md`. Use this as your PR description. Read and own the code before merging."
-```
+Author each agent and skill from the canonical templates in `.qrspi/templates/`. The phase artifacts (questions, research, design, structure, plan, worktree, impl-log, pr-summary) follow those template formats rather than formats embedded inline in each prompt.
 
 ---
 
-## 4. Running the Workflow
+## 4. Phase Reference
 
-### Step 0 — Write the ticket
+| Phase | Artifact | What it does |
+|-------|----------|--------------|
+| **Ticket** | Linear issue | Defines the problem, goals, acceptance criteria. No solutions. Created with `/qrspi-ticket`. |
+| **Questions** | `questions.md` | 8–15 targeted technical questions derived from the ticket. |
+| **Research** | `research.md` | Answers the questions by reading the codebase. Ticket hidden to prevent anchoring. |
+| **Design** | `design.md` | Pattern decisions, risk register, delta, open questions. |
+| **Structure** | `structure.md` | Vertical slices, types, cross-slice contracts. |
+| **Plan** | `plan.md` | Atomic implementation steps per slice, with verification checkpoints. |
+| **Worktree** | `worktree.md` | Session-aware task DAG with per-session context budgets. |
+| **Implement** | Code + `impl-log.md` | Implements one slice per fresh session, within the git worktree. |
+| **PR** | `pr-summary.md` | Maps acceptance criteria to implementation files and tests. |
 
-```bash
-mkdir -p .qrspi/DASH-417
-cat > .qrspi/DASH-417/ticket.md << 'EOF'
-# Ticket: DASH-417
+These nine phases group into a **design half** (questions, research, design), a **plan half** (structure, plan, worktree), and **implementation** (slices + PR summary), separated by the two human review gates described next.
 
-## Title
-Add user preference endpoint for notification and display settings
+---
 
-## Description
-Users need a dedicated API endpoint to retrieve notification and display
-preferences without loading the full profile.
+## 5. The Lifecycle and `/qrspi-work`
 
-## Acceptance Criteria
-- [ ] GET /api/users/:id/preferences returns prefs
-- [ ] Response < 200ms p95
-- [ ] 401 for unauthenticated, 403 for other users (unless admin)
+Planning is split into two halves separated by two human review gates. The **Linear status is the authoritative state machine** — it, not artifact presence, decides what runs next. `/qrspi-work <ticket-id>` reads that status and executes the matching action:
 
-## Constraints
-- Use existing auth middleware
-- Use existing user_preferences table
+| Linear Status | `/qrspi-work` action |
+|---------------|----------------------|
+| Backlog / Selected | Run the **design half** (questions → research → design); submit the planning PR; move ticket to **Design Review**. |
+| **Design Review** | **Human gate.** Review the design-half PR. The orchestrator addresses PR feedback (bounded to Questions → Research → Design) or waits. The **human** moves the ticket to Design Approved. |
+| Design Approved | Run the **plan half** (structure → plan → worktree) by amending the same planning commit; update the planning PR; move ticket to **Plan Review**. |
+| **Plan Review** | **Human gate.** Review the full plan PR. The orchestrator addresses PR feedback or waits. The **human** moves the ticket to Plan Approved. |
+| Plan Approved | Implement all slices; submit stacked PRs (one per slice); move ticket to **Code Review**. |
+| **Code Review** | Address implementation review feedback on the stack. The **human** moves the ticket to Code Approved. |
+| Code Approved | Report ready to merge — merging is human-owned. |
+| Done | Clean up artifacts and worktree. |
 
-## Out of Scope
-- PUT endpoint (separate ticket)
-EOF
-```
+The two review gates (Design Review, Plan Review) are **human turns**. The orchestrator waits or addresses PR feedback there; it never advances past them autonomously. Likewise, the human owns the Code Review → Code Approved transition and the final merge.
 
-### Step 1 — Questions
+All six planning artifacts live on **one `<ticket-id>/planning` branch as a single amended commit**. The questions phase creates the commit; every subsequent planning phase amends it. The planning PR is submitted at Design Review and re-submitted — grown with the plan-half artifacts — at Plan Review.
+
+Because the status is authoritative, `/qrspi-work` is **resumable**: re-running it re-reads the Linear status and resumes from the next incomplete artifact within the current half.
+
+---
+
+## 6. Worktrees
+
+Each ticket gets its own git worktree at `.worktrees/<ticket-id>/` (gitignored). The main checkout stays on `main`; all ticket work happens in the worktree. Multiple tickets can be worked concurrently without branch-checkout conflicts, since you cannot have the same branch checked out in two worktrees at once.
+
+Key mechanics the orchestrator handles:
+
+- It sets `REPO_ROOT` (where `.git/` lives) and `WORKTREE_PATH = <REPO_ROOT>/.worktrees/<ticket-id>`.
+- `git worktree add` runs from `REPO_ROOT`; the `cd` into the worktree happens after creation.
+- New planning branches are tracked once with `gt track --parent main --no-interactive`.
+
+**Sub-agents do not inherit the orchestrator's cwd.** A spawned agent's Bash session starts at the main repo root, not the cd'd worktree. The orchestrator therefore:
+
+1. Tells every sub-agent to `cd <WORKTREE_PATH>` as its first Bash command, and
+2. Passes **absolute, worktree-prefixed paths** (`<WORKTREE_PATH>/.qrspi/<ticket-id>/...`) for all file operations — never relative paths.
+
+---
+
+## 7. Running a Single Ticket
+
+### Step 0 — Create the ticket (Linear)
 
 ```
 claude
-> /qrspi-questions DASH-417
+> /qrspi-ticket Add user preference endpoint for notification and display settings
 ```
 
-Claude reads the ticket, writes `questions.md`, and asks you to review. Edit the file if needed, then:
+`/qrspi-ticket` gathers problem context through guided conversation and creates a **Linear issue** in your team/project (e.g., `RUS-42`). There is no local `ticket.md` — the issue lives in Linear.
+
+### Step 1 — Drive it forward
+
+The normal path is to let the orchestrator run:
 
 ```
-> approved
+> /qrspi-work RUS-42
 ```
 
-### Step 2 — Research
+`/qrspi-work` reads the ticket's Linear status and runs the matching action from the table in §5. On a fresh `Selected` ticket it produces the design half and stops at the Design Review gate. Re-invoke it after each human transition (Design Approved, Plan Approved, Code Approved) to advance to the next stage.
+
+A full run therefore looks like:
 
 ```
+> /qrspi-work RUS-42      # Selected → design half → Design Review (waits for human)
+# ...human reviews the planning PR, moves ticket to Design Approved...
+> /qrspi-work RUS-42      # Design Approved → plan half → Plan Review (waits for human)
+# ...human reviews, moves ticket to Plan Approved...
+> /qrspi-work RUS-42      # Plan Approved → implement all slices → stacked PRs → Code Review
+# ...human reviews PRs, moves ticket to Code Approved...
+> /qrspi-work RUS-42      # Code Approved → reports merge instructions (human merges)
+# ...human merges, marks ticket Done...
+> /qrspi-work RUS-42      # Done → cleans up artifacts + worktree
+```
+
+Start a fresh `/clear` session between invocations, especially before implementation.
+
+### Running individual phases manually
+
+The per-phase skills exist for re-running a single phase or working step-by-step outside the orchestrator. Each operates on the Linear ticket and the local artifacts:
+
+```
+> /qrspi-questions RUS-42     # reads the ticket from Linear, writes questions.md
 > /clear
-> /qrspi-research DASH-417
-```
-
-Claude reads `questions.md` (NOT the ticket), maps the codebase, writes `research.md`. Review for factual accuracy:
-
-```
-> approved
-```
-
-### Step 3 — Design
-
-```
+> /qrspi-research RUS-42       # reads questions.md only — NOT the ticket — writes research.md
 > /clear
-> /qrspi-design DASH-417
-```
-
-Claude reads ticket + questions + research, writes `design.md`. **This is your highest-leverage review.** Edit Pattern Decisions, redirect to correct architectural patterns, fix any uncited claims. This is the "brain surgery" step. Then:
-
-```
-> approved
-```
-
-### Step 4 — Structure
-
-```
+> /qrspi-design RUS-42         # writes design.md
 > /clear
-> /qrspi-structure DASH-417
-```
-
-Claude writes vertical slices with contracts. Check that slices are genuinely vertical (end-to-end), not horizontal layers. Then:
-
-```
-> approved
-```
-
-### Step 5 — Plan
-
-```
+> /qrspi-structure RUS-42      # writes structure.md
 > /clear
-> /qrspi-plan DASH-417
-```
-
-Spot-check only — alignment already happened. Verify test commands are correct. Then:
-
-```
-> approved
-```
-
-### Step 6 — Work Tree
-
-```
+> /qrspi-plan RUS-42           # writes plan.md
 > /clear
-> /qrspi-worktree DASH-417
-```
-
-Review session boundaries. Each session becomes a separate Claude Code invocation. Then:
-
-```
-> approved
-```
-
-### Step 7 — Implement (repeat per slice)
-
-```
+> /qrspi-worktree RUS-42       # writes worktree.md
 > /clear
-> /qrspi-implement DASH-417 1
-```
-
-Claude implements Slice 1 only, runs tests, appends to `impl-log.md`. Review the code. Then start a fresh session for the next slice:
-
-```
+> /qrspi-implement RUS-42 1    # implements slice 1, appends to impl-log.md
 > /clear
-> /qrspi-implement DASH-417 2
-```
-
-Repeat until all slices are done.
-
-### Step 8 — PR
-
-```
+> /qrspi-implement RUS-42 2    # slice 2 in a fresh session
 > /clear
-> /qrspi-pr DASH-417
+> /qrspi-pr RUS-42             # writes pr-summary.md
 ```
 
-Claude writes `pr-summary.md`. Copy it into your PR description. **Read and own every line of code before merging.**
+Manual runs do not move Linear status or submit PRs on their own — those transitions belong to `/qrspi-work`. Use manual phases for spot fixes, then hand control back to the orchestrator.
 
 ---
 
-## 5. Context Management During a Session
+## 8. Batch: Many Tickets at Once
+
+`.claude/workflows/qrspi-batch.js` drives **many assigned tickets** through the autonomously-runnable states by spawning the typed phase agents from the workflow script itself. It only touches the states that need no human judgment:
+
+- **Selected** → run the design half
+- **Design Approved** → run the plan half
+- **Plan Approved** → implement all slices
+
+It **deliberately leaves the human review gates (Design Review, Plan Review) untouched** — tickets parked at those statuses are skipped so a human can review the PR and advance them. Run the batch after you have moved a set of tickets into Selected, Design Approved, or Plan Approved; it processes each one to its next gate.
+
+---
+
+## 9. Context Management During a Session
 
 Use these built-in Claude Code commands throughout:
 
@@ -548,57 +318,68 @@ Use these built-in Claude Code commands throughout:
 | `/clear` | Full reset. Use between phases and between implementation slices. |
 | `/cost` | Check token spend. Useful for budgeting. |
 
-The workflow is designed so that `/clear` between every phase is the default. Each skill loads only the artifacts it needs. This is the primary defense against context degradation.
+The workflow is designed so that a fresh session per phase (and per slice) is the default. Each agent loads only the artifacts named in its input contract — `worktree.md`'s per-session budgets keep each implementation session under the 40% target. This is the primary defense against context degradation.
 
 ---
 
-## 6. Handling Revisions
+## 10. Handling Revisions
 
-When you reject an artifact (say "revise: <your notes>" instead of "approved"):
+Revisions are driven through the **PR review gates**, not by typing "revise" in a session:
 
-1. Claude re-runs the same skill with your notes as additional context.
-2. The artifact is overwritten with the revised version.
-3. Keep a manual note of what you changed and why — useful for future pipeline tuning.
+- At **Design Review**, leave review comments on the planning PR. The next `/qrspi-work` invocation reads the comments and addresses them, with the cascade bounded to Questions → Research → Design (the plan-half artifacts don't exist yet). It amends the single planning commit and re-pushes.
+- At **Plan Review**, comment on the same planning PR. The orchestrator re-runs the earliest affected artifact and cascades forward through the plan half.
+- At **Code Review**, comment on the slice PRs. The orchestrator addresses feedback starting from the lowest-numbered affected slice (changes restack upward through the stack).
 
-For substantial design redirects (e.g., "don't use WebSocket, use long-polling"), edit `design.md` directly in your editor, then tell Claude "I've updated design.md, proceed to Structure."
+For substantial design redirects, edit `design.md` directly in the worktree and commit it before re-running — the orchestrator treats the on-disk artifact as the source of truth for downstream phases. The human always owns moving the ticket from a Review status to the corresponding Approved status.
 
 ---
 
-## 7. Adapting to Your Project
+## 11. Adapting to Your Project
+
+### Configure Linear
+
+Tickets live in Linear. Configure the Linear MCP server for your workspace and set the team/project in `.claude/CLAUDE.md` so `/qrspi-ticket` files issues in the right place. The orchestrator's status names (Backlog, Selected, Design Review, Design Approved, Plan Review, Plan Approved, Code Review, Code Approved, Done) must exist as statuses in your Linear team.
 
 ### Customize test commands
 
-Edit each skill's Verification sections to match your test runner. For example, if you use `pytest` instead of `npm test`:
+The verification commands live in the templates and the plan/implement agents. Edit them to match your test runner (e.g., `pytest` vs `npm test`) so each slice's Verify checkpoint runs the right command.
 
-In `qrspi-plan/SKILL.md`, change the example verify command convention. In `qrspi-implement/SKILL.md`, update the verification instructions.
+### Customize tool lockdowns
 
-### Customize allowed tools
-
-Each skill's `allowed-tools` frontmatter controls what Claude can do. The Research and Design phases intentionally restrict to read-only tools. Implementation opens up `Bash` and `Write`. Adjust these per your security requirements.
+Each agent's `allowed-tools` frontmatter controls what that phase can do. The Questions, Research, and planning phases intentionally restrict tools; Implement opens up `Write`/`Edit`/`Bash`. Adjust per your security requirements, but keep the Research firewall (no ticket access, no Linear) intact — it is what prevents anchoring.
 
 ### Add project conventions to CLAUDE.md
 
-Your `.claude/CLAUDE.md` should include project-specific patterns: naming conventions, directory layout, preferred libraries, test patterns. The Research agent will discover these from the codebase, but explicit documentation reduces hallucination.
+Your `.claude/CLAUDE.md` should include project-specific patterns: naming conventions, directory layout, preferred libraries, test patterns. The Research agent discovers these from the codebase, but explicit documentation reduces hallucination.
 
 ### Team sharing
 
-Commit `.claude/skills/` to your repo. Every team member gets the same workflow. Artifact outputs in `.qrspi/` can be committed too — they serve as design documentation for the feature.
+Commit `.claude/agents/`, `.claude/skills/`, and `.claude/workflows/` to your repo so every team member gets the same workflow. Per-ticket `.qrspi/<ticket-id>/` artifacts are committed on the planning branch and cleaned up at Done; the `.qrspi/templates/` directory is the shared single source of truth for artifact formats.
 
 ---
 
-## 8. Troubleshooting
+## 12. Troubleshooting
 
 **"Claude skipped a section in the artifact"**
-The skill prompt may be too long. Check that each `SKILL.md` is under 500 lines and under ~40 distinct instructions. The instruction budget ceiling is real.
+The agent prompt may be too long. Keep each agent file focused and under its instruction budget. The phase artifacts follow the formats in `.qrspi/templates/` — verify the template is being referenced rather than re-specified inline.
 
-**"Claude read the ticket during Research"**
-The Research skill explicitly says not to. If it still does, add `ticket.md` to a `.gitignore`-style exclusion, or temporarily move it out of the `.qrspi/<id>/` directory during research.
+**"Research read the ticket"**
+The research agent's tool definition excludes Linear MCP and forbids ticket reads, and the orchestrator never passes ticket content into the research input contract. If you are running research manually, do not paste the ticket into the session. This firewall is the anchoring-prevention mechanism — don't bypass it.
+
+**"Questions tried to explore the codebase"**
+The questions agent has no `Glob`/`Grep`/`Bash`, so this is structurally impossible. If you see it happening, the agent's tool lockdown has been edited — restore it.
 
 **"Context is degrading mid-implementation"**
-Run `/context`. If over 40%, run `/compact` or `/clear` and restart the current slice. The worktree's session boundaries are designed to prevent this — respect them.
+Run `/context`. If over 40%, `/clear` and restart the current slice. The worktree's per-session budgets are designed to prevent this — respect the session boundaries.
 
 **"Claude invented a pattern not in the codebase"**
-This should be caught during Design review. The `(ref: QN)` citation requirement makes uncited claims visible. If it slips through, the Structure agent's "Unverified Assumptions" section is the second safety net.
+This should be caught at Design Review — the design's citation requirements make uncited claims visible. The Structure phase's "Unverified Assumptions" section is the second safety net.
 
 **"Slices feel too large"**
-If a slice touches > 10 files or takes a full context window, go back to Structure and split it. The workflow supports re-running any phase.
+If a slice touches more than ~10 files or fills a context window, go back to Structure and split it, then re-run Plan and Worktree. The workflow supports re-running any phase.
+
+**"`/qrspi-work` won't advance past a Review status"**
+That is by design. Design Review and Plan Review are human gates — the orchestrator only addresses PR feedback or waits there. Move the ticket to Design Approved / Plan Approved in Linear (after reviewing the PR) and re-invoke `/qrspi-work`.
+
+**"The planning PR's prior PR was closed/merged and `gt submit` refuses"**
+This is a recognized Graphite stale-association state, handled by the orchestrator's resubmit recovery (detach the dead PR by renaming the branch away and back, then submit with `--force`). It is not an infrastructure error.

@@ -59,7 +59,7 @@ Real example: Email preferences feature, Phases 0-8, with actual agent outputs.
 Contains:
 
 - Complete walkthrough of one feature
-- Real artifacts (ticket.md, questions.md, research.md, design.md, etc.)
+- Real artifacts (the Linear ticket, questions.md, research.md, design.md, etc.)
 - Human feedback and agent incorporation (brain surgery example)
 - Time per phase, actual vs. estimated
 - Code snippets showing what "done" looks like

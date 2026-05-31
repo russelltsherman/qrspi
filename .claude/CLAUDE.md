@@ -57,6 +57,7 @@ stays on `main`; all ticket work happens in worktrees. `.worktrees/` is gitignor
 
 ### Codebase conventions
 
-- Agent prompt definitions live in `.qrspi/agents/`
+- Phase agent definitions live in `.claude/agents/`; their slash-command wrappers live in `.claude/skills/`
+- The batch orchestrator workflow lives in `.claude/workflows/qrspi-batch.js`
 - Artifact templates live in `.qrspi/templates/` (reference only — not written locally)
 - Eval harness lives in `evals/` and `scripts/`

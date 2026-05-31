@@ -5,7 +5,7 @@ A structured workflow for agentic feature development using Claude Code. QRSPI d
 ## Inspiration
 
 This project was inspired by [Dex Horthy's talk](https://www.youtube.com/watch?v=YwZR6tc7qYg) on structured approaches to agentic software development.
-x
+
 ## Why
 
 LLMs are capable implementers but poor planners when given unbounded scope. They skip ahead, conflate problem definition with solution design, and lose coherence on large tasks. QRSPI constrains each phase to a specific job: the ticket defines the problem, questions probe the codebase, research gathers facts, design makes decisions, and implementation follows the plan. No phase sees more context than it needs.
@@ -74,7 +74,16 @@ Each phase has a standalone skill that can be invoked manually. These exist prim
 
 ```
 .claude/
-  skills/              # Skill definitions (one SKILL.md per phase)
+  agents/              # Phase agent definitions — the actual phase logic the orchestrator spawns
+    qrspi-questions.md
+    qrspi-research.md
+    qrspi-design.md
+    qrspi-structure.md
+    qrspi-plan.md
+    qrspi-worktree.md
+    qrspi-implement.md
+    qrspi-pr.md
+  skills/              # Slash-command wrappers that invoke the phase agents
     qrspi-ticket/
     qrspi-questions/
     qrspi-research/
@@ -84,7 +93,9 @@ Each phase has a standalone skill that can be invoked manually. These exist prim
     qrspi-worktree/
     qrspi-implement/
     qrspi-pr/
-    qrspi-work/        # Autonomous orchestrator
+    qrspi-work/        # Autonomous orchestrator (Linear-status state machine)
+  workflows/
+    qrspi-batch.js     # Batch orchestrator — drives many tickets through the autonomous states
 .qrspi/
   templates/           # Canonical output formats (single source of truth)
     ticket.md
@@ -111,22 +122,26 @@ docs/                  # Guides and reference documentation
 
 **Vertical slices over horizontal layers.** Structure decomposes work into end-to-end testable paths, not "all database changes" then "all API changes." Each slice delivers something verifiable.
 
-**Human review at every gate.** Artifacts are drafted, not shipped. The human reviews and approves before the next phase begins. `/qrspi-work` automates execution but Linear status transitions signal human checkpoints.
+**Human review at every gate.** Artifacts are drafted, not shipped. Planning stops at two review gates — Design Review (after the design half) and Plan Review (after the plan half) — before implementation. `/qrspi-work` automates execution within a stage, but Linear status transitions signal the human checkpoints.
 
 **Worktree isolation.** Each ticket gets its own git worktree at `.worktrees/<ticket-id>/`. Multiple agents can work on different tickets concurrently without branch checkout conflicts.
 
 ## Linear Integration
 
-Tickets are created and tracked as Linear issues in the Russelltsherman team, QRSPI project. Linear statuses drive the `/qrspi-work` state machine:
+Tickets are created and tracked as Linear issues in the Russelltsherman team, QRSPI project. Linear statuses drive the `/qrspi-work` state machine. Planning is split into a **design half** (questions, research, design) and a **plan half** (structure, plan, work tree), separated by two human review gates:
 
 | Linear Status | Action |
 |---------------|--------|
-| Backlog / Selected | Run all planning phases, submit planning PR |
-| Plan Review | Address review feedback on planning artifacts |
+| Backlog / Selected | Run the design half (questions, research, design); submit planning PR |
+| Design Review | Address review feedback on the design-half artifacts (gate) |
+| Design Approved | Run the plan half (structure, plan, work tree); update the planning PR |
+| Plan Review | Address review feedback on the plan-half artifacts (gate) |
 | Plan Approved | Implement all slices, submit stacked PRs |
 | Code Review | Address review feedback on implementation |
 | Code Approved | Report ready to merge (human-owned) |
 | Done | Clean up artifacts and worktree |
+
+All six planning artifacts live on one `<ticket-id>/planning` branch as a single amended commit; the planning PR is submitted at Design Review and re-submitted (grown with the plan-half artifacts) at Plan Review.
 
 ## Requirements
 
