@@ -220,14 +220,23 @@ Save the ticket content from the Linear fetch — you'll pass it to some sub-age
 
 ### Submit and transition
 
-1. Push and create the PR:
+1. Check for a stale PR association before submitting (handles a rejected/reworked ticket
+   whose earlier planning PR was closed):
+   ```bash
+   gt info <ticket-id>/planning --no-interactive
+   ```
+   - If the output shows an associated PR marked `(Closed)` or `(Merged)`: follow
+     [Resubmitting when the prior PR was closed or merged](#resubmitting-when-the-prior-pr-was-closed-or-merged)
+     — that procedure detaches the dead PR **and** submits with `--force`. Then skip to step 3.
+   - Otherwise (open PR, or no PR yet): continue to step 2 with a normal submit.
+2. Push and create the PR:
    ```bash
    gt submit --no-edit --no-interactive
    ```
-2. Capture the PR URL from the output.
-3. Update Linear status to `Plan Review`:
+3. Capture the PR URL from the output.
+4. Update Linear status to `Plan Review`:
    Call `mcp__linear-russelltsherman__save_issue` with `id: "<ticket-id>"` and `state: "Plan Review"`.
-4. Print: "Planning complete. PR: `<url>`. Ticket moved to Plan Review."
+5. Print: "Planning complete. PR: `<url>`. Ticket moved to Plan Review."
 
 ---
 
@@ -389,22 +398,35 @@ After all slices are implemented, generate a PR summary for reviewers.
 
 ### Submit and transition
 
-1. Submit the entire stack:
+1. Check each stack branch for a stale PR association before submitting (handles a reworked
+   ticket whose earlier slice PRs were closed):
    ```bash
-   gt submit --stack --no-edit --no-interactive
+   for branch in $(gt log short --no-interactive | grep -oE '<ticket-id>/(planning|slice-[0-9]+)'); do
+     gt info "$branch" --no-interactive | grep -qE '\((Closed|Merged)\)' && echo "STALE: $branch"
+   done
    ```
-2. Capture PR URLs and PR numbers from the output.
-3. Set the PR summary as the body on the bottom slice PR (slice-1), which gives reviewers full context at the stack's entry point:
+   For every branch printed as `STALE`, checkout that branch and run the rename-detach cycle from
+   [Resubmitting when the prior PR was closed or merged](#resubmitting-when-the-prior-pr-was-closed-or-merged)
+   (rename away, rename back). You do not need to submit each one individually — the stack submit
+   in step 2 covers them, but it must use `--force` if ANY branch was detached (the deleted remote
+   branches leave stale force-with-lease refs). Leave branches with an **open** PR untouched.
+2. Submit the entire stack (add `--force` if step 1 detached any stale branch):
+   ```bash
+   gt submit --stack --no-edit --no-interactive            # normal case
+   gt submit --stack --force --no-edit --no-interactive    # if any branch was detached in step 1
+   ```
+3. Capture PR URLs and PR numbers from the output.
+4. Set the PR summary as the body on the bottom slice PR (slice-1), which gives reviewers full context at the stack's entry point:
    ```bash
    gh pr edit <slice-1-pr-number> --body "$(cat .qrspi/<ticket-id>/pr-summary.md)"
    ```
-4. For each subsequent slice PR, set a focused body with that slice's goal and impl-log entry:
+5. For each subsequent slice PR, set a focused body with that slice's goal and impl-log entry:
    ```bash
    gh pr edit <slice-N-pr-number> --body "<slice N goal from structure.md and impl-log entry>"
    ```
-5. Update Linear status to `Code Review`:
+6. Update Linear status to `Code Review`:
    Call `mcp__linear-russelltsherman__save_issue` with `id: "<ticket-id>"` and `state: "Code Review"`.
-6. Print: "Implementation complete. `<N>` PRs submitted. Ticket moved to Code Review."
+7. Print: "Implementation complete. `<N>` PRs submitted. Ticket moved to Code Review."
 
 ---
 
@@ -637,6 +659,45 @@ This is a hard boundary. If the plan references files outside the project, repor
 - Never run raw `git` commands when a `gt` equivalent exists.
 - After mutations, run `gt log short --no-interactive` to verify stack state.
 - **Planning uses a single commit.** Phase 1 (Questions) creates the commit with `gt modify -c`. Phases 2–6 amend it with `gt modify` (no `-c`). The commit message is always `<ticket-id>: Planning`.
+
+### Resubmitting when the prior PR was closed or merged
+
+Graphite pins each branch to the first PR it created for it, in `.git/.graphite_pr_info`.
+When a task is **rejected and reworked** (PR closed) or a PR was squash-merged and its
+remote branch deleted, that association becomes stale: the local branch still points at a
+dead PR. `gt submit` then refuses to open a fresh PR — it tries to reuse the closed/merged
+one and fails (e.g. `PR ... has already been merged or closed`). `gt untrack` + `gt track`
+does **not** clear this; the association survives.
+
+Recovery takes **two** steps — both are required (verified empirically):
+
+1. **Detach the dead PR with `gt rename`.** GitHub PR branch names are immutable, so renaming a
+   branch drops its PR association; renaming straight back restores the canonical name with the
+   stale PR cleared. (`gt submit --force` alone does NOT work — Graphite rejects the closed-PR
+   association during stack validation, *before* any push, so force-push never runs.)
+2. **Submit with `--force`.** Because the old remote branch was deleted, a plain `gt submit`
+   fails with `Force-with-lease push failed due to external changes to the remote branch`. The
+   `--force` flag bypasses the stale force-with-lease ref. (`--force` here is safe: the remote
+   branch is gone, so there is nothing of value to overwrite.)
+
+```bash
+# Run from the worktree, on the branch being submitted.
+gt rename <branch>-stale --no-interactive   # 1a. detaches the dead PR
+gt rename <branch>        --no-interactive   # 1b. restores the canonical name
+gt info <branch> --no-interactive            #     confirm: no "PR #… (Closed)/(Merged)" line remains
+gt submit --force --no-edit --no-interactive #  2. creates a brand-new PR
+```
+
+**Run the four commands as one uninterrupted sequence.** The detach clears the in-memory
+association, but `.git/.graphite_pr_info` still holds the branch→PR mapping; any other `gt`
+command run between the rename-back and the submit can re-hydrate the closed-PR association and
+re-block the submit. Detach, confirm, submit — nothing else in between.
+
+**This is a recognized workflow state, not an infrastructure error — the HARD STOP rule does
+not apply here.** Only apply this when `gt info` shows an associated PR in state `(Closed)` or
+`(Merged)`; never rename a branch with an **open** PR (that would orphan the open PR), and never
+use `--force` on the normal (non-recovery) submit path — that path relies on `--force-with-lease`
+for safety.
 
 ### Staging — NEVER use `-a` flag
 
