@@ -14,7 +14,7 @@ One-page cheat sheet. Print it.
 
 - All phases summarized at a glance
 - Validation checklists for each phase
-- The Linear-status lifecycle and the two review gates
+- The per-phase stacked PR-gated lifecycle
 - When-to-use decision tree
 - Common mistakes list
 
@@ -38,7 +38,7 @@ Educational walkthrough of how to actually use the system.
 **Key sections:**
 
 - Part 1: Why QRSPI exists (the problem it solves)
-- Part 2: Step-by-step quickstart (the phases and the two review gates)
+- Part 2: Step-by-step quickstart (the phases and the per-phase PR review gates)
 - Part 3: How to train your agent on the framework
 - Part 4: Common mistakes & how to avoid them
 - Part 5: Measuring success (5 key metrics)
@@ -62,7 +62,7 @@ Complete annotated example of one feature going through every phase.
 
 - Reference implementation (what good artifacts look like)
 - Understanding the feedback loop (brain surgery in Design phase)
-- Seeing how the two review gates work in practice
+- Seeing how the per-phase PR review gates work in practice
 - Understanding how artifacts feed into each other
 
 **Key sections:**
@@ -70,7 +70,7 @@ Complete annotated example of one feature going through every phase.
 - Ticket — the Linear issue that defines the problem
 - Questions — `questions.md`
 - Research — `research.md` (with the agent's actual output; ticket hidden)
-- Design — `design.md` (includes human feedback at the Design Review gate)
+- Design — `design.md` (includes human feedback from the Design PR review)
 - Structure — `structure.md`
 - Plan — `plan.md`
 - Work Tree — `worktree.md`
@@ -96,13 +96,13 @@ Step-by-step instructions for installing and running QRSPI using Claude Code age
 
 **Key sections:**
 
-- Project directory structure (`.claude/agents/`, `.claude/skills/`, `.claude/workflows/`, `.qrspi/`)
+- Project directory structure (`.claude/agents/`, `.claude/skills/`, `.claude/workflows/`, `scripts/`, `.qrspi/`)
 - CLAUDE.md template
 - Phase agent definitions and their slash-command wrappers
-- The `/qrspi-work` orchestrator and the `qrspi-batch` workflow
+- The `/qrspi-work` orchestrator, the PR-gated state resolver, and the `qrspi-batch` workflow
 - Step-by-step walkthrough of one feature
 - Context management commands
-- Handling revisions
+- Handling revisions and resets
 
 **Time to use:** 30 min setup, reference as needed
 
@@ -113,7 +113,7 @@ Step-by-step instructions for installing and running QRSPI using Claude Code age
 ### For Beginners (First Time Using QRSPI)
 
 1. **Read:** Quick Reference Card (5 min)
-   - Goal: See the shape of the workflow and the two review gates at a glance
+   - Goal: See the shape of the workflow and the per-phase PR review gates at a glance
 
 2. **Read:** Practical Application Guide (Parts 1-2, ~45 min)
    - Goal: Understand why QRSPI exists and how to start
@@ -128,7 +128,7 @@ Step-by-step instructions for installing and running QRSPI using Claude Code age
    - Command: `/qrspi-ticket <brief description>` — drafts a Linear issue through guided conversation
 
 6. **Continue:** Drive the ticket forward
-   - Command: `/qrspi-work <ticket-id>` — reads the ticket's Linear status and runs the matching phase, stopping at each human review gate
+   - Command: `/qrspi-work <ticket-id>` — reads the ticket's PR review state, runs the matching phase, and auto-advances when the active phase PR is approved; it waits at any PR still in review
 
 **Total learning time:** ~3 hours
 
@@ -152,7 +152,7 @@ Step-by-step instructions for installing and running QRSPI using Claude Code age
 2. **Build:** Custom CLAUDE.md additions for your codebase (1-2 hours)
    - Goal: Capture project-specific conventions so agents don't hallucinate them
 
-3. **Batch:** Use the `qrspi-batch` workflow to drive many assigned tickets through the autonomously-runnable Linear states (Selected, Design Approved, Plan Approved) at once
+3. **Batch:** Use the `qrspi-batch` workflow to drive many assigned tickets one PR-gated step forward at once — it runs the autonomously-runnable actions (run_design, advance, submit, land, automatic reset) and leaves manual revise and not-yet-approved tickets untouched
 
 4. **Establish:** Team standard (which features use QRSPI)
 
@@ -179,7 +179,7 @@ Know what's in each phase           → Quick Reference Card
 
 ### Core Materials
 
-1. ✅ **Quick Reference Card** — Phases, the lifecycle, and checklists at a glance
+1. ✅ **Quick Reference Card** — Phases, the PR-gated lifecycle, and checklists at a glance
 2. ✅ **Practical Application Guide** — How to use it
 3. ✅ **Working Example** — Proof it works
 4. ✅ **Claude Code Implementation Guide** — How to install it
@@ -202,19 +202,20 @@ Know what's in each phase           → Quick Reference Card
 | Implement | code + `impl-log.md` — one slice per fresh session |
 | PR | `pr-summary.md` |
 
-The ticket lives in Linear; all other artifacts are local files under `.qrspi/<ticket-id>/`. Linear holds status and phase-transition comments only — artifacts are not uploaded to Linear.
+The ticket lives in Linear; all other artifacts are local files under `.qrspi/<ticket-id>/`. Linear holds best-effort reporting status only — artifacts are not uploaded to Linear, and Linear does not gate advancement.
 
-**Planning is split into two halves separated by two human review gates:**
+**Each phase is its own stacked pull request, and PR review state — not Linear status — is the authority for advancement:**
 
-- **Design half** — questions, research, design → **Design Review** gate
-- **Plan half** — structure, plan, work tree → **Plan Review** gate
+- **Design PR** (`<id>/design`) — questions, research, design
+- **Plan PR** (`<id>/plan`, stacked on design) — structure, plan, work tree
+- **Slice PRs** (`<id>/slice-1..N`, stacked on plan) — implementation, one PR per slice
 
-All six planning artifacts live on one `<ticket-id>/planning` branch as a single amended commit. The planning PR is submitted at Design Review and re-submitted (grown with the plan-half artifacts) at Plan Review. Implementation produces a stacked PR per slice.
+The whole stack is **held open** until every PR is approved, then **landed bottom-up** — nothing merges mid-feature. Approving a phase PR (`reviewDecision == APPROVED` **and** zero unresolved review threads) **auto-advances**: the next phase is built stacked on top. A formal `CHANGES_REQUESTED` on an upstream PR **resets** — every downstream phase is discarded (PRs closed, branches deleted, stale artifacts removed) and the ticket returns to that phase. Addressing review comments within a phase (**revise**) is manual.
 
 **Why it works:**
 
 - Aligns agent and human early (before coding)
-- Catches hallucinations in Design, not Code Review
+- Catches hallucinations at the Design PR, not at code review
 - The research firewall (ticket hidden, no Linear access) prevents anchoring bias
 - Produces code that integrates first time
 - Makes code review boring (no surprises)
@@ -224,22 +225,26 @@ All six planning artifacts live on one `<ticket-id>/planning` branch as a single
 ## How It Runs
 
 - **`/qrspi-ticket <description>`** creates a new Linear ticket through guided conversation.
-- **`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It reads the ticket's Linear status, runs the matching action (design half, plan half, implementation, or review response), and stops at the two human review gates. It never advances past Design Review or Plan Review on its own.
+- **`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It gathers the ticket's PR review state, resolves the next action with the tested resolver (`scripts/qrspi_resolve_state.py`), and executes it — design, plan, implementation, advance, reset, or land. It auto-advances when a phase PR is approved and clean, waits while a PR is still in review, and never decides advancement from Linear status.
 - Each phase's logic lives in a purpose-built agent at `.claude/agents/qrspi-<phase>.md` with per-phase tool lockdowns; the orchestrator spawns them by `subagent_type`. Slash-command wrappers live at `.claude/skills/qrspi-<phase>/SKILL.md`.
-- **`qrspi-batch`** (`.claude/workflows/qrspi-batch.js`) drives many assigned tickets through the autonomously-runnable Linear states (Selected, Design Approved, Plan Approved) by spawning the typed phase agents. It deliberately leaves the human review gates (Design Review, Plan Review) untouched.
+- **`qrspi-batch`** (`.claude/workflows/qrspi-batch.js`) drives many assigned tickets one PR-gated step forward by resolving each ticket's PR state and spawning the typed phase agents. It runs the autonomously-runnable actions (run_design, advance, submit, land, and automatic reset/discard) and deliberately leaves manual revise and not-yet-approved (wait) tickets untouched.
 
-### The Linear status lifecycle
+### The PR-gated lifecycle
 
-| Linear Status | Action |
-|---------------|--------|
-| Backlog / Selected | Run the design half (questions → research → design); submit the planning PR; move to Design Review |
-| Design Review | **(human gate)** review the design-half PR; address feedback; the human moves the ticket to Design Approved |
-| Design Approved | Run the plan half (structure → plan → work tree); update the planning PR; move to Plan Review |
-| Plan Review | **(human gate)** review the full plan PR; address feedback; the human moves the ticket to Plan Approved |
-| Plan Approved | Implement all slices; submit stacked PRs (one per slice); move to Code Review |
-| Code Review | Address implementation review feedback; the human moves the ticket to Code Approved |
-| Code Approved | Report ready to merge (human-owned merge) |
-| Done | Clean up artifacts and worktree |
+PR review state is the authority. Linear plays two roles only: an **entry gate** (a ticket may begin only if it is *assigned* and in `Selected`) and a **best-effort reporting projection** (a failed Linear write never blocks work). The `*Approved` statuses were dropped — approval lives in the PR. The reporting statuses are `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.
+
+The action is computed by the resolver from the live PR state, not a hand-coded Linear-status machine:
+
+| Resolver action | What `/qrspi-work` does | Linear projection (best-effort) |
+|-----------------|--------------------------|----------------------------------|
+| `run_design` | Entry gate satisfied (assigned + `Selected`); build the design PR (questions → research → design) on `<id>/design` off trunk | `Design Review` |
+| `advance` → plan | Design PR approved + clean; build the plan PR (structure → plan → work tree) on `<id>/plan`, stacked on design | `Plan Review` |
+| `advance` → implementation | Plan PR approved + clean; build the slice PR stack `<id>/slice-1..N`, stacked on plan | `Code Review` |
+| `submit` | A phase branch exists but its PR was never opened; finish artifacts and submit | matching phase status |
+| `wait` | The active phase PR is awaiting review — nothing to do until a human approves it | unchanged |
+| `revise` | The active phase PR has unresolved threads — address them (manual, only on explicit invocation) | active phase status |
+| `reset` | A formal `CHANGES_REQUESTED` on an upstream PR — discard every downstream phase automatically and return to that phase | reset phase status |
+| `land` | Every PR in the stack is approved + clean — land the whole stack bottom-up, then clean up | `Done` |
 
 ### Worktrees
 
@@ -259,20 +264,24 @@ Each ticket gets its own git worktree at `.worktrees/<ticket-id>/` (gitignored).
 
 ### The agent advanced past a review gate on its own
 
-It should not. `/qrspi-work` stops at **Design Review** and **Plan Review** — these are human turns. The human moves the ticket to Design Approved / Plan Approved in Linear; only then does the next half run. If the orchestrator skipped a gate, check that the Linear status was actually transitioned by a human and not by the orchestrator.
+It should not. `/qrspi-work` advances only when the active phase PR has `reviewDecision == APPROVED` **and** zero unresolved review threads. Approval lives in the PR — a human approving the PR is what unlocks the next phase. If the orchestrator built a downstream phase unexpectedly, check the upstream PR's review state on GitHub (it was likely actually approved). Linear status is reporting only and never triggers advancement, so a wrong Linear status cannot cause this.
+
+### A change request reset my downstream work
+
+This is by design. A formal `CHANGES_REQUESTED` on an upstream phase PR (e.g. the design PR) automatically discards every phase stacked above it — those PRs are closed, their branches deleted, and the stale artifacts removed — and returns the ticket to that phase. The downstream work was derived from a superseded upstream, so it is regenerated from scratch once the upstream is re-approved. To avoid losing downstream effort, catch issues at the earliest PR; a plain comment or unresolved nit only blocks advancement (it does not reset).
 
 ### I tried QRSPI and it took longer than unstructured
 
 **Likely cause:**
 
-- Skipped or rushed the Design Review gate (the most valuable checkpoint)
-- Didn't review artifacts before approving the half
+- Skipped or rushed the design PR review (the most valuable checkpoint)
+- Didn't review artifacts before approving the phase PR
 - Agent hallucinated and had to redo work
 
 **Fix:**
 
 - Read Practical Application (Part 4: Common Mistakes)
-- Treat the two review gates as real reviews, not rubber stamps
+- Treat each phase PR review as a real review, not a rubber stamp — especially the design PR
 - Measure **total time including debugging**, not just alignment time
 
 ### The artifacts feel like busywork
@@ -310,7 +319,7 @@ If QRSPI wins on 3/4 metrics, you've found value.
 
 QRSPI isn't a constraint. It's a structure that creates freedom.
 
-By investing time upfront in alignment — and by holding the line at the two review gates — you get:
+By investing time upfront in alignment — and by holding the line at each phase's PR review — you get:
 
 - Freedom from surprise reworks
 - Freedom to be confident in code review

@@ -39,7 +39,7 @@ Most workflows require only two commands:
 
 **`/qrspi-ticket <description>`** creates a new feature ticket through guided conversation. It gathers problem context, drafts a structured Linear issue, and sets up the local artifact directory. This is the starting point for any new feature.
 
-**`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It reads the ticket's Linear status, determines the current phase, and executes the appropriate action — planning, implementation, or review response — without manual phase-by-phase invocation. Use this to drive a ticket from backlog through to PR.
+**`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It reads the ticket's **PR review state** (not Linear status), determines the current phase, and executes the appropriate action — design, plan, implementation, advance, reset, or land — without manual phase-by-phase invocation. Use this to drive a ticket from `Selected` through to a landed stack.
 
 ```
 # Start a new feature
@@ -93,9 +93,14 @@ Each phase has a standalone skill that can be invoked manually. These exist prim
     qrspi-worktree/
     qrspi-implement/
     qrspi-pr/
-    qrspi-work/        # Autonomous orchestrator (Linear-status state machine)
+    qrspi-work/        # Autonomous orchestrator (PR-gated state machine)
   workflows/
-    qrspi-batch.js     # Batch orchestrator — drives many tickets through the autonomous states
+    qrspi-batch.js     # Batch orchestrator — drives many tickets one PR-gated step forward
+scripts/
+  qrspi_resolve_state.py       # Tested PR-gated decision logic (the resolver)
+  qrspi_resolve_state_test.py  # unit tests (alongside the module)
+  qrspi_pr_state.py            # Gathers PR review state (gh GraphQL reviewThreads)
+  qrspi_pr_state_test.py       # unit tests (alongside the module)
 .qrspi/
   templates/           # Canonical output formats (single source of truth)
     ticket.md
@@ -122,26 +127,38 @@ docs/                  # Guides and reference documentation
 
 **Vertical slices over horizontal layers.** Structure decomposes work into end-to-end testable paths, not "all database changes" then "all API changes." Each slice delivers something verifiable.
 
-**Human review at every gate.** Artifacts are drafted, not shipped. Planning stops at two review gates — Design Review (after the design half) and Plan Review (after the plan half) — before implementation. `/qrspi-work` automates execution within a stage, but Linear status transitions signal the human checkpoints.
+**Human review at every gate.** Artifacts are drafted, not shipped. Each phase becomes its own pull request — design, plan, and implementation — and advancement is gated on that PR being approved with no unresolved review threads. `/qrspi-work` automates execution and auto-advances on approval, but a human approving (or requesting changes on) each PR is the checkpoint. A change request on an upstream phase discards and regenerates the downstream work.
 
 **Worktree isolation.** Each ticket gets its own git worktree at `.worktrees/<ticket-id>/`. Multiple agents can work on different tickets concurrently without branch checkout conflicts.
 
 ## Linear Integration
 
-Tickets are created and tracked as Linear issues in the Russelltsherman team, QRSPI project. Linear statuses drive the `/qrspi-work` state machine. Planning is split into a **design half** (questions, research, design) and a **plan half** (structure, plan, work tree), separated by two human review gates:
+Tickets are created and tracked as Linear issues in the Russelltsherman team, QRSPI project.
+**Linear does not gate advancement — PR review state does.** Linear has two roles only:
 
-| Linear Status | Action |
-|---------------|--------|
-| Backlog / Selected | Run the design half (questions, research, design); submit planning PR |
-| Design Review | Address review feedback on the design-half artifacts (gate) |
-| Design Approved | Run the plan half (structure, plan, work tree); update the planning PR |
-| Plan Review | Address review feedback on the plan-half artifacts (gate) |
-| Plan Approved | Implement all slices, submit stacked PRs |
-| Code Review | Address review feedback on implementation |
-| Code Approved | Report ready to merge (human-owned) |
-| Done | Clean up artifacts and worktree |
+1. **Entry gate.** A ticket may only *begin* if it is assigned to a user and in the `Selected`
+   status. Nothing starts otherwise.
+2. **Reporting projection.** Once work starts, agents update the Linear status to reflect the
+   active phase (`Design Review` → `Plan Review` → `Code Review` → `Done`). These writes are
+   best-effort — a failed Linear update never blocks git/PR work. The `*Approved` statuses were
+   removed; approval lives in the PR.
 
-All six planning artifacts live on one `<ticket-id>/planning` branch as a single amended commit; the planning PR is submitted at Design Review and re-submitted (grown with the plan-half artifacts) at Plan Review.
+What is "ready to advance" is decided wholly by PR status: `reviewDecision == APPROVED` **and**
+zero unresolved review threads. Each phase is its own stacked PR (`<id>/design` → `<id>/plan` →
+`<id>/slice-N`), held open until the whole feature is approved, then landed bottom-up.
+
+| PR-state action | What `/qrspi-work` does |
+|-----------------|--------------------------|
+| `run_design` | Entry gate satisfied; build the design PR (questions, research, design) |
+| `advance` → plan | Design PR approved; build the plan PR (structure, plan, work tree) stacked on it |
+| `advance` → implementation | Plan PR approved; build the slice PR stack |
+| `wait` | Active phase PR awaiting review — nothing to do until approved |
+| `revise` | Unresolved review threads on the active phase — address them (manual) |
+| `reset` | Upstream PR change-requested — discard downstream phases, return to it (automatic) |
+| `land` | Every PR approved + clean — merge the whole stack bottom-up, then `Done` |
+
+The decision is computed by the tested resolver in `scripts/qrspi_resolve_state.py`. See
+`docs/qrspi-pr-gated-lifecycle-design.md` for the full design and rationale.
 
 ## Requirements
 

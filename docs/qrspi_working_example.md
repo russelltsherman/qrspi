@@ -1,12 +1,12 @@
 # QRSPI Working Example: Real Feature Walkthrough
 
-A complete, annotated example of one feature going through the full QRSPI workflow — from ticket creation, through the two planning review gates, to a stacked implementation PR. Use this as a reference for what good outputs look like at each stage and how the Linear status state machine drives the work.
+A complete, annotated example of one feature going through the full QRSPI workflow — from ticket creation, through three stacked phase PRs (design, plan, implementation), to landing the whole stack. Use this as a reference for what good outputs look like at each stage and how **PR review state** drives the work.
 
 ---
 
 ## Feature: Add User Email Preferences
 
-Simple feature that integrates with an existing e-commerce system. This walkthrough shows what real QRSPI work looks like, including where the human review gates sit and how artifacts accumulate on a single planning branch.
+Simple feature that integrates with an existing e-commerce system. This walkthrough shows what real QRSPI work looks like, including where the human review gates sit and how each phase becomes its own stacked PR.
 
 ### How the workflow is shaped
 
@@ -21,17 +21,20 @@ Two things shape everything below:
 
 1. **The ticket is a Linear issue**, not a local markdown file. It lives in the Russelltsherman team, QRSPI project, with an ID like `RUS-42`. Every other artifact is a local file under `.qrspi/RUS-42/`. Linear holds status and phase-transition comments only — artifacts are never uploaded to Linear.
 
-2. **Planning is split into two halves, each ending at a human review gate.** The design half (Questions, Research, Design) ends at **Design Review**; the plan half (Structure, Plan, Work Tree) ends at **Plan Review**. The Linear status is the authoritative state machine that `/qrspi-work` reads on every invocation:
+2. **PR review state — not Linear status — is the authority for advancement.** Linear has exactly two roles: an **entry gate** (a ticket may only begin if it is *assigned* and in `Selected`) and a **best-effort reporting projection** of the active phase (a failed Linear write never blocks work). The lifecycle is a single Graphite stack, one PR per phase, built bottom-up and **held open** until the whole feature is approved, then landed bottom-up:
 
    ```
-   Selected → [Questions·Research·Design] → Design Review → Design Approved
-     → [Structure·Plan·WorkTree] → Plan Review → Plan Approved
-     → [Implementation] → Code Review → Code Approved → Done
+   trunk
+    └── RUS-42/design    Design PR  — questions.md, research.md, design.md
+         └── RUS-42/plan   Plan PR   — structure.md, plan.md, worktree.md   (stacked on design)
+              └── RUS-42/slice-1..N  slice PRs — code                        (stacked on plan)
    ```
 
-   `Design Review`, `Plan Review`, and `Code Review` are **human turns** — the orchestrator waits or addresses PR feedback there and never advances past them autonomously. The human moves the ticket forward (to `Design Approved`, `Plan Approved`, `Code Approved`).
+   A phase PR is **ready** when `reviewDecision == APPROVED` *and* it has zero unresolved review threads. Approving a phase PR **auto-advances**: the next phase is built stacked on top. A human approving each phase PR is what moves the ticket forward. The `*Approved` Linear statuses were **dropped** — approval lives in the PR. Reporting statuses are `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.
 
-All six planning artifacts live on **one** `RUS-42/planning` git branch as a **single amended commit**. The planning PR is submitted once at Design Review, then re-submitted (grown with the plan-half artifacts) at Plan Review.
+   A formal `CHANGES_REQUESTED` on an **upstream** phase PR **resets**: every downstream phase is automatically discarded (PRs closed, branches deleted, stale artifacts removed) and the ticket returns to that phase. **Revise** — addressing review comments *within* a phase — is **manual**, on explicit re-invocation. The decision is computed by the tested resolver `scripts/qrspi_resolve_state.py`; `/qrspi-work` and the batch workflow both call it rather than re-deriving state logic.
+
+Each phase lives on its **own** branch (`RUS-42/design`, `RUS-42/plan`, `RUS-42/slice-N`) as a single commit, stacked on the phase below it. The design PR is opened at Design Review; the plan PR is stacked on it at Plan Review; the slice PRs are stacked on plan at Code Review. Nothing merges until the whole feature is approved.
 
 ---
 
@@ -97,15 +100,15 @@ user has opted out.
 - Preference management for non-registered users
 ```
 
-The issue starts in `Backlog`. Once the engineer is ready to work it, they move it to `Selected` and run `/qrspi-work RUS-42`. From here the orchestrator drives the state machine.
+The issue starts in `Backlog`. Once the engineer is ready to work it, they **assign it to themselves** and move it to `Selected` — that pair (assigned + `Selected`) is the entry gate. Then they run `/qrspi-work RUS-42`. From here the orchestrator resolves state from the PR stack and drives the work forward.
 
 **Time investment:** ~15 minutes
 
 ---
 
-## The Design Half
+## The Design Phase (Design PR)
 
-`/qrspi-work RUS-42` reads the Linear status. With the ticket in `Selected`, the orchestrator sets up the worktree at `.worktrees/RUS-42/` (creating the `RUS-42/planning` branch from `main`), then runs the **design half** — three phases producing three artifacts on a single amended commit.
+`/qrspi-work RUS-42` resolves state from the PR stack. With no `RUS-42/design` branch yet and the entry gate satisfied (assigned + `Selected`), the resolver returns `run_design`. The orchestrator sets up the worktree at `.worktrees/RUS-42/` (creating the `RUS-42/design` branch from `main`), then runs the **design phase** — Questions, Research, Design — three artifacts committed as a single commit on `RUS-42/design`.
 
 The orchestrator spawns each phase as a purpose-built agent defined in `.claude/agents/qrspi-<phase>.md` (each with its own tool lockdown). The slash-command wrappers in `.claude/skills/qrspi-<phase>/` exist for manual re-runs, but `/qrspi-work` spawns the agents directly by `subagent_type`.
 
@@ -117,7 +120,7 @@ The orchestrator spawns each phase as a purpose-built agent defined in `.claude/
 
 The orchestrator spawned the `qrspi-questions` agent with the ticket content (title + description from the Linear fetch). The questions agent has no `Glob`, `Grep`, or `Bash` — exploring the codebase is structurally impossible at this phase. It produces 8–15 technical questions derived from the ticket.
 
-The artifact is written to `.qrspi/RUS-42/questions.md`, then committed as the **first and only** planning commit (`gt modify -c`, message `RUS-42: Planning`). Every later artifact amends this commit.
+The artifact is written to `.qrspi/RUS-42/questions.md`. The design-phase artifacts are committed together once all three exist, as the single commit on `RUS-42/design` (`gt create RUS-42/design`, message `RUS-42 [QR]: Design`).
 
 ### Agent's Output: questions.md
 
@@ -217,7 +220,7 @@ The artifact is written to `.qrspi/RUS-42/questions.md`, then committed as the *
 
 The orchestrator spawned the `qrspi-research` agent. This phase enforces the **anchoring firewall**: the agent never sees the ticket. The orchestrator deliberately does NOT pass `TICKET_CONTENT` to it — only `questions.md`, the output path, the template, and the repo root. The research agent's own tool definition also excludes Linear MCP and forbids reading the ticket. Defense in depth: it answers the questions purely by reading the codebase.
 
-The artifact is written to `.qrspi/RUS-42/research.md` and amends the planning commit (`gt modify`, no `-c`).
+The artifact is written to `.qrspi/RUS-42/research.md` — staged alongside `questions.md` and `design.md` for the single `RUS-42/design` commit.
 
 ### Agent's Output: research.md (Key Sections)
 
@@ -511,7 +514,7 @@ Email failures are logged but not surfaced to user.
 
 The orchestrator spawned the `qrspi-design` agent. Unlike research, design DOES receive the ticket content again — it combines the ticket, the answered questions, and the research findings into pattern decisions, a risk register, the delta, and open questions.
 
-The artifact is written to `.qrspi/RUS-42/design.md` and amends the planning commit.
+The artifact is written to `.qrspi/RUS-42/design.md` — the third and final design-phase artifact, committed together on `RUS-42/design`.
 
 ### Agent's Proposal
 
@@ -600,31 +603,32 @@ Users can selectively disable:
 
 ### The Design Review gate
 
-The orchestrator finishes the design half, amends `design.md` into the single planning commit, and **submits the planning PR** with the three design-half artifacts. It then moves the Linear status to **Design Review** and stops.
+The orchestrator finishes the design phase, commits the three artifacts as the single commit on `RUS-42/design`, and **submits the Design PR**. It then projects the Linear status to **Design Review** (best-effort) and stops.
 
 ```
+gt create RUS-42/design --no-interactive -m "RUS-42 [QR]: Design"
 gt submit --no-edit --no-interactive
-→ PR: https://github.com/.../pull/318
-Linear: RUS-42 → Design Review
-"Design submitted for review. PR: <url>. Ticket moved to Design Review."
+→ Design PR: https://github.com/.../pull/318  (RUS-42/design → main)
+Linear (best-effort): RUS-42 → Design Review
+"Design submitted. PR: <url>. → Design Review."
 ```
 
-This is a **human turn**. The engineer reviews the PR. Suppose they leave one comment:
+This is a **human turn**. The engineer reviews the Design PR. Suppose they leave one comment:
 
 > "On Decision 1: confirm this matches the UserNotifications pattern — separate table, one
 > row per type. Looks right. Approving."
 
-On the next `/qrspi-work RUS-42` invocation while the status is `Design Review`, the orchestrator reads the PR. If there were actionable comments, it would address them — bounded to the design-half artifacts only (Questions → Research → Design; Structure/Plan/Work Tree don't exist yet) — amend the single planning commit, and re-push. Here the comment is approving, so it waits.
+The PR review state is the gate, not Linear. On the next `/qrspi-work RUS-42` invocation, the resolver reads the Design PR. If it had unresolved threads, the action would be `revise` — address the feedback bounded to the design-phase artifacts only (Questions → Research → Design), amend the `RUS-42/design` commit, and re-submit. Here the comment is approving with no unresolved threads, so the resolver returns `wait` and the orchestrator stops.
 
-The human moves the ticket to **Design Approved** in Linear. That is the only thing that unblocks the plan half.
+The engineer **approves the Design PR**. That approval (`reviewDecision == APPROVED`, zero unresolved threads) is the only thing that unblocks the plan phase — the next `/qrspi-work RUS-42` will resolve to `advance` and build the plan PR stacked on top.
 
 **Time spent:** 40 minutes (30 min agent, 10 min review)
 
 ---
 
-## The Plan Half
+## The Plan Phase (Plan PR, stacked on design)
 
-With the status at `Design Approved`, the next `/qrspi-work RUS-42` runs the **plan half**: Structure, Plan, Work Tree. These three phases amend the **same** planning commit that already holds the design-half artifacts — there is still only one commit on `RUS-42/planning`.
+With the Design PR approved, the next `/qrspi-work RUS-42` resolves to `advance` and runs the **plan phase**: Structure, Plan, Work Tree. These three artifacts are committed as a single commit on a **new** `RUS-42/plan` branch **stacked on `RUS-42/design`** — a separate branch and a separate PR from the design phase.
 
 ---
 
@@ -632,7 +636,7 @@ With the status at `Design Approved`, the next `/qrspi-work RUS-42` runs the **p
 
 ### Agent's Output
 
-The orchestrator spawned the `qrspi-structure` agent (input: `design.md`). It defines the vertical slices, the shared types, and the cross-slice contracts. Output: `.qrspi/RUS-42/structure.md` (amends the planning commit).
+The orchestrator spawned the `qrspi-structure` agent (input: `design.md`). It defines the vertical slices, the shared types, and the cross-slice contracts. Output: `.qrspi/RUS-42/structure.md` (staged for the `RUS-42/plan` commit).
 
 ```markdown
 # Structure Outline: Email Preferences Feature
@@ -761,7 +765,7 @@ All slices are sequential (no parallelization possible).
 
 ### Agent's Output (Selected Sections)
 
-The `qrspi-plan` agent (input: `structure.md`, `design.md`) writes atomic implementation steps per slice with verification checkpoints. Output: `.qrspi/RUS-42/plan.md` (amends the planning commit).
+The `qrspi-plan` agent (input: `structure.md`, `design.md`) writes atomic implementation steps per slice with verification checkpoints. Output: `.qrspi/RUS-42/plan.md` (staged for the `RUS-42/plan` commit).
 
 ```markdown
 # Implementation Plan: Email Preferences - Slice 1
@@ -982,7 +986,7 @@ Total: ~3.5 hours (higher than estimate, includes buffer)
 
 ### Agent's Output: worktree.md (Slice 1 session)
 
-The `qrspi-worktree` agent (input: `plan.md`) builds a **session-aware task DAG** with per-session context budgets. Each slice maps to one fresh implementation session. Output: `.qrspi/RUS-42/worktree.md` (amends the planning commit).
+The `qrspi-worktree` agent (input: `plan.md`) builds a **session-aware task DAG** with per-session context budgets. Each slice maps to one fresh implementation session. Output: `.qrspi/RUS-42/worktree.md` (the third and final plan-phase artifact, committed together on `RUS-42/plan`).
 
 ```markdown
 # Work Tree: Email Preferences
@@ -1043,23 +1047,24 @@ between slices" rule), each with its own task DAG and context budget.
 
 ### The Plan Review gate
 
-The plan half is done. All six planning artifacts (`questions.md`, `research.md`, `design.md`, `structure.md`, `plan.md`, `worktree.md`) now sit on the **single** amended commit on `RUS-42/planning`. The orchestrator **re-submits the same planning PR** — now grown with the three plan-half artifacts — and moves the Linear status to **Plan Review**.
+The plan phase is done. Its three artifacts (`structure.md`, `plan.md`, `worktree.md`) sit on the single commit on `RUS-42/plan`, stacked on `RUS-42/design`. The orchestrator **submits the Plan PR** — a separate PR from the design PR, with the design PR as its base — and projects the Linear status to **Plan Review**.
 
 ```
+gt create RUS-42/plan --no-interactive -m "RUS-42 [SP]: Plan"
 gt submit --no-edit --no-interactive
-→ PR #318 updated (now 6 artifacts on one commit)
-Linear: RUS-42 → Plan Review
-"Planning complete. PR: <url>. Ticket moved to Plan Review."
+→ Plan PR #319 opened  (RUS-42/plan → RUS-42/design)
+Linear (best-effort): RUS-42 → Plan Review
+"Plan submitted. PR: <url>. → Plan Review."
 ```
 
-Second **human turn**. The engineer reviews the full plan. Suppose they leave one comment on `design.md`:
+Second **human turn**. The engineer reviews the Plan PR. Suppose they leave one comment on `structure.md` (an unresolved thread, not a formal change request):
 
 > "Decision 1 is right, but call out explicitly in Slice 3 that we're removing the legacy
 > `newsletter` check from promotions.worker.ts so we don't double-suppress."
 
-On the next invocation while the status is `Plan Review`, the orchestrator reads the PR, sees the actionable comment, identifies the affected artifacts, addresses the feedback starting from the earliest affected artifact, amends the single planning commit, and re-pushes the same PR. (Slice 3 in `structure.md` already lists the `promotions.worker.ts` change, so this is a one-line clarification — but the orchestrator never advances the status itself.)
+Because this comment is on the **plan** PR (the active phase), it does not reset the design — it is a within-phase `revise`. On an explicit re-invocation, the orchestrator reads the unresolved thread, addresses it bounded to the plan-phase artifacts (Slice 3 in `structure.md` already lists the `promotions.worker.ts` change, so this is a one-line clarification), amends the `RUS-42/plan` commit, and re-submits the Plan PR. (If instead the reviewer had filed a formal `CHANGES_REQUESTED` on the **design** PR, that would `reset`: the plan branch and PR would be discarded automatically and the ticket would return to design.)
 
-The human reviews the update and moves the ticket to **Plan Approved**. Only that unblocks implementation.
+The engineer **approves the Plan PR**. Approval (with zero unresolved threads) is the only thing that unblocks implementation — the next `/qrspi-work RUS-42` resolves to `advance` and builds the slice stack on top of `RUS-42/plan`.
 
 **Time spent:** Work Tree 30 min + Plan Review 10 min
 
@@ -1067,9 +1072,9 @@ The human reviews the update and moves the ticket to **Plan Approved**. Only tha
 
 ## Phase 7: Implement (I)
 
-With the status at `Plan Approved`, `/qrspi-work RUS-42` runs implementation. It reads `structure.md` to count the slices, then implements each slice in its own fresh session by spawning the `qrspi-implement` agent. Each slice becomes its own branch **stacked** on the previous one via Graphite:
+With the Plan PR approved, `/qrspi-work RUS-42` resolves to `advance` and runs implementation. It reads `structure.md` to count the slices, then implements each slice in its own fresh session by spawning the `qrspi-implement` agent. Each slice becomes its own branch **stacked** on the previous one via Graphite:
 
-- Slice 1 branches off `RUS-42/planning`
+- Slice 1 branches off `RUS-42/plan`
 - Slice 2 branches off `RUS-42/slice-1`
 - Slice 3 branches off `RUS-42/slice-2`
 
@@ -1078,8 +1083,8 @@ The implement agent writes code and appends to `.qrspi/RUS-42/impl-log.md`. The 
 ### Example commits (Slice 1)
 
 ```txt
-Branch: RUS-42/slice-1  (parent: RUS-42/planning)
-Commit: "RUS-42: Slice 1 — Mock API + Frontend"
+Branch: RUS-42/slice-1  (parent: RUS-42/plan)
+Commit: "RUS-42 [I] 1/3: Mock API + Frontend"
 
 Files:
   src/models/emailPreferences.model.ts            (+50)
@@ -1122,19 +1127,19 @@ component wired into AccountSettings. No persistence yet.
 
 ---
 
-## Phase 8: PR — submit the stack and move to Code Review
+## Phase 8: PR — submit the slice stack and move to Code Review
 
 ### What Actually Happened
 
-After all slices are implemented, the orchestrator spawns the `qrspi-pr` agent to produce `.qrspi/RUS-42/pr-summary.md`, which maps acceptance criteria to implementation and tests. The summary is amended into the **last** slice commit (not a separate commit). The orchestrator then submits the **entire stack** with Graphite — **one PR per slice** — and sets the PR summary as the body on the bottom (slice-1) PR.
+After all slices are implemented, the orchestrator spawns the `qrspi-pr` agent to produce `.qrspi/RUS-42/pr-summary.md`, which maps acceptance criteria to implementation and tests. The summary is amended into the **last** slice commit (not a separate commit). The orchestrator then submits the **entire stack** with Graphite — **one PR per slice** — and sets the PR summary as the body on the bottom (slice-1) PR. The slice stack is stacked on the still-open Plan PR, which is stacked on the still-open Design PR; nothing has merged.
 
 ```
 gt submit --stack --no-edit --no-interactive
-→ PR #321  RUS-42/slice-1 → main      (body = pr-summary.md)
-→ PR #322  RUS-42/slice-2 → slice-1
-→ PR #323  RUS-42/slice-3 → slice-2
-Linear: RUS-42 → Code Review
-"Implementation complete. 3 PRs submitted. Ticket moved to Code Review."
+→ PR #321  RUS-42/slice-1 → RUS-42/plan   (body = pr-summary.md)
+→ PR #322  RUS-42/slice-2 → RUS-42/slice-1
+→ PR #323  RUS-42/slice-3 → RUS-42/slice-2
+Linear (best-effort): RUS-42 → Code Review
+"Implementation submitted: 3 slice PRs. → Code Review."
 ```
 
 ### pr-summary.md (on the slice-1 PR)
@@ -1175,13 +1180,19 @@ Stacked PRs (Graphite): slice-1 → slice-2 → slice-3
 
 ### The Code Review gate
 
-Third **human turn**. The engineer reviews the stack. On the next `/qrspi-work RUS-42` invocation while the status is `Code Review`, the orchestrator reads review comments across all slice PRs. If there are actionable comments, it addresses them starting from the lowest-numbered affected slice (changes propagate upward through the stack via `gt modify`, which auto-restacks descendants), then re-submits the stack. Here, suppose the review is clean:
+Third **human turn**. The engineer reviews the stack. On an explicit `/qrspi-work RUS-42` re-invocation, the resolver reads review state across all slice PRs (and the upstream design/plan PRs). If a slice PR has unresolved threads, the action is `revise`: address them starting from the lowest-numbered affected slice (changes propagate upward through the stack via `gt modify`, which auto-restacks descendants), then re-submit the stack. Here, suppose the review is clean:
 
 > "Clean stack. Tests cover the suppress/send branches. Approving all three."
 
-The human moves the ticket to **Code Approved**. The orchestrator then reports the human-owned merge instructions (restack onto main, `gt merge`, mark Done). Merging is never autonomous.
+The engineer **approves all three slice PRs**. Now every PR in the stack — design, plan, and all slices — is approved with zero unresolved threads. The resolver's land predicate (`READY(design) AND READY(plan) AND ∀ slices READY(slice_i)`) is satisfied, so the next `/qrspi-work RUS-42` resolves to `land`. The orchestrator restacks onto `main` and merges the whole stack **bottom-up** with `gt merge` — nothing merged before this point.
 
-After merge, the engineer marks the ticket **Done** and runs `/qrspi-work RUS-42` once more; the orchestrator cleans up: removes the `.qrspi/RUS-42/` artifacts and prunes the `.worktrees/RUS-42/` worktree.
+```
+gt checkout RUS-42/slice-1 --no-interactive
+gt submit --stack --no-edit --no-interactive   # ensure remotes current
+gt merge --confirm --no-interactive            # merges design → plan → slice-1..3, bottom-up
+```
+
+After the merge, the orchestrator syncs `main` (`gt sync --force`, which prunes the merged branches), removes the `.qrspi/RUS-42/` artifacts and the `.worktrees/RUS-42/` worktree, and projects the Linear status to **Done** (best-effort).
 
 **Time spent:** PR generation 10 min + Code Review 15 min
 
@@ -1194,32 +1205,34 @@ Phase 0 (Ticket):            15 min
 Phase 1 (Questions):         20 min
 Phase 2 (Research):          45 min
 Phase 3 (Design):            40 min  ──┐
-[Design Review gate]                   ├─ design half + gate
+[Design PR → approved]                 ├─ design phase + Design PR
 Phase 4 (Structure):         30 min  ──┐
-Phase 5 (Plan):              40 min    ├─ plan half
+Phase 5 (Plan):              40 min    ├─ plan phase + Plan PR
 Phase 6 (Work Tree):         30 min  ──┘
-[Plan Review gate]
+[Plan PR → approved]
 Phase 7 (Implement):    ~3.5 h/slice × 3 slices
 Phase 8 (PR):                10 min
-[Code Review gate]
+[Slice PRs → all approved → land stack]
 
-Planning total (phases 0–6 + 2 gates): ~3.5 hours
-Implementation total (3 slices):       ~9–10 hours
+Planning total (phases 0–6 + 2 PRs): ~3.5 hours
+Implementation total (3 slices):     ~9–10 hours
 ```
 
-All planning artifacts shared **one** commit on **one** branch (`RUS-42/planning`); the
-planning PR was opened once at Design Review and re-submitted at Plan Review. Implementation
-shipped as a **three-PR Graphite stack**. Code integrated cleanly — no rework needed.
+Each phase shipped as its **own** stacked PR: `RUS-42/design` → `RUS-42/plan` →
+`RUS-42/slice-1..3`. The Design PR was opened and approved first; the Plan PR was stacked
+on it and approved; the three slice PRs were stacked on plan. The whole stack was held open
+and landed **bottom-up** only once every PR was approved + clean. Code integrated cleanly —
+no rework needed.
 
 ---
 
 ## Key Takeaways from This Example
 
-1. **The ticket is a Linear issue, not a file.** Status drives everything: `/qrspi-work` re-reads the Linear status on every invocation and dispatches to the matching phase. Local files under `.qrspi/RUS-42/` hold the artifacts; Linear holds status and phase-transition comments.
+1. **PR review state is the authority, not Linear.** `/qrspi-work` resolves what to do from the PR stack (via the tested resolver `scripts/qrspi_resolve_state.py`); a phase is ready when its PR is `APPROVED` with zero unresolved threads. Linear plays exactly two roles: an **entry gate** (assigned + `Selected`) and a **best-effort reporting projection** that never blocks work. Local files under `.qrspi/RUS-42/` hold the artifacts.
 
-2. **Two planning gates, never crossed autonomously.** Design Review and Plan Review (and later Code Review) are human turns. The orchestrator drafts and submits, then waits for the human to advance the status. This is where design issues get caught early — at review, not in code review.
+2. **Approving a phase PR auto-advances; a change request resets.** Approving the Design PR builds the Plan PR on top; approving the Plan PR builds the slice stack. A formal `CHANGES_REQUESTED` on an upstream PR automatically discards the downstream phases (PRs closed, branches deleted, stale artifacts removed) and returns the ticket there. Within-phase revision is manual. This is where design issues get caught early — at the design gate, not in code review.
 
-3. **One planning branch, one commit, one PR.** All six planning artifacts amend a single commit on `RUS-42/planning`. The PR is submitted at Design Review and re-submitted (grown) at Plan Review — reviewers see the plan accumulate in place.
+3. **One PR per phase, stacked, held open.** `RUS-42/design` → `RUS-42/plan` → `RUS-42/slice-1..N`, each its own branch and PR, each a single commit. Nothing merges until the whole feature is approved, then the stack lands bottom-up. The old single `RUS-42/planning` branch is gone.
 
 4. **The research firewall prevents anchoring.** Research never sees the ticket and has no Linear access — it answers the questions against the codebase alone, so its findings aren't bent to fit the proposed solution.
 
@@ -1227,6 +1240,6 @@ shipped as a **three-PR Graphite stack**. Code integrated cleanly — no rework 
 
 6. **Vertical slices ship as a stack.** Each slice is end-to-end testable and becomes its own Graphite PR stacked on the previous one. Slice 1 ships with no database but is fully testable.
 
-7. **Batch mode for many tickets.** `.claude/workflows/qrspi-batch.js` drives many assigned tickets through the autonomously-runnable states (`Selected`, `Design Approved`, `Plan Approved`) by spawning the typed phase agents — and deliberately leaves the human review gates (Design Review, Plan Review) untouched.
+7. **Batch mode for many tickets.** `.claude/workflows/qrspi-batch.js` drives many assigned tickets one PR-gated step forward — the autonomously-runnable actions (`run_design`, `advance`, `submit`, `land`, and automatic `reset`) — by spawning the typed phase agents. It deliberately leaves `wait` (not yet approved) and the manual `revise` path untouched.
 
-This is what QRSPI looks like in practice. Not theoretical — actual artifacts, actual gates, actual stacked PRs.
+This is what QRSPI looks like in practice. Not theoretical — actual artifacts, actual PR gates, actual stacked PRs.
