@@ -158,12 +158,16 @@ const art = (worktreeDir, id, name) => `${worktreeDir}/.qrspi/${id}/${name}`
 
 // Run one planning phase agent. Skips when the artifact already exists (resume).
 // Returns true on success, false if the phase failed/was skipped by the user.
-async function runPhase(name, agentType, prompt, ctx) {
+// phaseLabel groups the agent in the progress tree — 'Design' for the design
+// half (questions/research/design), 'Plan' for the plan half — matching
+// meta.phases. It must be passed explicitly because opts.phase overrides the
+// global phase() state.
+async function runPhase(name, agentType, prompt, ctx, phaseLabel) {
   if (ctx.existing[name]) {
     log(`  ${ctx.id}: reusing existing ${name}.md`)
     return true
   }
-  const res = await agent(prompt, { label: `${name}:${ctx.id}`, phase: 'Planning', agentType })
+  const res = await agent(prompt, { label: `${name}:${ctx.id}`, phase: phaseLabel, agentType })
   if (res === null) {
     log(`  ${ctx.id}: ${name} phase failed or was skipped — stopping this ticket`)
     return false
@@ -220,7 +224,7 @@ TICKET_CONTENT =
 ${setup.ticketContent}
 
 ARTIFACT_PATH = ${art(wd, t.id, 'questions.md')}
-TEMPLATE_PATH = ${tpl(wd, 'questions.md')}`, ctx)) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'questions.md')}`, ctx, 'Design')) return failTicket(t)
 
   // Phase 2 — Research  (RESEARCH FIREWALL: ticket content is intentionally absent)
   if (!await runPhase('research', 'qrspi-research',
@@ -230,7 +234,7 @@ RESEARCH_PATH = ${art(wd, t.id, 'research.md')}
 TEMPLATE_PATH = ${tpl(wd, 'research.md')}
 REPO_ROOT = ${wd}
 
-Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidden from you — do not seek it out.`, ctx)) return failTicket(t)
+Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidden from you — do not seek it out.`, ctx, 'Design')) return failTicket(t)
 
   // Phase 3 — Design  (gets TICKET_CONTENT + questions + research)
   if (!await runPhase('design', 'qrspi-design',
@@ -241,7 +245,7 @@ ${setup.ticketContent}
 QUESTIONS_PATH = ${art(wd, t.id, 'questions.md')}
 RESEARCH_PATH = ${art(wd, t.id, 'research.md')}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
-TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, ctx)) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, ctx, 'Design')) return failTicket(t)
 
   phase('Finalize')
   const fin = await agent(
@@ -291,7 +295,7 @@ async function runPlan(t) {
     `TICKET_ID = ${t.id}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
 STRUCTURE_PATH = ${art(wd, t.id, 'structure.md')}
-TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, ctx)) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, ctx, 'Plan')) return failTicket(t)
 
   // Phase 5 — Plan
   if (!await runPhase('plan', 'qrspi-plan',
@@ -299,14 +303,14 @@ TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, ctx)) return failTicket(t)
 STRUCTURE_PATH = ${art(wd, t.id, 'structure.md')}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
 PLAN_PATH = ${art(wd, t.id, 'plan.md')}
-TEMPLATE_PATH = ${tpl(wd, 'plan.md')}`, ctx)) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'plan.md')}`, ctx, 'Plan')) return failTicket(t)
 
   // Phase 6 — Work tree (task DAG document; WORKTREE_PATH here is the ARTIFACT path)
   if (!await runPhase('worktree', 'qrspi-worktree',
     `TICKET_ID = ${t.id}
 PLAN_PATH = ${art(wd, t.id, 'plan.md')}
 WORKTREE_PATH = ${art(wd, t.id, 'worktree.md')}
-TEMPLATE_PATH = ${tpl(wd, 'worktree.md')}`, ctx)) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'worktree.md')}`, ctx, 'Plan')) return failTicket(t)
 
   phase('Finalize')
   const fin = await agent(
