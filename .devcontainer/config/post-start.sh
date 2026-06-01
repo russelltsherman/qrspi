@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
+
 # postStartCommand runs every time the container starts, including the
 # initial create and every subsequent restart.
 # Use it for ephemeral processes that don't survive a restart: starting
@@ -16,6 +18,25 @@ sudo /usr/local/sbin/protect-paths
 
 # uncomment this like to bypass egress restriction
 exit 0
+
+# authenticate gh cli 
+GITHUB_TOKEN_FILE="/home/vscode/.config/gh/token"
+if [[ -f "$GITHUB_TOKEN_FILE" ]]
+then
+  GH_TOKEN="$(head -n 1 $GITHUB_TOKEN_FILE)"
+  echo "$GH_TOKEN" | gh auth login --with-token
+fi
+
+# authenticzate gt cli
+GRAPHITE_TOKEN_FILE="/home/vscode/.config/graphite/token"
+if [[ -f "$GRAPHITE_TOKEN_FILE" ]]
+then
+  GH_TOKEN="$(head -n 1 $GRAPHITE_TOKEN_FILE)"
+  gt auth --token $GH_TOKEN
+fi
+
+
+
 
 # Lock down egress before squid starts so there is no window of unrestricted
 # outbound access. Squid runs as the proxy user, which is explicitly permitted
