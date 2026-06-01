@@ -256,7 +256,7 @@ TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, ctx, 'Design')) return failTicket(t)
 
 Do NOT generate structure.md, plan.md, or worktree.md — those belong to the plan half, which runs only after a human approves the design (status → Design Approved).
 
-Return: ok, newStatus (re-query with mcp__linear-russelltsherman__get_issue_status — expect "Design Review"), prUrl, summary (1-2 sentences).`,
+Return: ok, newStatus (confirm via the save_issue response or re-query with mcp__linear-russelltsherman__get_issue and read state.name — expect "Design Review"; note get_issue_status takes a WorkflowState ID, not a ticket ID, so do NOT use it here), prUrl, summary (1-2 sentences).`,
     { label: `finalize-design:${t.id}`, phase: 'Finalize', schema: FINALIZE_SCHEMA }
   )
 
@@ -319,7 +319,7 @@ TEMPLATE_PATH = ${tpl(wd, 'worktree.md')}`, ctx, 'Plan')) return failTicket(t)
 1. Verify all six artifacts exist and are non-empty under ${wd}/.qrspi/${t.id}/: questions.md, research.md, design.md, structure.md, plan.md, worktree.md. If any is missing/empty, return ok:false with which — do NOT commit or change Linear.
 2. Follow the "Submit and transition" (plan review) steps of ${SKILL} to amend the plan-half artifacts (structure.md, plan.md, worktree.md) into the existing single planning commit, re-submit the planning PR with Graphite, and transition the Linear ticket to "Plan Review" with a phase-transition comment.
 
-Return: ok, newStatus (re-query with mcp__linear-russelltsherman__get_issue_status — expect "Plan Review"), prUrl, summary (1-2 sentences).`,
+Return: ok, newStatus (confirm via the save_issue response or re-query with mcp__linear-russelltsherman__get_issue and read state.name — expect "Plan Review"; note get_issue_status takes a WorkflowState ID, not a ticket ID, so do NOT use it here), prUrl, summary (1-2 sentences).`,
     { label: `finalize-plan:${t.id}`, phase: 'Finalize', schema: FINALIZE_SCHEMA }
   )
 
@@ -455,7 +455,7 @@ async function runInline(t) {
     `You are executing qrspi-work for ticket ${t.id} (current Linear status: "${t.status}").
 This status does NOT require spawning phase agents. Read ${SKILL} and follow the section matching the status verbatim — set up/reuse the worktree, address review feedback or perform cleanup as specified, and update Linear as instructed.
 If the status unexpectedly routes to a planning/implementation path that requires spawning typed agents, STOP and return newStatus unchanged with a summary saying so (do not fabricate artifacts).
-Return: ticketId "${t.id}", newStatus (re-query with mcp__linear-russelltsherman__get_issue_status), summary.`,
+Return: ticketId "${t.id}", newStatus (confirm via the save_issue response or re-query with mcp__linear-russelltsherman__get_issue and read state.name; note get_issue_status takes a WorkflowState ID, not a ticket ID, so do NOT use it here), summary.`,
     { label: `inline:${t.id}`, phase: 'Inline', schema: INLINE_SCHEMA }
   )
   return res ?? { ticketId: t.id, newStatus: t.status, summary: 'Inline worker skipped/failed.' }
