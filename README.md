@@ -5,7 +5,7 @@ A structured workflow for agentic feature development using Claude Code. QRSPI d
 ## Inspiration
 
 This project was inspired by [Dex Horthy's talk](https://www.youtube.com/watch?v=YwZR6tc7qYg) on structured approaches to agentic software development.
-x
+
 ## Why
 
 LLMs are capable implementers but poor planners when given unbounded scope. They skip ahead, conflate problem definition with solution design, and lose coherence on large tasks. QRSPI constrains each phase to a specific job: the ticket defines the problem, questions probe the codebase, research gathers facts, design makes decisions, and implementation follows the plan. No phase sees more context than it needs.
@@ -39,7 +39,7 @@ Most workflows require only two commands:
 
 **`/qrspi-ticket <description>`** creates a new feature ticket through guided conversation. It gathers problem context, drafts a structured Linear issue, and sets up the local artifact directory. This is the starting point for any new feature.
 
-**`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It reads the ticket's Linear status, determines the current phase, and executes the appropriate action — planning, implementation, or review response — without manual phase-by-phase invocation. Use this to drive a ticket from backlog through to PR.
+**`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It reads the ticket's **PR review state** (not Linear status), determines the current phase, and executes the appropriate action — design, plan, implementation, advance, reset, or land — without manual phase-by-phase invocation. Use this to drive a ticket from `Selected` through to a landed stack.
 
 ```
 # Start a new feature
@@ -74,7 +74,16 @@ Each phase has a standalone skill that can be invoked manually. These exist prim
 
 ```
 .claude/
-  skills/              # Skill definitions (one SKILL.md per phase)
+  agents/              # Phase agent definitions — the actual phase logic the orchestrator spawns
+    qrspi-questions.md
+    qrspi-research.md
+    qrspi-design.md
+    qrspi-structure.md
+    qrspi-plan.md
+    qrspi-worktree.md
+    qrspi-implement.md
+    qrspi-pr.md
+  skills/              # Slash-command wrappers that invoke the phase agents
     qrspi-ticket/
     qrspi-questions/
     qrspi-research/
@@ -84,7 +93,14 @@ Each phase has a standalone skill that can be invoked manually. These exist prim
     qrspi-worktree/
     qrspi-implement/
     qrspi-pr/
-    qrspi-work/        # Autonomous orchestrator
+    qrspi-work/        # Autonomous orchestrator (PR-gated state machine)
+  workflows/
+    qrspi-batch.js     # Batch orchestrator — drives many tickets one PR-gated step forward
+scripts/
+  qrspi_resolve_state.py       # Tested PR-gated decision logic (the resolver)
+  qrspi_resolve_state_test.py  # unit tests (alongside the module)
+  qrspi_pr_state.py            # Gathers PR review state (gh GraphQL reviewThreads)
+  qrspi_pr_state_test.py       # unit tests (alongside the module)
 .qrspi/
   templates/           # Canonical output formats (single source of truth)
     ticket.md
@@ -111,22 +127,38 @@ docs/                  # Guides and reference documentation
 
 **Vertical slices over horizontal layers.** Structure decomposes work into end-to-end testable paths, not "all database changes" then "all API changes." Each slice delivers something verifiable.
 
-**Human review at every gate.** Artifacts are drafted, not shipped. The human reviews and approves before the next phase begins. `/qrspi-work` automates execution but Linear status transitions signal human checkpoints.
+**Human review at every gate.** Artifacts are drafted, not shipped. Each phase becomes its own pull request — design, plan, and implementation — and advancement is gated on that PR being approved with no unresolved review threads. `/qrspi-work` automates execution and auto-advances on approval, but a human approving (or requesting changes on) each PR is the checkpoint. A change request on an upstream phase discards and regenerates the downstream work.
 
 **Worktree isolation.** Each ticket gets its own git worktree at `.worktrees/<ticket-id>/`. Multiple agents can work on different tickets concurrently without branch checkout conflicts.
 
 ## Linear Integration
 
-Tickets are created and tracked as Linear issues in the Russelltsherman team, QRSPI project. Linear statuses drive the `/qrspi-work` state machine:
+Tickets are created and tracked as Linear issues in the Russelltsherman team, QRSPI project.
+**Linear does not gate advancement — PR review state does.** Linear has two roles only:
 
-| Linear Status | Action |
-|---------------|--------|
-| Backlog / Selected | Run all planning phases, submit planning PR |
-| Plan Review | Address review feedback on planning artifacts |
-| Plan Approved | Implement all slices, submit stacked PRs |
-| Code Review | Address review feedback on implementation |
-| Code Approved | Report ready to merge (human-owned) |
-| Done | Clean up artifacts and worktree |
+1. **Entry gate.** A ticket may only *begin* if it is assigned to a user and in the `Selected`
+   status. Nothing starts otherwise.
+2. **Reporting projection.** Once work starts, agents update the Linear status to reflect the
+   active phase (`Design Review` → `Plan Review` → `Code Review` → `Done`). These writes are
+   best-effort — a failed Linear update never blocks git/PR work. The `*Approved` statuses were
+   removed; approval lives in the PR.
+
+What is "ready to advance" is decided wholly by PR status: `reviewDecision == APPROVED` **and**
+zero unresolved review threads. Each phase is its own stacked PR (`<id>/design` → `<id>/plan` →
+`<id>/slice-N`), held open until the whole feature is approved, then landed bottom-up.
+
+| PR-state action | What `/qrspi-work` does |
+|-----------------|--------------------------|
+| `run_design` | Entry gate satisfied; build the design PR (questions, research, design) |
+| `advance` → plan | Design PR approved; build the plan PR (structure, plan, work tree) stacked on it |
+| `advance` → implementation | Plan PR approved; build the slice PR stack |
+| `wait` | Active phase PR awaiting review — nothing to do until approved |
+| `revise` | Unresolved review threads on the active phase — address them (manual) |
+| `reset` | Upstream PR change-requested — discard downstream phases, return to it (automatic) |
+| `land` | Every PR approved + clean — merge the whole stack bottom-up, then `Done` |
+
+The decision is computed by the tested resolver in `scripts/qrspi_resolve_state.py`. See
+`docs/qrspi-pr-gated-lifecycle-design.md` for the full design and rationale.
 
 ## Requirements
 

@@ -5,8 +5,40 @@
 This project uses the QRSPI structured workflow for feature development.
 Tickets are created as Linear issues (team: Russelltsherman, project: QRSPI).
 Ticket IDs follow Linear's format (e.g., RUS-42). Artifacts are stored locally
-in `.qrspi/<ticket-id>/`. Linear is used for status tracking and phase-transition
-comments only — artifacts are not uploaded as attachments.
+in `.qrspi/<ticket-id>/` — not uploaded as attachments.
+
+### Lifecycle — PR-gated
+
+**PR review state — not Linear status — is the authority for advancement.** Linear has
+exactly two roles: an **entry gate** (a ticket may only begin if it is *assigned* and in
+`Selected`) and a **best-effort reporting projection** (agents update status to reflect the
+active phase; a failed Linear write never blocks work). See
+`docs/qrspi-pr-gated-lifecycle-design.md` for the full design.
+
+Each ticket is one Graphite stack, built bottom-up and **held open** until the whole feature
+is approved, then landed bottom-up:
+
+```
+Selected (assigned)
+  → design PR   [Questions·Research·Design]   ──approved──┐
+  → plan PR     [Structure·Plan·WorkTree]      (stacked)  ──approved──┐
+  → slice PRs   [Implementation]               (stacked)   ──all approved──→ land stack → Done
+```
+
+- **Branches:** `<id>/design` → `<id>/plan` → `<id>/slice-1..N`, each its own PR, stacked.
+  (Replaces the old single `<id>/planning` branch.)
+- **Advance** is automatic: approving a phase PR (`reviewDecision == APPROVED` **and** zero
+  unresolved review threads) builds the next phase on top.
+- **Reset** is automatic: a formal `CHANGES_REQUESTED` on an upstream phase PR discards every
+  downstream phase (PRs closed, branches deleted, stale artifacts removed) and returns the
+  ticket to that phase. **Revise** (addressing review comments) is *manual* — only on an
+  explicit invocation.
+- **`*Approved` Linear states were dropped** — approval lives in the PR. Reporting statuses:
+  `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.
+- The decision is computed by a tested resolver (`scripts/qrspi_resolve_state.py`, unit-tested);
+  the orchestrator and batch both call it rather than re-deriving state logic.
+- The `qrspi-batch` workflow drives the autonomously-runnable actions across assigned tickets
+  (run_design, advance, submit, land, automatic reset); it skips `wait` and the manual `revise`.
 
 ### Available skills (invoke with / or let Claude auto-invoke)
 
@@ -36,6 +68,11 @@ stays on `main`; all ticket work happens in worktrees. `.worktrees/` is gitignor
 
 ### Codebase conventions
 
-- Agent prompt definitions live in `.qrspi/agents/`
+- Phase agent definitions live in `.claude/agents/`; their slash-command wrappers live in `.claude/skills/`
+- The batch orchestrator workflow lives in `.claude/workflows/qrspi-batch.js`
+- The PR-gated decision logic lives in `scripts/qrspi_resolve_state.py` (the tested resolver)
+  and `scripts/qrspi_pr_state.py` (gathers PR review state via gh GraphQL). Both have
+  stdlib-only unit tests as `_test.py` siblings (`scripts/qrspi_*_test.py`, run with `python3`).
 - Artifact templates live in `.qrspi/templates/` (reference only — not written locally)
-- Eval harness lives in `evals/` and `scripts/`
+- The `evals/` + `scripts/run_eval.py` harness is a **non-functional placeholder** — verify
+  pure logic with the unit tests and orchestration changes with manual end-to-end runs

@@ -1,22 +1,50 @@
 # QRSPI Working Example: Real Feature Walkthrough
 
-A complete, annotated example of one feature going through all 9 QRSPI phases. Use this as a reference for what good outputs look like at each stage.
+A complete, annotated example of one feature going through the full QRSPI workflow — from ticket creation, through three stacked phase PRs (design, plan, implementation), to landing the whole stack. Use this as a reference for what good outputs look like at each stage and how **PR review state** drives the work.
 
 ---
 
 ## Feature: Add User Email Preferences
 
-Simple feature that integrates with an existing e-commerce system. This walkthrough shows what real QRSPI work looks like.
+Simple feature that integrates with an existing e-commerce system. This walkthrough shows what real QRSPI work looks like, including where the human review gates sit and how each phase becomes its own stacked PR.
+
+### How the workflow is shaped
+
+Feature work is decomposed into sequential phases, each producing a reviewable artifact:
+
+```
+Ticket  -->  Questions  -->  Research  -->  Design  -->  Structure  -->  Plan  -->  Worktree  -->  Implement  -->  PR
+  (Linear)      Q             R             D             S             P           W              I + impl-log
+```
+
+Two things shape everything below:
+
+1. **The ticket is a Linear issue**, not a local markdown file. It lives in the Russelltsherman team, QRSPI project, with an ID like `RUS-42`. Every other artifact is a local file under `.qrspi/RUS-42/`. Linear holds status and phase-transition comments only — artifacts are never uploaded to Linear.
+
+2. **PR review state — not Linear status — is the authority for advancement.** Linear has exactly two roles: an **entry gate** (a ticket may only begin if it is *assigned* and in `Selected`) and a **best-effort reporting projection** of the active phase (a failed Linear write never blocks work). The lifecycle is a single Graphite stack, one PR per phase, built bottom-up and **held open** until the whole feature is approved, then landed bottom-up:
+
+   ```
+   trunk
+    └── RUS-42/design    Design PR  — questions.md, research.md, design.md
+         └── RUS-42/plan   Plan PR   — structure.md, plan.md, worktree.md   (stacked on design)
+              └── RUS-42/slice-1..N  slice PRs — code                        (stacked on plan)
+   ```
+
+   A phase PR is **ready** when `reviewDecision == APPROVED` *and* it has zero unresolved review threads. Approving a phase PR **auto-advances**: the next phase is built stacked on top. A human approving each phase PR is what moves the ticket forward. The `*Approved` Linear statuses were **dropped** — approval lives in the PR. Reporting statuses are `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.
+
+   A formal `CHANGES_REQUESTED` on an **upstream** phase PR **resets**: every downstream phase is automatically discarded (PRs closed, branches deleted, stale artifacts removed) and the ticket returns to that phase. **Revise** — addressing review comments *within* a phase — is **manual**, on explicit re-invocation. The decision is computed by the tested resolver `scripts/qrspi_resolve_state.py`; `/qrspi-work` and the batch workflow both call it rather than re-deriving state logic.
+
+Each phase lives on its **own** branch (`RUS-42/design`, `RUS-42/plan`, `RUS-42/slice-N`) as a single commit, stacked on the phase below it. The design PR is opened at Design Review; the plan PR is stacked on it at Plan Review; the slice PRs are stacked on plan at Code Review. Nothing merges until the whole feature is approved.
 
 ---
 
-## Phase 0: Ticket (T)
+## Phase 0: Ticket — create the Linear issue
 
 ### What Actually Happened
 
 Engineer ran: `/qrspi-ticket We need to let users control which emails they receive`
 
-Agent assigned the next available ticket ID (T001) and opened a conversation.
+The `qrspi-ticket` skill opened a guided conversation, then created a **Linear issue** in the Russelltsherman team, QRSPI project. Linear assigned the identifier `RUS-42`. The skill also created the local artifact directory `.qrspi/RUS-42/`.
 
 ### The Conversation
 
@@ -37,13 +65,12 @@ Engineer: Yes — order confirmations are mandatory. Users can only opt out of
   promotions and weekly digest.
 ```
 
-### Agent's Output: ticket.md
+### The Linear Issue (RUS-42)
+
+The agent created the issue with this content. (This is the Linear issue body — there is no `ticket.md` file.)
 
 ```markdown
-# Ticket: T001
-
-## Title
-Add user email preference controls for promotions and digest
+# Add user email preference controls for promotions and digest
 
 ## Description
 Users currently receive all email types with no way to opt out. This creates
@@ -73,7 +100,17 @@ user has opted out.
 - Preference management for non-registered users
 ```
 
+The issue starts in `Backlog`. Once the engineer is ready to work it, they **assign it to themselves** and move it to `Selected` — that pair (assigned + `Selected`) is the entry gate. Then they run `/qrspi-work RUS-42`. From here the orchestrator resolves state from the PR stack and drives the work forward.
+
 **Time investment:** ~15 minutes
+
+---
+
+## The Design Phase (Design PR)
+
+`/qrspi-work RUS-42` resolves state from the PR stack. With no `RUS-42/design` branch yet and the entry gate satisfied (assigned + `Selected`), the resolver returns `run_design`. The orchestrator sets up the worktree at `.worktrees/RUS-42/` (creating the `RUS-42/design` branch from `main`), then runs the **design phase** — Questions, Research, Design — three artifacts committed as a single commit on `RUS-42/design`.
+
+The orchestrator spawns each phase as a purpose-built agent defined in `.claude/agents/qrspi-<phase>.md` (each with its own tool lockdown). The slash-command wrappers in `.claude/skills/qrspi-<phase>/` exist for manual re-runs, but `/qrspi-work` spawns the agents directly by `subagent_type`.
 
 ---
 
@@ -81,7 +118,9 @@ user has opted out.
 
 ### What Actually Happened
 
-Agent received the approved ticket.md and generated exploration questions.
+The orchestrator spawned the `qrspi-questions` agent with the ticket content (title + description from the Linear fetch). The questions agent has no `Glob`, `Grep`, or `Bash` — exploring the codebase is structurally impossible at this phase. It produces 8–15 technical questions derived from the ticket.
+
+The artifact is written to `.qrspi/RUS-42/questions.md`. The design-phase artifacts are committed together once all three exist, as the single commit on `RUS-42/design` (`gt create RUS-42/design`, message `RUS-42 [QR]: Design`).
 
 ### Agent's Output: questions.md
 
@@ -90,7 +129,7 @@ Agent received the approved ticket.md and generated exploration questions.
 
 **Feature Context:** Add user control over which email types they receive
 **Codebase:** Node.js/TypeScript, 3-year-old e-commerce platform
-**Generated:** 2025-04-05T14:15:00Z
+**Generated:** 2026-05-31T14:15:00Z
 
 ## Category 1: Current Email System
 
@@ -163,17 +202,13 @@ Agent received the approved ticket.md and generated exploration questions.
 - Is there any caching of user data that might be stale?
 ```
 
-### Engineer's Validation
+### What good looks like
 
-Checklist:
-
-- [x] 12 questions minimum → Has 12 questions ✅
-- [x] Each references specific files → All do ✅
-- [x] Zero assumptive language → Zero instances of "should" ✅
-- [x] Covers multiple areas → Auth, email, storage, API, compliance ✅
-- [x] Each has "why this matters" → All do ✅
-
-**Engineer's notes:** "Good. Questions cover what I need to understand. One minor thing: I'd add a question about error handling (what happens if email fails). But this is solid."
+- 12 questions (within the 8–15 range)
+- Each references specific files
+- Zero assumptive language (no "should")
+- Covers multiple areas: email, storage, triggering, API, compliance
+- Each has a "why this matters" rationale
 
 **Time spent:** 20 minutes
 
@@ -183,19 +218,20 @@ Checklist:
 
 ### What Happened
 
-Engineer ran research prompt with the questions.md as input.
+The orchestrator spawned the `qrspi-research` agent. This phase enforces the **anchoring firewall**: the agent never sees the ticket. The orchestrator deliberately does NOT pass `TICKET_CONTENT` to it — only `questions.md`, the output path, the template, and the repo root. The research agent's own tool definition also excludes Linear MCP and forbids reading the ticket. Defense in depth: it answers the questions purely by reading the codebase.
 
-Agent explored codebase, read actual code, documented findings.
+The artifact is written to `.qrspi/RUS-42/research.md` — staged alongside `questions.md` and `design.md` for the single `RUS-42/design` commit.
 
 ### Agent's Output: research.md (Key Sections)
 
 ```markdown
 # Codebase Research: Email Preferences Feature
 
-**Feature:** User Email Preferences
 **Codebase:** CheckoutNow e-commerce (Node.js/TypeScript)
-**Research Date:** 2025-04-05T14:45:00Z
-**Researcher Model:** Claude Opus 4.5
+**Research Date:** 2026-05-31T14:45:00Z
+
+> Note: the feature ticket is intentionally hidden from this phase. Findings below
+> answer questions.md against the codebase, with no knowledge of the proposed feature.
 
 ---
 
@@ -247,7 +283,7 @@ model User {
   email         String   @unique
   password_hash String
   created_at    DateTime @default(now())
-  
+
   // Relations
   orders        Order[]
   settings      UserSettings?
@@ -266,7 +302,7 @@ model UserSettings {
   user_id         String  @unique
   theme           String  @default("light")
   newsletter      Boolean @default(true)
-  
+
   user User @relation(fields: [user_id], references: [id])
 }
 ```
@@ -378,9 +414,9 @@ File: `src/services/order.service.ts` vs. `src/db/schema.prisma`
 
 - Code checks `userSettings.newsletter`
 - But some transactional emails ignore this (order confirmation sends always)
-- Behavior is inconsistent
+- This is a design decision the design phase must make explicit, not a code bug
 
-**Impact:** Medium. Design needs to clarify: are transactional emails exempt from preferences?
+**Impact:** Medium. Design needs to decide: are transactional emails exempt from preferences?
 
 ### Issue 2: No Email Preference Audit Log
 
@@ -457,25 +493,16 @@ Email failures are logged but not surfaced to user.
 - API pattern established: YES
 - Frontend component exists: YES
 - Confidence in findings: 95%
+```
 
-```md
+### What good looks like
 
-### Engineer's Validation
-
-Checklist:
-- [x] Zero "should" language → Zero instances ✅
-- [x] All claims code-referenced → Every claim has file path ✅
-- [x] Database schema exact → Copied from schema.prisma ✅
-- [x] Uncertainty flagged → "Unclear:" sections present ✅
-- [x] Known issues documented → Issue 1-3 listed ✅
-- [x] New team member could learn → Yes ✅
-
-**Engineer's feedback:** 
-"One thing: In Issue 1, you say 'behavior is inconsistent.' That's accurate 
-but might want to note: 'This is a design decision we need to make, not a bug.'"
-
-**Agent's response:** "Right. Updated Issue 1 to clarify: this is a decision 
-point for the design phase, not a code bug."
+- Zero "should" language
+- All claims code-referenced (every claim has a file path)
+- Database schema copied exactly from schema.prisma
+- Uncertainty flagged ("Unclear:" sections)
+- Known issues documented (Issue 1–3) — including the note that Issue 1 is a design decision, not a bug
+- A new team member could learn the system from this document
 
 **Time spent:** 45 minutes
 
@@ -485,11 +512,11 @@ point for the design phase, not a code bug."
 
 ### What Actually Happened
 
-Engineer hid the feature ticket. Agent read research.md and proposed architecture.
+The orchestrator spawned the `qrspi-design` agent. Unlike research, design DOES receive the ticket content again — it combines the ticket, the answered questions, and the research findings into pattern decisions, a risk register, the delta, and open questions.
 
-Then engineer gave feedback (brain surgery).
+The artifact is written to `.qrspi/RUS-42/design.md` — the third and final design-phase artifact, committed together on `RUS-42/design`.
 
-### Agent's Initial Proposal (Before Feedback)
+### Agent's Proposal
 
 ```markdown
 # Design Document: User Email Preferences
@@ -516,12 +543,10 @@ Then engineer gave feedback (brain surgery).
 ## Desired End State
 
 Users can selectively disable:
-- Order confirmations / Shipping updates
 - Promotional emails
 - Weekly digest
-- All non-critical emails
 
-(Password reset always sends—non-negotiable)
+(Order confirmations always send — mandatory per the ticket constraints)
 
 ## Architectural Decisions
 
@@ -529,60 +554,7 @@ Users can selectively disable:
 
 **Options:**
 - Option A: Extend existing newsletter boolean to preferences JSON column
-- Option B: Create separate UserEmailPreferences table  
-- Option C: Store preferences in Redis cache only
-
-**Decision:** Option A (JSON column in UserSettings)
-
-**Rationale:**
-- UserSettings already extends per-user config
-- JSON allows flexible email type structure
-- Keeps settings in one place
-
-**Trade-offs:**
-- Plus: No new table, migration is simple
-- Plus: Reads don't require joins
-- Minus: Schema less documented (JSON is opaque)
-
-### Decision 2: Transactional Email Handling
-
-**Options:**
-- Option A: Transactional emails always send (ignore preferences)
-- Option B: All emails respect preferences (user might miss critical info)
-- Option C: Transactional emails send, but user can snooze for 24h
-
-**Decision:** Option A (transactional always send)
-
-**Rationale:**
-- Research showed order confirmations are critical for fulfillment
-- Users need password resets—can't be blocked
-- Marketing researched: users expect order updates
-
-**Trade-offs:**
-- Plus: User won't miss critical info
-- Minus: User can't disable even if annoyed
-```
-
-### Engineer's Feedback (Brain Surgery)
-
-Engineer read the design and noted:
-
-> "On Decision 1: We moved away from JSON columns in 2023 because it made
-> migrations harder. Use a separate `UserEmailPreferences` table with a
-> preference per row (email_type, enabled, frequency). Follows our pattern
-> from UserNotifications table."
-
-Agent's response: "Understood. JSON was a pattern mismatch. Switching to
-separate table following existing pattern."
-
-Agent's revised design (Decision 1 only):
-
-```markdown
-### Decision 1: Preference Storage
-
-**Options:**
-- Option A: Extend existing newsletter boolean to preferences JSON column
-- Option B: Create separate UserEmailPreferences table  
+- Option B: Create separate UserEmailPreferences table
 - Option C: Store preferences in Redis cache only
 
 **Decision:** Option B (separate UserEmailPreferences table)
@@ -593,31 +565,70 @@ Agent's revised design (Decision 1 only):
 - Each preference is a row: (user_id, email_type, enabled, frequency)
 - Scales well if preferences become complex later
 
-**Constraints from Research:**
-- Research revealed UserNotifications uses separate table pattern
-- Discovered we moved away from JSON columns in 2023
-- This decision respects that architectural constraint
-
 **Trade-offs:**
 - Plus: Follows existing pattern (UserNotifications)
 - Plus: Simpler, more predictable migrations
 - Plus: Indexed query by (user_id, email_type)
 - Minus: Slightly more joins for reads (negligible at our scale)
+
+### Decision 2: Transactional Email Handling
+
+**Options:**
+- Option A: Transactional emails always send (ignore preferences)
+- Option B: All emails respect preferences (user might miss critical info)
+
+**Decision:** Option A (transactional always send)
+
+**Rationale:**
+- Order confirmations are mandatory per the ticket's AC4 and Constraints
+- Research showed order confirmations are critical for fulfillment
+- Password resets must be delivered
+
+**Trade-offs:**
+- Plus: User won't miss critical info
+- Minus: User can't disable order confirmations even if annoyed
+
+## Risk Register
+
+- R1 (Medium): Promotions worker already filters on `newsletter`; the new preference
+  table must not double-suppress or conflict with that legacy flag. Mitigation: Slice 3
+  replaces the `newsletter` check with the preference lookup.
+- R2 (Low): User object is cached 5 min; preferences live in a separate, uncached table,
+  so AC3 (immediate effect) holds. No cache invalidation needed.
+
+## Open Questions
+
+- Audit logging of preference changes: deferred to a future ticket (not in MVP).
 ```
 
-### Final Approved Design
+### The Design Review gate
 
-Design looks good after correction. Approved by engineer.
+The orchestrator finishes the design phase, commits the three artifacts as the single commit on `RUS-42/design`, and **submits the Design PR**. It then projects the Linear status to **Design Review** (best-effort) and stops.
 
-Key decisions:
+```
+gt create RUS-42/design --no-interactive -m "RUS-42 [QR]: Design"
+gt submit --no-edit --no-interactive
+→ Design PR: https://github.com/.../pull/318  (RUS-42/design → main)
+Linear (best-effort): RUS-42 → Design Review
+"Design submitted. PR: <url>. → Design Review."
+```
 
-1. Separate `UserEmailPreferences` table (one row per email type)
-2. Transactional emails send regardless (user choice doesn't override)
-3. Frequency preference: `immediate`, `daily`, `never`
-4. API endpoint: `PUT /api/v1/users/{id}/preferences/email`
-5. Audit logging: Not in MVP (documented as future work)
+This is a **human turn**. The engineer reviews the Design PR. Suppose they leave one comment:
 
-**Time spent:** 40 minutes (30 min agent, 10 min feedback/correction)
+> "On Decision 1: confirm this matches the UserNotifications pattern — separate table, one
+> row per type. Looks right. Approving."
+
+The PR review state is the gate, not Linear. On the next `/qrspi-work RUS-42` invocation, the resolver reads the Design PR. If it had unresolved threads, the action would be `revise` — address the feedback bounded to the design-phase artifacts only (Questions → Research → Design), amend the `RUS-42/design` commit, and re-submit. Here the comment is approving with no unresolved threads, so the resolver returns `wait` and the orchestrator stops.
+
+The engineer **approves the Design PR**. That approval (`reviewDecision == APPROVED`, zero unresolved threads) is the only thing that unblocks the plan phase — the next `/qrspi-work RUS-42` will resolve to `advance` and build the plan PR stacked on top.
+
+**Time spent:** 40 minutes (30 min agent, 10 min review)
+
+---
+
+## The Plan Phase (Plan PR, stacked on design)
+
+With the Design PR approved, the next `/qrspi-work RUS-42` resolves to `advance` and runs the **plan phase**: Structure, Plan, Work Tree. These three artifacts are committed as a single commit on a **new** `RUS-42/plan` branch **stacked on `RUS-42/design`** — a separate branch and a separate PR from the design phase.
 
 ---
 
@@ -625,10 +636,11 @@ Key decisions:
 
 ### Agent's Output
 
+The orchestrator spawned the `qrspi-structure` agent (input: `design.md`). It defines the vertical slices, the shared types, and the cross-slice contracts. Output: `.qrspi/RUS-42/structure.md` (staged for the `RUS-42/plan` commit).
+
 ```markdown
 # Structure Outline: Email Preferences Feature
 
-**Approved Design:** ✓
 **Build Order:** Vertical slices
 
 ## Slice 1: Mock API + Frontend (2.5 hours)
@@ -642,7 +654,7 @@ Key decisions:
 - `frontend/components/EmailPreferences.tsx` (NEW) - Preference toggles
 - `tests/integration/emailPreferences.integration.test.ts` (NEW)
 
-**Interface Definition:**
+**Interface Definition (cross-slice contract):**
 
 ```typescript
 // emailPreferences.model.ts
@@ -675,16 +687,12 @@ PUT /api/v1/users/{id}/preferences/email
 ```
 
 **Definition of Done:**
-
 - [ ] Email preferences page renders with 4 toggles + frequency selects
 - [ ] Clicking toggle sends PUT request
 - [ ] Page doesn't error
 - [ ] Integration test passes: GET → modify → PUT → returns success
 
 **Dependencies:** None (fully mocked)
-
-**Can Run in Parallel:** Yes
-
 **Lines of Code Estimate:** 200-250
 
 ---
@@ -694,15 +702,13 @@ PUT /api/v1/users/{id}/preferences/email
 **Objective:** Preferences actually persist to database. Real queries work.
 
 **Files to Create/Modify:**
-
 - `db/schema.prisma` (MODIFY) - Add UserEmailPreferences model
-- `db/migrations/2025-04-05_add_email_preferences.sql` (NEW)
+- `db/migrations/2026-05-31_add_email_preferences.sql` (NEW)
 - `src/services/preferences.service.ts` (NEW) - Database queries
 - `src/api/routes/users.ts` (MODIFY) - Call service instead of mock
 - `tests/integration/emailPreferences.integration.test.ts` (MODIFY)
 
 **Definition of Done:**
-
 - [ ] Table created with proper indexes
 - [ ] Service queries database correctly
 - [ ] Data persists across page refreshes
@@ -710,9 +716,6 @@ PUT /api/v1/users/{id}/preferences/email
 - [ ] Migration is idempotent
 
 **Dependencies:** Slice 1 (API contract must be stable)
-
-**Can Run in Parallel:** No
-
 **Lines of Code Estimate:** 250-300
 
 ---
@@ -722,24 +725,20 @@ PUT /api/v1/users/{id}/preferences/email
 **Objective:** When email is triggered, check preferences before sending.
 
 **Files to Create/Modify:**
-
 - `src/services/email.service.ts` (MODIFY) - Add preference checks
 - `src/services/preferences.service.ts` (MODIFY) - Add query method
+- `src/jobs/promotions.worker.ts` (MODIFY) - Replace legacy newsletter check
 - `tests/unit/email.service.test.ts` (NEW) - Test preference logic
 - `tests/integration/emailSending.integration.test.ts` (MODIFY)
 
 **Definition of Done:**
-
 - [ ] Promotional emails check preferences before sending
-- [ ] Shipping updates check preferences
-- [ ] Transactional emails (order confirmation) ignore preferences
+- [ ] Weekly digest checks preferences
+- [ ] Order confirmation emails ignore preferences (always send)
 - [ ] Unit tests cover all cases
 - [ ] Integration test: Trigger email → Verify sent/not-sent per preference
 
 **Dependencies:** Slice 2 (preferences must be in database)
-
-**Can Run in Parallel:** No (depends on Slice 2)
-
 **Lines of Code Estimate:** 150-200
 
 ---
@@ -749,13 +748,14 @@ PUT /api/v1/users/{id}/preferences/email
 Slice 1 (2.5h) → Slice 2 (3h) → Slice 3 (2.5h) = 8 hours total
 
 All slices are sequential (no parallelization possible).
+```
 
-```md
-**Engineer's validation:**
-- [x] End-to-end testable → Each slice has working test ✅
-- [x] Vertical not horizontal → Not "all DB then all API" ✅
-- [x] Realistic estimates → Correlates with LOC estimates ✅
-- [x] Clear dependencies → S1 → S2 → S3 ✅
+### What good looks like
+
+- End-to-end testable: each slice has a working test
+- Vertical not horizontal: not "all DB then all API"
+- Realistic estimates that correlate with the LOC estimates
+- Clear dependencies: S1 → S2 → S3
 
 **Time spent:** 30 minutes
 
@@ -765,10 +765,11 @@ All slices are sequential (no parallelization possible).
 
 ### Agent's Output (Selected Sections)
 
+The `qrspi-plan` agent (input: `structure.md`, `design.md`) writes atomic implementation steps per slice with verification checkpoints. Output: `.qrspi/RUS-42/plan.md` (staged for the `RUS-42/plan` commit).
+
 ```markdown
 # Implementation Plan: Email Preferences - Slice 1
 
-**Approved Structure:** ✓
 **Slice:** 1 (Mock API + Frontend)
 **Estimated Effort:** 2.5 hours
 **Confidence:** High (clear requirements, no unknowns)
@@ -818,14 +819,9 @@ export const DEFAULT_PREFERENCES: Record<EmailType, UserEmailPreference> = {
 };
 ```
 
-**Functions:** None (types only)
-
 **Dependencies:** None
-
 **Testing:** Type compilation only
-
 **Estimated LOC:** 40-50
-
 **Notes:** Keep enums synchronized with EmailTypes constant in codebase
 
 ---
@@ -857,21 +853,14 @@ export async function updateEmailPreferences(
 **Dependencies:** emailPreferences.model.ts
 
 **Error Handling:**
-
 - 400: Invalid user ID or request body
 - 401: Not authenticated
 - 404: User not found (real check in Slice 2)
 - 200: Success
 
-**Testing:** Mock all calls, test request/response
-
+**Verification checkpoint:** Mock all calls, test request/response
 **Estimated LOC:** 60-80
-
-**Notes:**
-
-- Use existing auth middleware
-- Follow existing error pattern from codebase
-- Validation: Use existing validateUserIdParam middleware
+**Notes:** Use existing auth + validateUserIdParam middleware; follow existing error pattern
 
 ---
 
@@ -907,9 +896,7 @@ export function EmailPreferences({ preferences, onUpdate }) {
 ```
 
 **Dependencies:** React, existing Toggle component
-
-**Testing:** Component renders, toggles work, onChange fires
-
+**Verification checkpoint:** Component renders, toggles work, onChange fires
 **Estimated LOC:** 80-100
 
 ---
@@ -924,7 +911,7 @@ describe('Slice 1: Email Preferences Mock API', () => {
     const res = await request(app)
       .get('/api/v1/users/test-user/preferences/email')
       .set('Authorization', `Bearer ${token}`);
-    
+
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('order_confirmation');
     expect(res.body.order_confirmation.enabled).toBe(true);
@@ -935,20 +922,9 @@ describe('Slice 1: Email Preferences Mock API', () => {
       .put('/api/v1/users/test-user/preferences/email')
       .set('Authorization', `Bearer ${token}`)
       .send({ promotion: { enabled: false } });
-    
+
     expect(res.status).toBe(200);
     expect(res.body.promotion.enabled).toBe(false);
-  });
-
-  it('EmailPreferences component renders and toggles work', () => {
-    const prefs = DEFAULT_PREFERENCES;
-    const { getByRole, getByText } = render(
-      <EmailPreferences preferences={prefs} onUpdate={jest.fn()} />
-    );
-    
-    expect(getByText(/promotion/i)).toBeInTheDocument();
-    const toggle = getByRole('switch', { name: /promotion/i });
-    fireEvent.click(toggle);
   });
 });
 ```
@@ -959,8 +935,6 @@ describe('Slice 1: Email Preferences Mock API', () => {
 
 ## Implementation Sequence
 
-**Sequential (recommended for one person):**
-
 1. Create emailPreferences.model.ts (40 min)
 2. Add GET endpoint (20 min)
 3. Add PUT endpoint (20 min)
@@ -970,49 +944,39 @@ describe('Slice 1: Email Preferences Mock API', () => {
 
 Total: ~3.5 hours (higher than estimate, includes buffer)
 
-**Parallel (if two developers):**
-
-- Dev A: Steps 1-3 (types + endpoints)
-- Dev B: Steps 4-5 (component)
-- Both: Step 6 (tests)
-
 ---
 
-## Code Quality Gates
-
-Before submitting for review:
+## Verification Gates (per slice)
 
 - [ ] TypeScript: `npm run type-check` passes
 - [ ] Lint: `npm run lint` passes
-- [ ] Tests: `npm run test` passes (100% coverage)
+- [ ] Tests: `npm run test` passes
 - [ ] No console.log() except logging service
 - [ ] JSDoc on public exports
-- [ ] Import paths use established patterns (not relative imports across packages)
+- [ ] Import paths use established patterns
 
 ---
 
 ## Notes
 
 ### Patterns to Follow
-
 - Error handling: Use AppError class (existing pattern)
 - Middleware: Use existing auth, validation middleware
-- Component state: Use React hooks (not class components)
+- Component state: Use React hooks
 - API responses: Follow existing { data, error, success } format
 
 ### Pitfalls to Avoid
-
 - Don't create new middleware (reuse existing auth)
 - Don't hardcode email types (use enum from model)
-- Don't forget to add TypeScript strict checking
+```
 
-```md
-**Engineer's validation:**
-- [x] Zero new architectural decisions → All reference design.md ✅
-- [x] File breakdown specific → Types, functions, dependencies listed ✅
-- [x] Testing strategy detailed → Unit, integration tests specified ✅
-- [x] No TODOs → All specific ✅
-- [x] Effort estimates reasonable → Correlates with LOC ✅
+### What good looks like
+
+- Zero new architectural decisions — all reference design.md
+- File breakdown is specific (types, functions, dependencies)
+- Verification checkpoints per file/slice
+- No vague TODOs
+- Effort estimates correlate with LOC
 
 **Time spent:** 40 minutes
 
@@ -1020,369 +984,262 @@ Before submitting for review:
 
 ## Phase 6: Work Tree (W)
 
-### Agent's Output: work_tree.md (Slice 1)
+### Agent's Output: worktree.md (Slice 1 session)
+
+The `qrspi-worktree` agent (input: `plan.md`) builds a **session-aware task DAG** with per-session context budgets. Each slice maps to one fresh implementation session. Output: `.qrspi/RUS-42/worktree.md` (the third and final plan-phase artifact, committed together on `RUS-42/plan`).
 
 ```markdown
-# Work Tree: Email Preferences - Slice 1
+# Work Tree: Email Preferences
 
-**Slice:** 1 (Mock API + Frontend)
-**Approved Plan:** ✓
+**Total slices/sessions:** 3 (one fresh session per slice)
+**This section: Slice 1 session (Mock API + Frontend)**
+**Context budget for this session:** ~40% (well under the /context threshold)
 **Total Tasks:** 8
-**Critical Path:** ~3 hours
 
-## Task Hierarchy
+## Task DAG — Slice 1 session
 
 ├── T1: Types Definition
 │   ├── T1.1: Define EmailType enum
-│   │   Effort: 15 min
-│   │   Files: src/models/emailPreferences.model.ts
-│   │   Definition of Done: Enum has all 4 email types
-│   │   Depends: None
-│   │
+│   │   Effort: 15 min · Files: src/models/emailPreferences.model.ts
+│   │   Done: Enum has all 4 email types · Depends: None
 │   ├── T1.2: Define PreferenceFrequency enum
-│   │   Effort: 10 min
-│   │   Definition of Done: Enum compiles, used in UserEmailPreference
-│   │   Depends: T1.1
-│   │
+│   │   Effort: 10 min · Done: Enum compiles · Depends: T1.1
 │   └── T1.3: Define DEFAULT_PREFERENCES constant
-│       Effort: 10 min
-│       Definition of Done: Constant has all 4 email types with defaults
-│       Depends: T1.1, T1.2
+│       Effort: 10 min · Done: all 4 types with defaults · Depends: T1.1, T1.2
 │
 ├── T2: API Endpoints
 │   ├── T2.1: Implement GET endpoint
-│   │   Effort: 25 min
-│   │   Files: src/api/routes/users.ts
-│   │   Acceptance: GET /api/v1/users/{id}/preferences/email returns 200
-│   │   Depends: T1.1, T1.2, T1.3
-│   │
+│   │   Effort: 25 min · Done: GET returns 200 · Depends: T1.1–T1.3
 │   └── T2.2: Implement PUT endpoint
-│       Effort: 25 min
-│       Acceptance: PUT request returns 200, response includes updated prefs
-│       Depends: T2.1
+│       Effort: 25 min · Done: PUT returns 200 with updated prefs · Depends: T2.1
 │
 ├── T3: Frontend Component
 │   ├── T3.1: Create EmailPreferences component skeleton
-│   │   Effort: 20 min
-│   │   Files: frontend/components/EmailPreferences.tsx
-│   │   Acceptance: Component renders without error
-│   │   Depends: T1.1 (types)
-│   │
+│   │   Effort: 20 min · Done: renders without error · Depends: T1.1
 │   ├── T3.2: Add toggles for each email type
-│   │   Effort: 20 min
-│   │   Acceptance: All 4 toggles visible, labeled correctly
-│   │   Depends: T3.1
-│   │
+│   │   Effort: 20 min · Done: 4 toggles visible · Depends: T3.1
 │   └── T3.3: Add frequency selects (show when enabled)
-│       Effort: 15 min
-│       Acceptance: Select visible only when toggle is on
-│       Depends: T3.2
+│       Effort: 15 min · Done: select shown only when toggle on · Depends: T3.2
 │
 ├── T4: Integration
 │   ├── T4.1: Wire component to API calls
-│   │   Effort: 30 min
-│   │   Files: frontend/pages/AccountSettings.tsx
-│   │   Acceptance: Clicking toggle calls PUT /api/v1/users/{id}/preferences/email
-│   │   Depends: T2.1, T2.2, T3.3
-│   │
+│   │   Effort: 30 min · Files: frontend/pages/AccountSettings.tsx
+│   │   Done: toggle calls PUT endpoint · Depends: T2.1, T2.2, T3.3
 │   └── T4.2: Add error handling
-│       Effort: 15 min
-│       Acceptance: Error message shown if API call fails
-│       Depends: T4.1
+│       Effort: 15 min · Done: error shown on API failure · Depends: T4.1
 │
 └── T5: Testing
     ├── T5.1: Write integration tests
-    │   Effort: 40 min
-    │   Files: tests/integration/emailPreferences.integration.test.ts
-    │   Acceptance: 5+ tests pass, >90% coverage
-    │   Depends: T2.1, T2.2, T3.1, T3.2, T3.3
-    │
-    └── T5.2: Verify quality gates
-        Effort: 15 min
-        Acceptance: TypeScript, lint, tests all pass
-        Depends: T5.1
+    │   Effort: 40 min · Done: tests pass · Depends: T2.1, T2.2, T3.1–T3.3
+    └── T5.2: Verify gates (type-check, lint, test)
+        Effort: 15 min · Done: all gates pass · Depends: T5.1
 
----
+## Critical Path (Slice 1 session)
 
-## Critical Path
+T1.1 → T1.2 → T1.3 → T2.1 → T2.2 → T3.1 → T3.2 → T3.3 → T4.1 → T5.1 → T5.2
+= 225 minutes ≈ 3.75 hours
 
-T1.1 (15) → T1.2 (10) → T1.3 (10) → T2.1 (25) → T2.2 (25) → 
-T3.1 (20) → T3.2 (20) → T3.3 (15) → T4.1 (30) → T5.1 (40) → T5.2 (15)
+## Session boundary
 
-= 225 minutes = 3.75 hours
-
----
-
-## Parallelization
-
-Can run in parallel:
-- T1.1/T1.2/T1.3 are independent (actually sequential for ergonomics)
-- T2.1/T2.2 sequential (GET before PUT)
-- T3.1/T3.2/T3.3 sequential (building component)
-- T4.1 depends on T2+T3 (can start as soon as endpoints defined)
-
-If two developers:
-- Dev A: T1 + T2 (types + endpoints)
-- Dev B: T3 + T4 (component + integration)
-- Both: T5 (tests)
-
-Best case with 2 devs: 2 hours (parallel streams)
-Single dev: 3.75 hours (sequential)
+Slices 2 and 3 each run in their own fresh session (per the "fresh /clear session
+between slices" rule), each with its own task DAG and context budget.
 ```
 
-**Time spent:** 30 minutes
+### The Plan Review gate
+
+The plan phase is done. Its three artifacts (`structure.md`, `plan.md`, `worktree.md`) sit on the single commit on `RUS-42/plan`, stacked on `RUS-42/design`. The orchestrator **submits the Plan PR** — a separate PR from the design PR, with the design PR as its base — and projects the Linear status to **Plan Review**.
+
+```
+gt create RUS-42/plan --no-interactive -m "RUS-42 [SP]: Plan"
+gt submit --no-edit --no-interactive
+→ Plan PR #319 opened  (RUS-42/plan → RUS-42/design)
+Linear (best-effort): RUS-42 → Plan Review
+"Plan submitted. PR: <url>. → Plan Review."
+```
+
+Second **human turn**. The engineer reviews the Plan PR. Suppose they leave one comment on `structure.md` (an unresolved thread, not a formal change request):
+
+> "Decision 1 is right, but call out explicitly in Slice 3 that we're removing the legacy
+> `newsletter` check from promotions.worker.ts so we don't double-suppress."
+
+Because this comment is on the **plan** PR (the active phase), it does not reset the design — it is a within-phase `revise`. On an explicit re-invocation, the orchestrator reads the unresolved thread, addresses it bounded to the plan-phase artifacts (Slice 3 in `structure.md` already lists the `promotions.worker.ts` change, so this is a one-line clarification), amends the `RUS-42/plan` commit, and re-submits the Plan PR. (If instead the reviewer had filed a formal `CHANGES_REQUESTED` on the **design** PR, that would `reset`: the plan branch and PR would be discarded automatically and the ticket would return to design.)
+
+The engineer **approves the Plan PR**. Approval (with zero unresolved threads) is the only thing that unblocks implementation — the next `/qrspi-work RUS-42` resolves to `advance` and builds the slice stack on top of `RUS-42/plan`.
+
+**Time spent:** Work Tree 30 min + Plan Review 10 min
 
 ---
 
 ## Phase 7: Implement (I)
 
-Agent writes code for all 8 tasks.
+With the Plan PR approved, `/qrspi-work RUS-42` resolves to `advance` and runs implementation. It reads `structure.md` to count the slices, then implements each slice in its own fresh session by spawning the `qrspi-implement` agent. Each slice becomes its own branch **stacked** on the previous one via Graphite:
 
-### Example Commits
+- Slice 1 branches off `RUS-42/plan`
+- Slice 2 branches off `RUS-42/slice-1`
+- Slice 3 branches off `RUS-42/slice-2`
+
+The implement agent writes code and appends to `.qrspi/RUS-42/impl-log.md`. The orchestrator is the only place commits happen — sub-agents never commit. After each slice, it stages every changed file (code, tests, and the impl-log entry) and creates the slice branch.
+
+### Example commits (Slice 1)
 
 ```txt
-Commit: a3f2b1c - feat(T1.1): Define EmailType enum
-Files: src/models/emailPreferences.model.ts (+50 lines)
-Time: 15 min (matches estimate)
+Branch: RUS-42/slice-1  (parent: RUS-42/plan)
+Commit: "RUS-42 [I] 1/3: Mock API + Frontend"
 
-Test Results:
-  ✅ TypeScript compilation: 0 errors
-  ✅ Lint: 0 errors
-  ✅ No runtime tests yet (types only)
+Files:
+  src/models/emailPreferences.model.ts            (+50)
+  src/api/routes/users.ts                          (+130)
+  frontend/components/EmailPreferences.tsx         (+95)
+  frontend/pages/AccountSettings.tsx               (+20)
+  tests/integration/emailPreferences.integration.test.ts (+90)
+  .qrspi/RUS-42/impl-log.md                        (slice-1 entry)
 
-Commit: b4e3c2d - feat(T2.1): Implement GET preferences endpoint
-Files: src/api/routes/users.ts (+65 lines)
-       tests/integration/emailPreferences.integration.test.ts (+30 lines)
-Time: 25 min (matches estimate)
-
-Test Results:
+Verification:
   ✅ TypeScript: 0 errors
   ✅ Lint: 0 errors
-  ✅ Integration test: 1 test, 1 pass
-  ✅ Coverage: 100% (just endpoint)
+  ✅ Integration tests: 5 pass
 
-Commit: c5f4d3e - feat(T2.2): Implement PUT preferences endpoint
-Files: src/api/routes/users.ts (+65 lines)
-       tests/integration/emailPreferences.integration.test.ts (+30 lines)
-Time: 22 min (within estimate)
-
-Test Results:
-  ✅ All gates pass
-  ✅ Integration tests: 2 tests, 2 pass
-  ✅ Coverage: 100%
-
-[... continue for T3, T4, T5 ...]
-
-Total actual time: 3.5 hours (estimate was 3.75 hours)
-Estimate accuracy: 93% (well within 10% target)
+Actual time: ~3.5 hours (estimate was 3.75 hours)
 ```
 
-**Time spent:** Implementation varies (for Slice 1: ~3.5 hours)
+Slices 2 and 3 follow the same pattern, each in a fresh session, each stacked on the prior slice.
 
----
-
-## Phase 8: Pull Request (PR)
-
-### PR Title
-
-```txt
-feat: Add user control over email preferences
-```
-
-### PR Description
+### impl-log.md (Slice 1 entry)
 
 ```markdown
-# Pull Request: User Email Preferences
+## Slice 1 — Mock API + Frontend
 
-**Branch:** `feature/email-preferences-slice-1`
-**Base:** `main`
-**Related:** #2341 (feature ticket)
-**Design:** [link to design.md]
-**Plan:** [link to plan.md]
+**Status:** complete
+**Time:** 3.5h (est. 3.75h)
 
----
+**What was built:** Type definitions, mock GET/PUT endpoints, EmailPreferences
+component wired into AccountSettings. No persistence yet.
 
-## What Changed
+**Deviations from plan:** None.
 
-Slice 1: Users can now see and toggle email preference settings.
-
-**Files:**
-- `src/models/emailPreferences.model.ts` (NEW) — Type definitions
-- `src/api/routes/users.ts` (MODIFIED) — Added GET/PUT endpoints
-- `frontend/components/EmailPreferences.tsx` (NEW) — Preference UI
-- `frontend/pages/AccountSettings.tsx` (MODIFIED) — Integrated component
-- `tests/integration/emailPreferences.integration.test.ts` (NEW) — Tests
-
-**Lines:** +350 added, -0 deleted
-
----
-
-## Code Quality
-
-```txt
-✅ TypeScript: 0 errors, 0 warnings
-✅ ESLint: 0 errors, 0 warnings
-✅ Tests: 5 tests, 5 pass
-✅ Coverage: 98% (only skipping error paths)
+**Notes for next session (Slice 2):**
+- API contract is stable: GET/PUT /api/v1/users/{id}/preferences/email
+- Slice 2 replaces the mock handler body with preferences.service.ts calls
+- DEFAULT_PREFERENCES in the model is the seed for new users
 ```
 
----
-
-## What This Does
-
-- GET `/api/v1/users/{id}/preferences/email` returns user's preferences
-- PUT `/api/v1/users/{id}/preferences/email` updates preferences (not persisted yet)
-- Frontend: EmailPreferences component with toggles + frequency selects
-- Integrated into AccountSettings page
+**Time spent:** ~3.5 hours per slice session
 
 ---
 
-## What This Does NOT Do
+## Phase 8: PR — submit the slice stack and move to Code Review
 
-This is Slice 1 (mock API + frontend).
+### What Actually Happened
 
-**Not included (Slice 2-3):**
+After all slices are implemented, the orchestrator spawns the `qrspi-pr` agent to produce `.qrspi/RUS-42/pr-summary.md`, which maps acceptance criteria to implementation and tests. The summary is amended into the **last** slice commit (not a separate commit). The orchestrator then submits the **entire stack** with Graphite — **one PR per slice** — and sets the PR summary as the body on the bottom (slice-1) PR. The slice stack is stacked on the still-open Plan PR, which is stacked on the still-open Design PR; nothing has merged.
 
-- Preferences not yet persisted to database
-- Email sending doesn't check preferences yet
-- Only in-memory responses
+```
+gt submit --stack --no-edit --no-interactive
+→ PR #321  RUS-42/slice-1 → RUS-42/plan   (body = pr-summary.md)
+→ PR #322  RUS-42/slice-2 → RUS-42/slice-1
+→ PR #323  RUS-42/slice-3 → RUS-42/slice-2
+Linear (best-effort): RUS-42 → Code Review
+"Implementation submitted: 3 slice PRs. → Code Review."
+```
 
----
+### pr-summary.md (on the slice-1 PR)
+
+```markdown
+# Pull Request: User Email Preferences (RUS-42)
+
+Stacked PRs (Graphite): slice-1 → slice-2 → slice-3
+
+## Acceptance Criteria → Implementation
+
+| AC | Where it's satisfied | Tests |
+|----|----------------------|-------|
+| AC1 (toggle promotions) | Slice 1 UI + Slice 2 persistence + Slice 3 send gate | emailPreferences.integration, emailSending.integration |
+| AC2 (toggle digest) | same path as AC1 | emailSending.integration |
+| AC3 (immediate effect) | preferences table is uncached; read on every send | emailSending.integration |
+| AC4 (order confirmations always send) | Slice 3 exempts transactional types | email.service.test |
+
+## What Changed (by slice)
+
+- **Slice 1** — Mock API + frontend toggles. No persistence.
+- **Slice 2** — UserEmailPreferences table, migration, preferences.service.ts.
+- **Slice 3** — email.service + promotions.worker check preferences;
+  legacy `newsletter` filter removed to avoid double-suppression.
 
 ## Design Alignment
 
-- ✅ Follows approved design.md
-- ✅ Uses separate preferences model (not JSON column—per feedback)
-- ✅ API follows existing conventions (/api/v1/users/{id}/...)
-- ✅ Component uses existing Toggle component
-- ✅ Error handling follows existing pattern
-
----
-
-## Architecture
-
-No new architectural decisions introduced.
-All implementation details reference:
-
-- Type definitions (emailPreferences.model.ts) ← Approved in Design
-- API pattern (/api/v1/users/...) ← Discovered in Research
-- Component structure ← Existing pattern from AccountSettings
-
----
+- ✅ Separate UserEmailPreferences table (Decision 1)
+- ✅ Transactional emails always send (Decision 2 / AC4)
+- ✅ API follows existing /api/v1/users/{id}/... convention (from research)
+- ✅ Reuses existing Toggle component
 
 ## Risk Assessment
 
-**Low risk.**
-
-This is mocked data, not production features.
-
-Next slices (database + email sending) will have more risk.
-
----
-
-## Testing
-
-```txt
-npm test -- emailPreferences
-✅ 5 tests pass
-✅ No skipped tests
-✅ Coverage: src/api/routes/users.ts (100%)
-✅ Coverage: frontend/components/EmailPreferences.tsx (98%)
+- Slice 3 is the highest-risk change (touches live send paths). Covered by unit +
+  integration tests for both the "send" and "suppress" branches.
 ```
 
----
+### The Code Review gate
 
-## Deployment
+Third **human turn**. The engineer reviews the stack. On an explicit `/qrspi-work RUS-42` re-invocation, the resolver reads review state across all slice PRs (and the upstream design/plan PRs). If a slice PR has unresolved threads, the action is `revise`: address them starting from the lowest-numbered affected slice (changes propagate upward through the stack via `gt modify`, which auto-restacks descendants), then re-submit the stack. Here, suppose the review is clean:
 
-Can merge and deploy immediately.
+> "Clean stack. Tests cover the suppress/send branches. Approving all three."
 
-- No database changes
-- No feature flags needed
-- No configuration needed
-- Frontend-only at this stage
+The engineer **approves all three slice PRs**. Now every PR in the stack — design, plan, and all slices — is approved with zero unresolved threads. The resolver's land predicate (`READY(design) AND READY(plan) AND ∀ slices READY(slice_i)`) is satisfied, so the next `/qrspi-work RUS-42` resolves to `land`. The orchestrator restacks onto `main` and merges the whole stack **bottom-up** with `gt merge` — nothing merged before this point.
 
----
+```
+gt checkout RUS-42/slice-1 --no-interactive
+gt submit --stack --no-edit --no-interactive   # ensure remotes current
+gt merge --confirm --no-interactive            # merges design → plan → slice-1..3, bottom-up
+```
 
-## Next Steps
+After the merge, the orchestrator syncs `main` (`gt sync --force`, which prunes the merged branches), removes the `.qrspi/RUS-42/` artifacts and the `.worktrees/RUS-42/` worktree, and projects the Linear status to **Done** (best-effort).
 
-1. Code review + merge this PR
-2. Deploy to production
-3. Start Slice 2: Real database persistence
-4. Start Slice 3: Email sending respects preferences
-
----
-
-## Reviewer Checklist
-
-- [x] Code follows existing patterns
-- [x] No new architectural decisions
-- [x] All tests pass
-- [x] TypeScript strict
-- [x] Error handling appropriate
-- [x] Type safety maintained
-- [x] Design alignment verified
-- [x] Commit messages clear
-- [x] Documentation complete (JSDoc)
-- [x] No surprises (all aligns with prior artifacts)
-
-```md
-
-### Reviewer (Engineer)
-
-Reads PR.
-- Checks: Does everything align with design.md and plan.md? ✅
-- Checks: Are there surprises? (No—everything was approved beforehand) ✅
-- Checks: Do tests pass? (Yes) ✅
-- Checks: Does code follow patterns? (Yes) ✅
-
-**Approval:** "Looks good. Merging."
-
-**Time spent:** 15 minutes (quick review, no surprises)
+**Time spent:** PR generation 10 min + Code Review 15 min
 
 ---
 
 ## Summary: Total QRSPI Time
 
 ```txt
-Phase 1 (Questions):  20 min
-Phase 2 (Research):   45 min
-Phase 3 (Design):     40 min (30 agent + 10 feedback)
-Phase 4 (Structure):  30 min
-Phase 5 (Plan):       40 min
-Phase 6 (Work Tree):  30 min
-Phase 7 (Implement):  3.5 hours (Slice 1 only)
-Phase 8 (PR):         15 min
+Phase 0 (Ticket):            15 min
+Phase 1 (Questions):         20 min
+Phase 2 (Research):          45 min
+Phase 3 (Design):            40 min  ──┐
+[Design PR → approved]                 ├─ design phase + Design PR
+Phase 4 (Structure):         30 min  ──┐
+Phase 5 (Plan):              40 min    ├─ plan phase + Plan PR
+Phase 6 (Work Tree):         30 min  ──┘
+[Plan PR → approved]
+Phase 7 (Implement):    ~3.5 h/slice × 3 slices
+Phase 8 (PR):                10 min
+[Slice PRs → all approved → land stack]
 
-Total: 5.5 hours for Slice 1 (mock API)
-
-Estimate was 6 hours (2.5 align + 2.5 implement + 1 review)
-Actual was 5.5 hours
-Accuracy: 92% ✅
-
----
-
-Slices 2-3 would follow same pattern:
-Slice 2: +3 hours implementation (database)
-Slice 3: +2.5 hours implementation (email logic)
-
-Total feature: ~9-10 hours end-to-end
-All code integrated perfectly (0 rework needed)
+Planning total (phases 0–6 + 2 PRs): ~3.5 hours
+Implementation total (3 slices):     ~9–10 hours
 ```
+
+Each phase shipped as its **own** stacked PR: `RUS-42/design` → `RUS-42/plan` →
+`RUS-42/slice-1..3`. The Design PR was opened and approved first; the Plan PR was stacked
+on it and approved; the three slice PRs were stacked on plan. The whole stack was held open
+and landed **bottom-up** only once every PR was approved + clean. Code integrated cleanly —
+no rework needed.
 
 ---
 
 ## Key Takeaways from This Example
 
-1. **Alignment phases aren't wasted time** — They catch design issues early (JSON column mistake was caught in Design, not code review)
+1. **PR review state is the authority, not Linear.** `/qrspi-work` resolves what to do from the PR stack (via the tested resolver `scripts/qrspi_resolve_state.py`); a phase is ready when its PR is `APPROVED` with zero unresolved threads. Linear plays exactly two roles: an **entry gate** (assigned + `Selected`) and a **best-effort reporting projection** that never blocks work. Local files under `.qrspi/RUS-42/` hold the artifacts.
 
-2. **Estimates become accurate** — After alignment, estimates are within 10% (3.5h actual vs. 3.75h estimated)
+2. **Approving a phase PR auto-advances; a change request resets.** Approving the Design PR builds the Plan PR on top; approving the Plan PR builds the slice stack. A formal `CHANGES_REQUESTED` on an upstream PR automatically discards the downstream phases (PRs closed, branches deleted, stale artifacts removed) and returns the ticket there. Within-phase revision is manual. This is where design issues get caught early — at the design gate, not in code review.
 
-3. **Code review is boring** — No surprises, quick approval (15 min review)
+3. **One PR per phase, stacked, held open.** `RUS-42/design` → `RUS-42/plan` → `RUS-42/slice-1..N`, each its own branch and PR, each a single commit. Nothing merges until the whole feature is approved, then the stack lands bottom-up. The old single `RUS-42/planning` branch is gone.
 
-4. **Artifacts compound** — Each artifact feeds the next. By Phase 7, implementation is mechanical (follow the plan)
+4. **The research firewall prevents anchoring.** Research never sees the ticket and has no Linear access — it answers the questions against the codebase alone, so its findings aren't bent to fit the proposed solution.
 
-5. **Brain surgery is essential** — One piece of feedback (use separate table, not JSON) saved rework later
+5. **Agents vs. skills.** Phase logic lives in `.claude/agents/qrspi-<phase>.md` (tool-locked, spawned by `subagent_type`). The `.claude/skills/qrspi-<phase>/` wrappers exist for manual invocation; `/qrspi-work` orchestrates the agents directly.
 
-6. **Vertical slices are testable** — Slice 1 ships with no database, but is fully testable and deployable
+6. **Vertical slices ship as a stack.** Each slice is end-to-end testable and becomes its own Graphite PR stacked on the previous one. Slice 1 ships with no database but is fully testable.
 
-This is what QRSPI looks like in practice. Not theoretical—actual time investments and artifacts.
+7. **Batch mode for many tickets.** `.claude/workflows/qrspi-batch.js` drives many assigned tickets one PR-gated step forward — the autonomously-runnable actions (`run_design`, `advance`, `submit`, `land`, and automatic `reset`) — by spawning the typed phase agents. It deliberately leaves `wait` (not yet approved) and the manual `revise` path untouched.
+
+This is what QRSPI looks like in practice. Not theoretical — actual artifacts, actual PR gates, actual stacked PRs.

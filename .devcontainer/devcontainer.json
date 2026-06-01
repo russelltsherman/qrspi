@@ -34,16 +34,16 @@
     "source=${localEnv:HOME}/.claude.json,target=/home/vscode/.claude.json,type=bind",
 
     //ssh config
-    "source=${localEnv:HOME}/.ssh/,target=/home/vscode/.ssh/,type=bind,readonly",
+    "source=${localEnv:HOME}/.bot/ssh/,target=/home/vscode/.ssh/,type=bind",
 
-    // GH config (readonly)
-    "source=${localEnv:HOME}/.config/gh,target=/home/vscode/.config/gh,type=bind,readonly",
-
-    // Git config (readonly)
-    "source=${localEnv:HOME}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly",
+    // Git config
+    "source=${localEnv:HOME}/.bot/gitconfig,target=/home/vscode/.gitconfig,type=bind",
+    
+    // GH token
+    "source=${localEnv:HOME}/.bot/gh,target=/home/vscode/.config/gh,type=bind",
 
     // Graphite config
-    "source=${localEnv:HOME}/.config/graphite/,target=/home/vscode/.config/graphite/,type=bind"
+    "source=${localEnv:HOME}/.bot/graphite/,target=/home/vscode/.config/graphite/,type=bind"
 
     // Paths listed in .devcontainer/protected-paths are shadowed from inside
     // the container at startup by /usr/local/sbin/protect-paths. See
