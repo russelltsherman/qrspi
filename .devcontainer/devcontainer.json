@@ -18,7 +18,18 @@
     "OMLX_OPUS_MODEL": "${localEnv:OMLX_OPUS_MODEL}",
     "OMLX_SONNET_MODEL": "${localEnv:OMLX_SONNET_MODEL}",
     "OMLX_HAIKU_MODEL": "${localEnv:OMLX_HAIKU_MODEL}",
-    "OMLX_CONTEXT_WINDOW": "${localEnv:OMLX_CONTEXT_WINDOW}"
+    "OMLX_CONTEXT_WINDOW": "${localEnv:OMLX_CONTEXT_WINDOW}",
+
+    // Ollama local model server on the host. Forwarded to the ollama/ollama-yolo
+    // shell functions, which point Claude Code at Ollama's native Anthropic API
+    // (/v1/messages) via host.docker.internal. OLLAMA_MODEL is required — it must
+    // name an installed Ollama model (e.g. qwen3.6:35b-mlx) or the launcher errors.
+    // On Docker Desktop (macOS/Windows) the container reaches the host's default
+    // 127.0.0.1-bound ollama via host.docker.internal; on native Linux Docker,
+    // bind ollama to 0.0.0.0 instead.
+    "OLLAMA_MODEL": "${localEnv:OLLAMA_MODEL}",
+    "OLLAMA_PORT": "${localEnv:OLLAMA_PORT}",
+    "OLLAMA_API_KEY": "${localEnv:OLLAMA_API_KEY}"
   },
 
   "initializeCommand": "bash .devcontainer/config/initialize.sh",
