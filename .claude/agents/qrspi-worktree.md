@@ -1,7 +1,6 @@
 ---
 name: qrspi-worktree
 description: Internal QRSPI workflow agent — builds a session-aware task DAG from an approved plan. Spawned by /qrspi-worktree or qrspi-work. Not for git worktree operations.
-model: opus
 claude:
   tools: Read, Write
 ---

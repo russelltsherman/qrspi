@@ -1,7 +1,6 @@
 ---
 name: qrspi-questions
 description: Internal QRSPI workflow agent — generates 8-15 technical questions from feature ticket content. Spawned by the /qrspi-questions skill or the qrspi-work orchestrator. Not for general-purpose question generation.
-model: opus
 claude:
   tools: Read, Write
 ---

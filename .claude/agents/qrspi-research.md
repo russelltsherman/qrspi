@@ -1,7 +1,6 @@
 ---
 name: qrspi-research
 description: Internal QRSPI workflow agent — maps codebase facts by answering Questions-phase questions. The ticket is intentionally hidden from this agent. Spawned by /qrspi-research or qrspi-work. Not for general codebase exploration.
-model: opus
 claude:
   tools: Read, Write, Glob, Grep
 ---

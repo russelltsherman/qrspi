@@ -1,7 +1,6 @@
 ---
 name: qrspi-structure
 description: Internal QRSPI workflow agent — defines vertical slices, types, and contracts from an approved design. Spawned by /qrspi-structure or qrspi-work. Not for general architecture work.
-model: opus
 claude:
   tools: Read, Write
 ---

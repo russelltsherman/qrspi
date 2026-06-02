@@ -1,7 +1,6 @@
 ---
 name: qrspi-implement
 description: Internal QRSPI workflow agent — implements one vertical slice in a fresh context. Spawned by /qrspi-implement or qrspi-work. Not for general implementation work.
-model: opus
 claude:
   tools: Read, Write, Edit, Glob, Grep, Bash
 ---

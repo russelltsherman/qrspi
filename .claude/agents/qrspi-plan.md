@@ -1,7 +1,6 @@
 ---
 name: qrspi-plan
 description: Internal QRSPI workflow agent — writes atomic implementation steps per vertical slice from an approved structure. Spawned by /qrspi-plan or qrspi-work. Not for general planning work.
-model: opus
 claude:
   tools: Read, Write
 ---

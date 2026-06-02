@@ -1,7 +1,6 @@
 ---
 name: qrspi-pr
 description: Internal QRSPI workflow agent — prepares a pull request summary after all slices are implemented. Spawned by /qrspi-pr or qrspi-work. Not for general PR description writing.
-model: opus
 claude:
   tools: Read, Write, Bash
 ---

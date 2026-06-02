@@ -1,7 +1,6 @@
 ---
 name: qrspi-design
 description: Internal QRSPI workflow agent — produces the design document from ticket + questions + research. Spawned by /qrspi-design or qrspi-work. Not for general design work.
-model: opus
 claude:
   tools: Read, Write
 ---
