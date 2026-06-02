@@ -53,24 +53,29 @@ trunk
    `<ticket-id>`). On failure, retry **once**; if the retry fails, this is a **hard stop**
    — print the exact error and exit.
    - Read `status` (name) and `assignee` (`assigned` = assignee is non-null).
-3. Determine `REPO_ROOT` (the main repo where `.git/` lives) and the GitHub repo:
+3. **Resolve everything in ONE deterministic command.** Worktree setup, GitHub
+   `OWNER/REPO`, the PR-state gather, the tested decision, and artifact detection are all
+   folded into a single script (`scripts/qrspi_resolve.py`). Run it verbatim — do **not**
+   hand-derive paths, repo names, or the decision:
    ```bash
-   OWNER_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')   # e.g. russelltsherman/qrspi
-   OWNER=${OWNER_REPO%/*}; REPO=${OWNER_REPO#*/}
-   ```
-4. Set up the worktree (see [Worktree Setup](#worktree-setup)).
-5. **Gather PR review state and resolve the action** (the decision is computed by a
-   tested script — do not re-derive it by hand):
-   ```bash
-   python3 "$REPO_ROOT/scripts/qrspi_pr_state.py" \
-     --owner "$OWNER" --repo "$REPO" --ticket "<ticket-id>" \
+   python3 scripts/qrspi_resolve.py --ticket "<ticket-id>" \
      $( [ "<assigned>" = "true" ] && echo --assigned ) \
-     --linear-status "<status>" \
-   | python3 "$REPO_ROOT/scripts/qrspi_resolve_state.py"
+     --linear-status "<status>"
    ```
-   The output is a decision object: `{ action, phase, nextPhase, resetToPhase, discardPhases, reason }`.
-6. **Print the decision** (`action` + `reason`) so the operator can observe.
-7. Dispatch on `action`:
+   It self-locates the repo root from its own location, so it works from any cwd, and it
+   creates **nothing** unless the decision is `run_design`. It prints one JSON envelope:
+   ```json
+   { "ok": true, "repoRoot": "…", "worktreeDir": "…",
+     "existing": { "questions": false, … },
+     "decision": { "action": "…", "phase": null, "nextPhase": null,
+                   "resetToPhase": null, "discardPhases": [], "reason": "…" } }
+   ```
+   Set `REPO_ROOT` and `WORKTREE_PATH` from `repoRoot`/`worktreeDir`. If `ok` is `false`,
+   that is a **hard stop** — print the verbatim `error` and exit. Never retry it with an
+   alternative command or improvised path. (The [Worktree Setup](#worktree-setup) section
+   below documents what the script does internally, for reference.)
+4. **Print the decision** (`action` + `reason`) so the operator can observe.
+5. Dispatch on `action`:
 
 | `action` | Handler |
 |---|---|

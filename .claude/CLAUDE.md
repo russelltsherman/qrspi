@@ -71,8 +71,11 @@ stays on `main`; all ticket work happens in worktrees. `.worktrees/` is gitignor
 - Phase agent definitions live in `.claude/agents/`; their slash-command wrappers live in `.claude/skills/`
 - The batch orchestrator workflow lives in `.claude/workflows/qrspi-batch.js`
 - The PR-gated decision logic lives in `scripts/qrspi_resolve_state.py` (the tested resolver)
-  and `scripts/qrspi_pr_state.py` (gathers PR review state via gh GraphQL). Both have
-  stdlib-only unit tests as `_test.py` siblings (`scripts/qrspi_*_test.py`, run with `python3`).
+  and `scripts/qrspi_pr_state.py` (gathers PR review state via gh GraphQL). `scripts/qrspi_resolve.py`
+  is the one-shot orchestrator that folds worktree setup + OWNER/REPO + the gather + the decision +
+  artifact detection into a SINGLE deterministic command (it self-locates the repo root from its own
+  path), so the resolve worker types one invocation instead of ~6 path-sensitive shell steps. All
+  three have stdlib-only unit tests as `_test.py` siblings (`scripts/qrspi_*_test.py`, run with `python3`).
 - Artifact templates live in `.qrspi/templates/` (reference only — not written locally)
 - The `evals/` + `scripts/run_eval.py` harness is a **non-functional placeholder** — verify
   pure logic with the unit tests and orchestration changes with manual end-to-end runs

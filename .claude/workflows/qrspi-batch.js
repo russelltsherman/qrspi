@@ -184,17 +184,30 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel) {
 async function resolveTicket(t) {
   phase('Resolve')
   return await agent(
-    `You are the RESOLVE worker for QRSPI ticket ${t.id}. Follow ${SKILL}.
+    `You are the RESOLVE worker for QRSPI ticket ${t.id}. Your cwd is the main repo root.
 
-1. Fetch the ticket with mcp__linear-russelltsherman__get_issue (identifier ${t.id}); read its status name and whether it is assigned (assignee non-null). Retry once on failure; if it still fails, return ok:false with the exact error.
-2. Follow the "Worktree Setup" section of ${SKILL} to create/reuse the worktree for ${t.id}. REPO_ROOT is the main repo (where .git/ lives); the worktree is <REPO_ROOT>/.worktrees/${t.id}. For a brand-new ticket with no branch yet, create the worktree on a new design branch: git worktree add -b ${t.id}/design <worktreeDir> main, then gt track --parent main (the phase agents must be able to write into this worktree).
-3. Determine OWNER/REPO via: gh repo view --json nameWithOwner.
-4. Gather PR state and resolve the action with the TESTED scripts (do NOT hand-derive the decision):
-   python3 "<REPO_ROOT>/scripts/qrspi_pr_state.py" --owner "<OWNER>" --repo "<REPO>" --ticket "${t.id}" [--assigned if assigned] --linear-status "<status>" | python3 "<REPO_ROOT>/scripts/qrspi_resolve_state.py"
-   Parse the JSON decision object it prints.
-5. Detect which artifacts already exist AND are non-empty under <worktreeDir>/.qrspi/${t.id}/: questions, research, design, structure, plan, worktree.
+Do EXACTLY two things — no exploration, no path guessing:
 
-Return: ok, repoRoot, worktreeDir, ticketContent (title+description verbatim), existing{...booleans}, decision{action,phase,nextPhase,resetToPhase,discardPhases,reason}. Do NOT generate/modify artifacts or change Linear. Treat any infrastructure error (auth/permission/config, "repo not synced with Graphite") as a HARD STOP: return ok:false with the verbatim error.`,
+1. Fetch the ticket: mcp__linear-russelltsherman__get_issue (identifier ${t.id}). Read its
+   status name, whether it is assigned (assignee non-null), and keep its title+description
+   verbatim for ticketContent. Retry once on failure; if it still fails, return ok:false with
+   the exact error.
+
+2. Run this ONE command verbatim from your cwd (it does worktree setup + OWNER/REPO + the
+   tested PR-state gather + decision + artifact detection in a single deterministic step —
+   do NOT hand-derive any of it, and do NOT substitute paths):
+
+     python3 scripts/qrspi_resolve.py --ticket ${t.id} --linear-status "<status>"
+
+   Replace <status> with the Linear status name from step 1. If (and only if) step 1 found the
+   ticket assigned, also append the flag  --assigned  to that command.
+   The command prints a JSON envelope: { ok, repoRoot, worktreeDir, existing{...}, decision{...} }.
+   Parse it. If it ran but reported ok:false, return that error verbatim (HARD STOP — do NOT
+   retry, do NOT improvise alternative commands or paths).
+
+Return: ok, repoRoot, worktreeDir, ticketContent (title+description verbatim), existing, decision
+— copying repoRoot/worktreeDir/existing/decision straight from the script's JSON. Do NOT
+generate/modify artifacts or change Linear.`,
     { label: `resolve:${t.id}`, phase: 'Resolve', schema: RESOLVE_SCHEMA }
   )
 }
