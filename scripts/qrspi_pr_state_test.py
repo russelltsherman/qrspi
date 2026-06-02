@@ -10,6 +10,7 @@ from qrspi_pr_state import (
     parse_pr_nodes,
     slice_numbers,
     branch_set,
+    real_branches,
 )
 
 failures = 0
@@ -82,6 +83,24 @@ check("normalizes branch lines (strips current marker)",
 check("strips '+' worktree marker (regression: ticket branches live in worktrees)",
       branch_set(["+ RUS-1/design", "* RUS-1/plan", "  RUS-1/slice-1"]),
       {"RUS-1/design", "RUS-1/plan", "RUS-1/slice-1"})
+
+# --- real_branches (regression: empty placeholder branch must not read as a phase) --
+check("empty placeholder branch (0 commits ahead of trunk) is not real",
+      real_branches({"RUS-1/design"}, {"RUS-1/design": 0}),
+      set())
+
+check("branch ahead of trunk is real",
+      real_branches({"RUS-1/design"}, {"RUS-1/design": 3}),
+      {"RUS-1/design"})
+
+check("mixed: real design, empty plan placeholder",
+      real_branches({"RUS-1/design", "RUS-1/plan"},
+                    {"RUS-1/design": 1, "RUS-1/plan": 0}),
+      {"RUS-1/design"})
+
+check("branch missing from ahead map is not real (defensive)",
+      real_branches({"RUS-1/design"}, {}),
+      set())
 
 
 def run():

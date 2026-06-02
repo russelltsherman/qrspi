@@ -91,12 +91,45 @@ def branch_set(branch_lines):
     return out
 
 
+def real_branches(branches, ahead_counts):
+    """The branches that both exist AND carry real work — at least one commit ahead
+    of trunk.
+
+    Why this gate exists (regression): worktree setup creates a phase branch with
+    `git worktree add -b <id>/design ... main`, so a brand-new ticket's design branch
+    starts at the SAME commit as trunk with NO artifact commit yet. Plain branch
+    existence then made the resolver read the design phase as complete-but-unsubmitted
+    and return `submit` for a branch with nothing to submit — the submit worker thrashed
+    against an empty branch (no diff to open a PR with) until it hit the tool-call cap.
+    An empty placeholder (0 commits ahead of trunk) is NOT a real phase.
+
+    `ahead_counts` maps branch name -> commits-ahead-of-trunk. A branch absent from the
+    map, or mapped to 0, is treated as not-real. NOTE: the gate is trunk-relative, so it
+    reliably catches an empty *design* branch (whose parent IS trunk). An empty *plan*
+    or *slice* branch still carries its ancestors' commits and would read as real — a
+    narrower case the commit workers already guard by committing before branching."""
+    return {b for b in branches if ahead_counts.get(b, 0) > 0}
+
+
 # --- subprocess-backed gathering (not unit-tested) -------------------------
 
 def _git_branches(ticket):
     res = subprocess.run(["git", "branch", "--list", "%s/*" % ticket],
                          capture_output=True, text=True)
     return res.stdout.splitlines()
+
+
+def _commits_ahead(branch, trunk):
+    """Commits on `branch` not reachable from `trunk`. Returns 0 on any error (an
+    unreadable or odd branch is treated as not-real rather than crashing the gather)."""
+    res = subprocess.run(["git", "rev-list", "--count", "%s..%s" % (trunk, branch)],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        return 0
+    try:
+        return int(res.stdout.strip())
+    except ValueError:
+        return 0
 
 
 def _query_pr(owner, repo, head):
@@ -111,21 +144,28 @@ def _query_pr(owner, repo, head):
     return data["data"]["repository"]["pullRequests"]["nodes"]
 
 
-def build_state(owner, repo, ticket, assigned, linear_status):
+def build_state(owner, repo, ticket, assigned, linear_status, trunk="main"):
     lines = _git_branches(ticket)
     branches = branch_set(lines)
     snums = slice_numbers(lines)
 
+    # A phase exists only if its branch carries real work (>=1 commit ahead of trunk).
+    # This filters out the empty placeholder branch worktree-setup leaves on a fresh
+    # ticket — see real_branches() for the regression this prevents.
+    ahead = {b: _commits_ahead(b, trunk) for b in branches}
+    real = real_branches(branches, ahead)
+
     def phase_pr(name):
         head = "%s/%s" % (ticket, name)
-        exists = head in branches
+        exists = head in real
         pr = parse_pr_nodes(_query_pr(owner, repo, head)) if exists else \
             {"prExists": False, "number": None, "reviewDecision": None, "unresolvedThreads": 0}
         pr["branchExists"] = exists
         return pr
 
+    real_snums = [n for n in snums if ("%s/slice-%d" % (ticket, n)) in real]
     slices = []
-    for n in snums:
+    for n in real_snums:
         head = "%s/slice-%d" % (ticket, n)
         pr = parse_pr_nodes(_query_pr(owner, repo, head))
         pr["n"] = n
@@ -138,7 +178,7 @@ def build_state(owner, repo, ticket, assigned, linear_status):
         "phases": {
             "design": phase_pr("design"),
             "plan": phase_pr("plan"),
-            "implementation": {"branchExists": bool(snums), "slices": slices},
+            "implementation": {"branchExists": bool(real_snums), "slices": slices},
         },
     }
 
@@ -152,9 +192,12 @@ def main():
                         help="Ticket is assigned to a user (from Linear, supplied by caller)")
     parser.add_argument("--linear-status", default="",
                         help="Current Linear status name (from Linear, supplied by caller)")
+    parser.add_argument("--trunk", default="main",
+                        help="Trunk branch a phase branch must be ahead of to count as real (default: main)")
     args = parser.parse_args()
 
-    state = build_state(args.owner, args.repo, args.ticket, args.assigned, args.linear_status)
+    state = build_state(args.owner, args.repo, args.ticket, args.assigned, args.linear_status,
+                        trunk=args.trunk)
     json.dump(state, sys.stdout, indent=2)
     print()
 
