@@ -127,7 +127,7 @@ trunk) until every PR is approved, then landed bottom-up.
 ### Step 1: Draft Your Ticket
 
 Run `/qrspi-ticket <brief description>` and work with the agent conversationally until a
-**Linear issue** is created in the Russelltsherman team, QRSPI project. The agent assigns the
+**Linear issue** is created in your Linear team, QRSPI project. The agent assigns the
 Linear ID (e.g., `RUS-42`) — there is no local `ticket.md`. The ticket holds the problem
 statement; QRSPI artifacts are stored locally under `.qrspi/<ticket-id>/`, while Linear holds
 only status and phase-transition comments.
@@ -151,7 +151,7 @@ Confirm the ticket reflects a medium-complexity feature. Avoid:
 QRSPI runs in the Claude Code CLI. The phases need:
 
 - **Access to your codebase** (the research phase reads it; the ticket is hidden from research)
-- **Linear MCP** configured for the Russelltsherman workspace (the entry gate — a ticket may
+- **Linear MCP** configured for your Linear workspace (the entry gate — a ticket may
   begin only when it is *assigned* and in `Selected` — plus best-effort status reporting)
 - **Graphite (`gt`)** for stacked PRs and **GitHub CLI (`gh`)** for PR operations (PR review state
   is the real driver of the workflow)

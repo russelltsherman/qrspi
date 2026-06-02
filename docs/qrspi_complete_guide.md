@@ -192,7 +192,7 @@ Know what's in each phase           → Quick Reference Card
 
 | Phase | Artifact |
 |-------|----------|
-| Ticket | A Linear issue (team Russelltsherman, project QRSPI) — defines the problem |
+| Ticket | A Linear issue (your Linear team, project QRSPI) — defines the problem |
 | Questions | `questions.md` — 8-15 technical questions from the ticket |
 | Research | `research.md` — answers from the codebase (ticket hidden to prevent anchoring) |
 | Design | `design.md` — pattern decisions, risk register, delta, open questions |

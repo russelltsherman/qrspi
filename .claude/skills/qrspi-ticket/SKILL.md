@@ -3,7 +3,7 @@ name: qrspi-ticket
 description: Draft a new feature ticket through guided conversation. Use when starting a new QRSPI workflow or when the user wants to create a ticket.
 command: /qrspi-ticket
 argument-hint: <initial description>
-allowed-tools: Read, Glob, Grep, Write, Bash, mcp__linear-russelltsherman__save_issue
+allowed-tools: Read, Glob, Grep, Write, Bash, mcp__linear__save_issue, mcp__linear__list_teams
 ---
 
 # Ticket Phase (T)
@@ -103,17 +103,25 @@ Ask: "Does this look right? Reply 'approved' to write it, or tell me what to cha
 
 On approval:
 
-1. Call `mcp__linear-russelltsherman__save_issue` with:
+1. Resolve the Linear destination — never hard-code a team. Read `.qrspi/config.json`
+   (it may not exist):
+   - `team`: use its `linearTeam` field. If the file is missing or has no `linearTeam`,
+     call `mcp__linear__list_teams`; if exactly one team exists, use it, otherwise ask the
+     user which team to file under. Then suggest they add `"linearTeam": "<name>"` to
+     `.qrspi/config.json` to skip this next time.
+   - `project`: use its `linearProject` field, defaulting to `"QRSPI"` when unset.
+
+2. Call `mcp__linear__save_issue` with:
    - `title`: the Title from the draft
-   - `team`: "Russelltsherman"
-   - `project`: "QRSPI"
+   - `team`: the team resolved in step 1
+   - `project`: the project resolved in step 1
    - `assignee`: "me"
    - `description`: the full ticket body (Description + Acceptance Criteria + Constraints + Out of Scope sections as markdown)
 
-2. If `save_issue` fails, report the error to the user and STOP. Do not create a local directory or fall back to local files.
+3. If `save_issue` fails, report the error to the user and STOP. Do not create a local directory or fall back to local files.
 
-3. Extract the `id` field from the response (e.g., RUS-42). This is the ticket ID.
+4. Extract the `id` field from the response (e.g., RUS-42). This is the ticket ID.
 
-4. Create the local artifact directory: run `mkdir -p .qrspi/<id>` via Bash.
+5. Create the local artifact directory: run `mkdir -p .qrspi/<id>` via Bash.
 
 Tell the user: "Linear issue `<id>` created. Local artifacts at `.qrspi/<id>/`. Run `/qrspi-questions <id>` to begin the next phase."

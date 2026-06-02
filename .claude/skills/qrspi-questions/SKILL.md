@@ -3,7 +3,7 @@ name: qrspi-questions
 description: Generate 8-15 targeted technical questions from a feature ticket. Use when starting a new QRSPI feature workflow or when the user says "questions for" a ticket.
 command: /qrspi-questions
 argument-hint: <ticket-id>
-allowed-tools: Agent, Bash(pwd:*), mcp__linear-russelltsherman__get_issue
+allowed-tools: Agent, Bash(pwd:*), mcp__linear__get_issue
 ---
 
 # /qrspi-questions
@@ -13,7 +13,7 @@ Thin wrapper that fetches the ticket from Linear and spawns the `qrspi-questions
 ## Steps
 
 1. Parse `$ARGUMENTS` to get `<ticket-id>` (e.g., `RUS-42`).
-2. Fetch the ticket: call `mcp__linear-russelltsherman__get_issue` with `id: "<ticket-id>"`. Capture `title` and `description` as `TICKET_CONTENT`.
+2. Fetch the ticket: call `mcp__linear__get_issue` with `id: "<ticket-id>"`. Capture `title` and `description` as `TICKET_CONTENT`.
 3. Resolve `REPO_ROOT` from `pwd` (or the worktree path if running inside one).
 4. Spawn the agent via the `Agent` tool:
    - `subagent_type: qrspi-questions`

@@ -1,3 +1,5 @@
 __pycache__
 .worktrees/
 .claude/scheduled_tasks.lock
+# Local config override (per-user); see .qrspi/config.example.json
+.qrspi/config.json

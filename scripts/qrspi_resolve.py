@@ -46,8 +46,76 @@ from qrspi_resolve_state import resolve  # noqa: E402
 
 ARTIFACTS = ["questions", "research", "design", "structure", "plan", "worktree"]
 
+# Optional, gitignored override file (see .qrspi/config.example.json). Keeping the
+# default resolution at "@me" (the authenticated GitHub user) means a freshly cloned
+# harness needs NO config and ships NO hard-coded username — the thing that makes it
+# shareable. The file override only exists for teams that want a *designated*
+# reviewer or team slug instead of self-review.
+REVIEWER_CONFIG = ["config.json"]  # relative to <repo>/.qrspi/
+
 
 # --- pure helpers (unit-tested) --------------------------------------------
+
+def _split_csv(value):
+    """Split a comma-separated string into trimmed, non-empty tokens. None -> []."""
+    return [tok.strip() for tok in (value or "").split(",") if tok.strip()]
+
+
+def _as_token_list(value):
+    """Coerce a config value (CSV string OR list) into trimmed, non-empty tokens."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _split_csv(value)
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _dedupe_ci(items):
+    """De-duplicate case-insensitively, preserving first-seen order/casing."""
+    seen, out = set(), []
+    for it in items:
+        key = it.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(it)
+    return out
+
+
+def select_source(config, key, default):
+    """Resolve one reviewer source: config[key] when present (CSV string OR list),
+    else default. Reviewers are config-file only — there is no env override. To opt
+    out entirely, set the key to [] in config. Pure, so it is unit-testable."""
+    if isinstance(config, dict) and key in config:
+        return _as_token_list(config[key])
+    return list(default)
+
+
+def references_me(config):
+    """True iff the chosen individual-reviewer source contains the @me sentinel, so
+    the caller knows it must look up the authenticated login before resolving."""
+    raw = select_source(config, "reviewers", ["@me"])
+    return any(tok.lower() == "@me" for tok in raw)
+
+
+def resolve_reviewers(config, me_login):
+    """Resolve (individual_reviewers, team_reviewers) from config, with the @me
+    default.
+
+    - Individual reviewers default to ["@me"]; the @me sentinel expands to
+      `me_login` (dropped if me_login is falsy — e.g. gh is unauthenticated).
+    - Team reviewers default to [] (Graphite --team-reviewers slugs).
+    Both lists are de-duplicated case-insensitively. Pure given me_login, so the
+    whole matrix is unit-testable without touching gh."""
+    raw_revs = select_source(config, "reviewers", ["@me"])
+    revs = []
+    for tok in raw_revs:
+        if tok.lower() == "@me":
+            if me_login:
+                revs.append(me_login)
+        else:
+            revs.append(tok)
+    teams = select_source(config, "teamReviewers", [])
+    return _dedupe_ci(revs), _dedupe_ci(teams)
 
 def parse_name_with_owner(name_with_owner):
     """Split gh's `nameWithOwner` ("owner/repo") into (owner, repo). Tolerates a
@@ -91,15 +159,44 @@ def pick_tip(branches, ticket):
     return None
 
 
-def build_envelope(worktree_dir, decision, existing, ok=True, error=None):
+def read_ticket_content(path):
+    """Read the ticket title+body the caller staged to a token-free path (see
+    --ticket-content-file). A missing/empty path or an unreadable file yields ""
+    so the envelope is still well-formed — the design phase simply gets no inline
+    ticket text. Filesystem read only; kept tiny so envelope assembly stays
+    deterministic and the weak worker never hand-assembles JSON."""
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
+                   reviewers="", team_reviewers="", ticket_content=""):
     """Assemble the JSON envelope the qrspi-batch resolveTicket() step consumes.
-    Pure; `repoRoot` is always the module-level REPO_ROOT this script derived."""
+    Pure; `repoRoot` is always the module-level REPO_ROOT this script derived.
+
+    `reviewers`/`team_reviewers` are comma-joined strings ready to drop straight
+    behind `gt submit --reviewers`/`--team-reviewers` (empty string => omit the
+    flag), so the JS finalize prompts never carry a hard-coded username.
+
+    `ticket_content` (the Linear title+body the caller staged) is embedded here so
+    the script — not the worker model — owns the COMPLETE envelope. The worker only
+    writes the ticket text to a token-free file and echoes this stdout back; it
+    never splices fields into JSON (the StructuredOutput path the weak model could
+    not populate)."""
     env = {
         "ok": ok,
         "repoRoot": REPO_ROOT,
         "worktreeDir": worktree_dir,
         "existing": existing,
         "decision": decision,
+        "reviewers": reviewers,
+        "teamReviewers": team_reviewers,
+        "ticketContent": ticket_content,
     }
     if error is not None:
         env["error"] = error
@@ -120,6 +217,39 @@ def _gh_name_with_owner():
     if rc != 0:
         raise RuntimeError("gh repo view failed: %s" % (err.strip() or out.strip()))
     return out.strip()
+
+
+def _gh_authenticated_login():
+    """The login of the gh-authenticated user (the human running the harness), or
+    None if gh is unauthenticated. This is what @me expands to — so the default is
+    'request review from whoever is running this', with no username in the repo."""
+    rc, out, _ = _run(["gh", "api", "user", "-q", ".login"], cwd=REPO_ROOT)
+    login = out.strip()
+    return login if (rc == 0 and login) else None
+
+
+def _read_reviewer_config():
+    """Parse the optional, gitignored <repo>/.qrspi/config.json. Missing or invalid
+    file -> {} (the @me default takes over). Never raises — reviewer resolution is
+    best-effort and must not break a resolve."""
+    path = os.path.join(REPO_ROOT, ".qrspi", *REVIEWER_CONFIG)
+    try:
+        with open(path) as fh:
+            cfg = json.load(fh)
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def load_reviewers():
+    """Resolve (reviewers_csv, team_reviewers_csv) from .qrspi/config.json, falling
+    back to the @me default, looking up the authenticated login only when @me is
+    actually referenced. Never raises; returns ("", "") if nothing resolves so the
+    flag is simply omitted."""
+    config = _read_reviewer_config()
+    me_login = _gh_authenticated_login() if references_me(config) else None
+    revs, teams = resolve_reviewers(config, me_login)
+    return ",".join(revs), ",".join(teams)
 
 
 def _existing_branches(ticket):
@@ -179,8 +309,14 @@ def main():
                         help="Ticket is assigned to a user (from Linear, supplied by caller)")
     parser.add_argument("--linear-status", default="",
                         help="Current Linear status name (from Linear, supplied by caller)")
+    parser.add_argument("--ticket-content-file", default="",
+                        help="Path to a token-free file holding the ticket title+body the "
+                             "caller staged; its contents are embedded as ticketContent so "
+                             "the worker never hand-assembles the envelope")
     parser.add_argument("--trunk", default="main", help="Trunk branch (default: main)")
     args = parser.parse_args()
+
+    ticket_content = read_ticket_content(args.ticket_content_file)
 
     # Any infrastructure failure -> ONE ok:false envelope with the verbatim error.
     # Never partial-retry: a clean stop is what keeps a weak model from spiralling.
@@ -195,12 +331,16 @@ def main():
         worktree = setup_worktree(args.ticket, trunk=args.trunk,
                                   create_design=(decision["action"] == "run_design"))
         existing = detect_existing(os.path.join(worktree, ".qrspi", args.ticket))
-        env = build_envelope(worktree, decision, existing, ok=True)
+        reviewers, team_reviewers = load_reviewers()
+        env = build_envelope(worktree, decision, existing, ok=True,
+                             reviewers=reviewers, team_reviewers=team_reviewers,
+                             ticket_content=ticket_content)
     except Exception as exc:  # noqa: BLE001 - any failure is reported, not retried
         worktree = os.path.join(REPO_ROOT, ".worktrees", args.ticket)
         env = build_envelope(worktree, None,
                              {name: False for name in ARTIFACTS},
-                             ok=False, error="%s: %s" % (type(exc).__name__, exc))
+                             ok=False, error="%s: %s" % (type(exc).__name__, exc),
+                             ticket_content=ticket_content)
 
     json.dump(env, sys.stdout, indent=2)
     print()

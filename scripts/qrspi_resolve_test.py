@@ -17,6 +17,10 @@ from qrspi_resolve import (
     detect_existing,
     pick_tip,
     build_envelope,
+    read_ticket_content,
+    select_source,
+    references_me,
+    resolve_reviewers,
     ARTIFACTS,
     REPO_ROOT,
 )
@@ -100,6 +104,73 @@ check("ok envelope worktreeDir", ok_env["worktreeDir"], "/wt/RUS-1")
 err_env = build_envelope("/wt/RUS-1", None, _ex, ok=False, error="boom")
 check("err envelope ok flag", err_env["ok"], False)
 check("err envelope error message", err_env["error"], "boom")
+check("envelope default reviewers empty", ok_env["reviewers"], "")
+check("envelope default teamReviewers empty", ok_env["teamReviewers"], "")
+rev_env = build_envelope("/wt/RUS-1", _dec, _ex, ok=True,
+                         reviewers="alice,bob", team_reviewers="org/team")
+check("envelope carries reviewers", rev_env["reviewers"], "alice,bob")
+check("envelope carries teamReviewers", rev_env["teamReviewers"], "org/team")
+
+# --- ticketContent embedding (Option A: script owns the whole envelope) ------
+check("envelope default ticketContent empty", ok_env["ticketContent"], "")
+tc_env = build_envelope("/wt/RUS-1", _dec, _ex, ok=True,
+                        ticket_content="# Title\n\nBody with qrspi token intact.")
+check("envelope carries ticketContent",
+      tc_env["ticketContent"], "# Title\n\nBody with qrspi token intact.")
+check("err envelope still carries ticketContent",
+      build_envelope("/wt/RUS-1", None, _ex, ok=False, error="boom",
+                     ticket_content="kept")["ticketContent"], "kept")
+
+# --- read_ticket_content (token-free staging file -> envelope) ---------------
+check("read_ticket_content empty path -> ''", read_ticket_content(""), "")
+check("read_ticket_content missing file -> ''",
+      read_ticket_content("/nonexistent/path/ticket.md"), "")
+with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as _tf:
+    _tf.write("# RUS-1\n\nThe full ticket body.")
+    _tc_path = _tf.name
+check("read_ticket_content reads file verbatim",
+      read_ticket_content(_tc_path), "# RUS-1\n\nThe full ticket body.")
+os.unlink(_tc_path)
+
+# --- select_source (config > default; no env override) ----------------------
+check("config used (list)",
+      select_source({"reviewers": ["zed", "amy"]}, "reviewers", ["@me"]),
+      ["zed", "amy"])
+check("config used (csv string)",
+      select_source({"reviewers": "zed, amy"}, "reviewers", ["@me"]),
+      ["zed", "amy"])
+check("config empty list is opt-out",
+      select_source({"reviewers": []}, "reviewers", ["@me"]), [])
+check("default when key absent from config",
+      select_source({}, "reviewers", ["@me"]), ["@me"])
+check("team default empty", select_source({}, "teamReviewers", []), [])
+
+# --- references_me ----------------------------------------------------------
+check("default references @me", references_me({}), True)
+check("config without @me does not", references_me({"reviewers": ["alice"]}), False)
+check("config with @me does", references_me({"reviewers": ["@me", "alice"]}), True)
+check("config opt-out does not reference @me", references_me({"reviewers": []}), False)
+check("@me is case-insensitive", references_me({"reviewers": ["@ME"]}), True)
+
+# --- resolve_reviewers ------------------------------------------------------
+check("default expands @me to login",
+      resolve_reviewers({}, "carol"), (["carol"], []))
+check("@me dropped when no login (gh unauthenticated)",
+      resolve_reviewers({}, None), ([], []))
+check("explicit config reviewers ignore login expansion",
+      resolve_reviewers({"reviewers": ["alice", "bob"]}, "carol"),
+      (["alice", "bob"], []))
+check("config @me mixes with explicit, expanded + deduped",
+      resolve_reviewers({"reviewers": ["@me", "alice", "Alice"]}, "carol"),
+      (["carol", "alice"], []))
+check("@me dedupes against an explicit same login",
+      resolve_reviewers({"reviewers": ["@me", "carol"]}, "carol"),
+      (["carol"], []))
+check("team reviewers from config",
+      resolve_reviewers({"reviewers": ["alice"], "teamReviewers": ["org/eng", "org/sec"]}, None),
+      (["alice"], ["org/eng", "org/sec"]))
+check("config opt-out yields no reviewers",
+      resolve_reviewers({"reviewers": []}, "carol"), ([], []))
 
 
 def run():

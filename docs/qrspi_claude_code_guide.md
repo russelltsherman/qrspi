@@ -366,7 +366,7 @@ For substantial design redirects, the cleanest path is a `CHANGES_REQUESTED` on 
 
 ### Configure Linear
 
-Tickets live in Linear. Configure the Linear MCP server for your workspace and set the team/project in `.claude/CLAUDE.md` so `/qrspi-ticket` files issues in the right place. Linear is **not** the state machine — it is an entry gate plus a best-effort reporting projection — so only the reporting statuses need to exist in your Linear team: `Selected`, `Design Review`, `Plan Review`, `Code Review`, `Done`. (The `*Approved` statuses were dropped; approval lives in the PR.) You also need GitHub PRs reachable via the `gh` CLI, since PR review state is the authority.
+Tickets live in Linear. The harness references the Linear MCP server by the fixed name `linear` (its binding is committed in `.mcp.json`; authenticate it to your workspace on first use), and `/qrspi-ticket` reads the team/project from `.qrspi/config.json` (`linearTeam`/`linearProject`; see `.qrspi/config.example.json`) so it files issues in the right place. Linear is **not** the state machine — it is an entry gate plus a best-effort reporting projection — so only the reporting statuses need to exist in your Linear team: `Selected`, `Design Review`, `Plan Review`, `Code Review`, `Done`. (The `*Approved` statuses were dropped; approval lives in the PR.) You also need GitHub PRs reachable via the `gh` CLI, since PR review state is the authority.
 
 ### Customize test commands
 

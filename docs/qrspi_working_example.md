@@ -19,7 +19,7 @@ Ticket  -->  Questions  -->  Research  -->  Design  -->  Structure  -->  Plan  -
 
 Two things shape everything below:
 
-1. **The ticket is a Linear issue**, not a local markdown file. It lives in the Russelltsherman team, QRSPI project, with an ID like `RUS-42`. Every other artifact is a local file under `.qrspi/RUS-42/`. Linear holds status and phase-transition comments only — artifacts are never uploaded to Linear.
+1. **The ticket is a Linear issue**, not a local markdown file. It lives in your Linear team, QRSPI project, with an ID like `RUS-42`. Every other artifact is a local file under `.qrspi/RUS-42/`. Linear holds status and phase-transition comments only — artifacts are never uploaded to Linear.
 
 2. **PR review state — not Linear status — is the authority for advancement.** Linear has exactly two roles: an **entry gate** (a ticket may only begin if it is *assigned* and in `Selected`) and a **best-effort reporting projection** of the active phase (a failed Linear write never blocks work). The lifecycle is a single Graphite stack, one PR per phase, built bottom-up and **held open** until the whole feature is approved, then landed bottom-up:
 
@@ -44,7 +44,7 @@ Each phase lives on its **own** branch (`RUS-42/design`, `RUS-42/plan`, `RUS-42/
 
 Engineer ran: `/qrspi-ticket We need to let users control which emails they receive`
 
-The `qrspi-ticket` skill opened a guided conversation, then created a **Linear issue** in the Russelltsherman team, QRSPI project. Linear assigned the identifier `RUS-42`. The skill also created the local artifact directory `.qrspi/RUS-42/`.
+The `qrspi-ticket` skill opened a guided conversation, then created a **Linear issue** in your Linear team, QRSPI project. Linear assigned the identifier `RUS-42`. The skill also created the local artifact directory `.qrspi/RUS-42/`.
 
 ### The Conversation
 

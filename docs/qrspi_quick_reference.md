@@ -13,7 +13,7 @@ One-page cheat sheet for the QRSPI workflow. Print and keep at desk.
 ├─────────────────────────────────────────────────────────────────────┤
 │ PHASE 0: TICKET (T)                                                 │
 │ └─ Input: A sentence or two describing the feature                  │
-│ └─ Output: a LINEAR ISSUE (team Russelltsherman, project QRSPI)     │
+│ └─ Output: a LINEAR ISSUE (your Linear team, project QRSPI)     │
 │ └─ Purpose: Produce a well-formed ticket via guided conversation    │
 │ └─ Note: the ticket is NOT a local file; IDs look like RUS-42       │
 │                                                                     │
@@ -383,7 +383,7 @@ Claude Code CLI   The agent host.
 Graphite (gt)     Stacked PRs — one per phase (design, plan, each slice).
 GitHub CLI (gh)   PR operations + GraphQL reviewThreads (unresolved-thread check).
 Linear MCP        Entry gate + best-effort reporting status for the
-                  Russelltsherman workspace (never a gate after entry).
+                  your Linear workspace (never a gate after entry).
 ```
 
 ---

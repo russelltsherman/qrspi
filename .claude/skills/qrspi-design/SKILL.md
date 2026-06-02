@@ -3,7 +3,7 @@ name: qrspi-design
 description: Produce a design document by combining the ticket, answered questions, and codebase research. Use after research is approved. This is the brain-surgery phase.
 command: /qrspi-design
 argument-hint: <ticket-id>
-allowed-tools: Agent, Bash(pwd:*), mcp__linear-russelltsherman__get_issue
+allowed-tools: Agent, Bash(pwd:*), mcp__linear__get_issue
 ---
 
 # /qrspi-design
@@ -13,7 +13,7 @@ Thin wrapper that fetches the ticket from Linear and spawns the `qrspi-design` a
 ## Steps
 
 1. Parse `$ARGUMENTS` to get `<ticket-id>`.
-2. Fetch the ticket: call `mcp__linear-russelltsherman__get_issue` with `id: "<ticket-id>"`. Capture `title` and `description` as `TICKET_CONTENT`.
+2. Fetch the ticket: call `mcp__linear__get_issue` with `id: "<ticket-id>"`. Capture `title` and `description` as `TICKET_CONTENT`.
 3. Resolve `REPO_ROOT` from `pwd`.
 4. Spawn the agent via the `Agent` tool:
    - `subagent_type: qrspi-design`

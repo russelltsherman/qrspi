@@ -31,14 +31,14 @@ A ticket starts with `/qrspi-ticket <description>`, which creates a Linear issue
 - Claude Code CLI installed and authenticated
 - [Graphite CLI](https://graphite.dev) (`gt`) for stacked PRs
 - [GitHub CLI](https://cli.github.com) (`gh`) for PR operations
-- Linear MCP server configured for the Russelltsherman workspace
+- Linear MCP server configured for your Linear workspace
 - This repository cloned locally
 
 ---
 
 ## Tickets are Linear issues
 
-The ticket is **not** a local markdown file. `/qrspi-ticket` creates a Linear issue in the **Russelltsherman** team, **QRSPI** project, with an ID in Linear's format (e.g., `RUS-42`). Linear holds the ticket, but it does **not** drive advancement — PR review state does. Linear has exactly two roles:
+The ticket is **not** a local markdown file. `/qrspi-ticket` creates a Linear issue in your Linear team, **QRSPI** project, with an ID in Linear's format (e.g., `RUS-42`). Linear holds the ticket, but it does **not** drive advancement — PR review state does. Linear has exactly two roles:
 
 - **Entry gate (read).** A ticket may *begin* only if it is assigned to a user **and** in the `Selected` status. Nothing starts otherwise. This is the only thing Linear is read for.
 - **Reporting projection (write, best-effort).** Once work starts, agents update the Linear status to reflect the active phase (`Design Review` → `Plan Review` → `Code Review` → `Done`). A failed Linear write logs a warning and is never allowed to block git/PR work.
@@ -175,7 +175,7 @@ Each ticket gets its own git worktree at `.worktrees/<ticket-id>/` (gitignored).
 
 **Command:** `/qrspi-ticket <initial description>`
 
-**Creates:** a Linear issue in the Russelltsherman team, QRSPI project (e.g., `RUS-42`)
+**Creates:** a Linear issue in your Linear team, QRSPI project (e.g., `RUS-42`)
 
 **Skill definition:** [.claude/skills/qrspi-ticket/SKILL.md](../.claude/skills/qrspi-ticket/SKILL.md)
 

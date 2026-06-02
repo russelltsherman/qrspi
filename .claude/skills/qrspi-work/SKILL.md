@@ -3,7 +3,7 @@ name: qrspi-work
 description: "Single entry point for autonomous QRSPI feature development. Use when the user asks to 'work on' a ticket (e.g., 'work on RUS-42'). Reads PR review state to determine the current phase and executes the appropriate action — design, plan, implementation, or review response — without manual phase-by-phase invocation. Trigger on any variant of: 'work on <ticket-id>', 'continue <ticket-id>', 'pick up <ticket-id>', or any reference to progressing a QRSPI ticket through its lifecycle."
 command: /qrspi-work
 argument-hint: <ticket-id>
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, mcp__linear-russelltsherman__get_issue, mcp__linear-russelltsherman__save_issue, mcp__linear-russelltsherman__list_issue_statuses, mcp__linear-russelltsherman__save_comment
+allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, mcp__linear__get_issue, mcp__linear__save_issue, mcp__linear__list_issue_statuses, mcp__linear__save_comment
 ---
 
 # QRSPI Work Orchestrator (PR-gated)
@@ -49,7 +49,7 @@ trunk
 ## Entry Point
 
 1. Parse `$ARGUMENTS` to extract `<ticket-id>`.
-2. **Fetch the ticket fresh** with `mcp__linear-russelltsherman__get_issue` (identifier
+2. **Fetch the ticket fresh** with `mcp__linear__get_issue` (identifier
    `<ticket-id>`). On failure, retry **once**; if the retry fails, this is a **hard stop**
    — print the exact error and exit.
    - Read `status` (name) and `assignee` (`assigned` = assignee is non-null).
@@ -390,7 +390,7 @@ The `*Approved` states are **dropped** — approval lives in the PR. Mapping:
 
 To project a status:
 ```
-Call mcp__linear-russelltsherman__save_issue with id "<ticket-id>" and state "<name>".
+Call mcp__linear__save_issue with id "<ticket-id>" and state "<name>".
 ```
 **Best-effort rule:** if the Linear write fails, print a one-line warning
 (`WARN: Linear projection to <state> failed: <error>`) and **continue** — never hard-stop

@@ -6,7 +6,6 @@
   },
 
   "containerEnv": {
-    "GH_TOKEN": "${localEnv:GH_TOKEN}",
     // OMLX local model server on the host. Forwarded to the omlx/omlx-yolo
     // shell functions which replicate the env that `omlx launch claude` sets.
     // Set OMLX_MODEL to use one model for all slots, or set individual
