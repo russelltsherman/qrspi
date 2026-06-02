@@ -153,17 +153,54 @@ const SLICE_COMMIT_SCHEMA = {
   },
 }
 
+const PERSIST_SCHEMA = {
+  type: 'object',
+  required: ['ok'],
+  properties: {
+    ok: { type: 'boolean' },
+    error: { type: 'string' },
+    dest: { type: 'string' },
+    bytes: { type: 'number' },
+  },
+}
+
 // --- helpers ---------------------------------------------------------------
 
 const tpl = (wd, name) => `${wd}/.qrspi/templates/${name}`
 const art = (wd, id, name) => `${wd}/.qrspi/${id}/${name}`
 
+// Token-free staging path a phase agent writes its artifact to (Fix A). It carries
+// NO "qrspi" token, so the weak local worker model reproduces it intact instead of
+// mangling it (qrspi -> qrpii). Kept in sync with scripts/qrspi_persist.py STAGE_ROOT.
+const stg = (id, name) => `/tmp/phase-stage/${id}/${name}.md`
+
 function skip(t, decision, note) {
   return { ticketId: t.id, action: decision.action, summary: note }
 }
 
-// Run one phase agent, reusing an existing non-empty artifact (resume). Returns
-// true on success, false on failure/skip.
+// Persist a staged artifact to its canonical worktree path via the deterministic,
+// self-locating script (Fix A). The model never types the qrspi path — the script
+// owns it — and the script verifies the staged file is non-empty before moving it,
+// so a no-op or path-mangled agent is caught HERE rather than silently surfacing as
+// a missing artifact in the finalize worker. Returns the parsed envelope (or null).
+async function persistArtifact(id, name, phaseLabel) {
+  return await agent(
+    `You are the PERSIST worker for ${id} artifact "${name}". Your cwd is the main repo root.
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives:
+
+  python3 scripts/qrspi_persist.py --ticket ${id} --artifact ${name}
+
+It moves the staged artifact into the ticket's worktree at the canonical path (which it
+self-locates) and prints JSON { ok, dest, bytes, error? }. Parse that JSON and return it
+verbatim. If it reports ok:false, return that as-is — HARD STOP, do NOT retry, do NOT
+improvise alternative commands or paths.`,
+    { label: `persist:${id}:${name}`, phase: phaseLabel, schema: PERSIST_SCHEMA }
+  )
+}
+
+// Run one phase agent, then deterministically persist its staged artifact. Reuses an
+// existing non-empty canonical artifact (resume). Returns true on success, false on
+// failure/skip.
 async function runPhase(name, agentType, prompt, existing, id, phaseLabel) {
   if (existing && existing[name]) {
     log(`  ${id}: reusing existing ${name}.md`)
@@ -174,7 +211,15 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel) {
     log(`  ${id}: ${name} phase failed or was skipped — stopping this ticket`)
     return false
   }
-  log(`  ${id}: ${name} → ${String(res).slice(0, 80)}`)
+  // The agent wrote to a token-free staging path; move it to the canonical worktree
+  // path deterministically. This is also the real success gate: an agent that
+  // mangled its write path or wrote nothing leaves no staged file, so persist fails.
+  const p = await persistArtifact(id, name, phaseLabel)
+  if (!p || !p.ok) {
+    log(`  ${id}: ${name} reported done but no artifact was staged/persisted — ${p?.error ?? 'no result'} (stopping this ticket)`)
+    return false
+  }
+  log(`  ${id}: ${name} → saved ${p.bytes ?? '?'}B (${String(res).slice(0, 60)})`)
   return true
 }
 
@@ -224,13 +269,13 @@ async function doDesign(t, r) {
 TICKET_CONTENT =
 ${r.ticketContent}
 
-ARTIFACT_PATH = ${art(wd, t.id, 'questions.md')}
+OUTPUT_PATH = ${stg(t.id, 'questions')}
 TEMPLATE_PATH = ${tpl(wd, 'questions.md')}`, r.existing, t.id, 'Design')) return failTicket(t)
 
   if (!await runPhase('research', 'qrspi-research',
     `TICKET_ID = ${t.id}
 QUESTIONS_PATH = ${art(wd, t.id, 'questions.md')}
-RESEARCH_PATH = ${art(wd, t.id, 'research.md')}
+OUTPUT_PATH = ${stg(t.id, 'research')}
 TEMPLATE_PATH = ${tpl(wd, 'research.md')}
 REPO_ROOT = ${wd}
 
@@ -243,7 +288,7 @@ ${r.ticketContent}
 
 QUESTIONS_PATH = ${art(wd, t.id, 'questions.md')}
 RESEARCH_PATH = ${art(wd, t.id, 'research.md')}
-DESIGN_PATH = ${art(wd, t.id, 'design.md')}
+OUTPUT_PATH = ${stg(t.id, 'design')}
 TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, r.existing, t.id, 'Design')) return failTicket(t)
 
   phase('Finalize')
@@ -268,20 +313,20 @@ async function doPlan(t, r) {
   if (!await runPhase('structure', 'qrspi-structure',
     `TICKET_ID = ${t.id}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
-STRUCTURE_PATH = ${art(wd, t.id, 'structure.md')}
+OUTPUT_PATH = ${stg(t.id, 'structure')}
 TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
 
   if (!await runPhase('plan', 'qrspi-plan',
     `TICKET_ID = ${t.id}
 STRUCTURE_PATH = ${art(wd, t.id, 'structure.md')}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
-PLAN_PATH = ${art(wd, t.id, 'plan.md')}
+OUTPUT_PATH = ${stg(t.id, 'plan')}
 TEMPLATE_PATH = ${tpl(wd, 'plan.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
 
   if (!await runPhase('worktree', 'qrspi-worktree',
     `TICKET_ID = ${t.id}
 PLAN_PATH = ${art(wd, t.id, 'plan.md')}
-WORKTREE_PATH = ${art(wd, t.id, 'worktree.md')}
+OUTPUT_PATH = ${stg(t.id, 'worktree')}
 TEMPLATE_PATH = ${tpl(wd, 'worktree.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
 
   phase('Finalize')

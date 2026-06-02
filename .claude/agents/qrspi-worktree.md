@@ -13,7 +13,7 @@ Note: despite the name, this phase produces a *task* tree document, not a git wo
 
 - `TICKET_ID` — Linear identifier
 - `PLAN_PATH` — absolute path to the approved plan artifact
-- `WORKTREE_PATH` — absolute path where you must write the work-tree artifact (typically `.qrspi/<ticket-id>/worktree.md`)
+- `OUTPUT_PATH` — short staging path where you must write the work-tree artifact
 - `TEMPLATE_PATH` — absolute path to the worktree template
 
 ## What to do
@@ -21,7 +21,7 @@ Note: despite the name, this phase produces a *task* tree document, not a git wo
 1. Read the template at `TEMPLATE_PATH`.
 2. Read `PLAN_PATH` in full.
 3. Map each plan step to a task; group tasks into sessions with load manifests; insert session boundaries.
-4. Write the populated artifact to `WORKTREE_PATH`.
+4. Write the populated artifact to `OUTPUT_PATH`.
 5. Return a one-line summary (e.g., "Work tree written — 12 tasks, 4 sessions, critical path = 7 tasks").
 
 ## Rules
@@ -37,5 +37,5 @@ Note: despite the name, this phase produces a *task* tree document, not a git wo
 
 - Your only reads are the template and the plan. No codebase exploration.
 - Do not call any Linear or external MCP tools. They are unavailable.
-- Write only to `WORKTREE_PATH`. Do not commit or run git commands.
+- Write only to `OUTPUT_PATH`, copying that path **verbatim** from your prompt. Never alter, shorten, or reconstruct it, and never write to any other path. (A deterministic step moves it to its final location — you only stage it.) Do not commit or run git commands.
 - Do not emit approval prompts — the caller handles user-facing messaging.
