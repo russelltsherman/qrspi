@@ -65,6 +65,7 @@ Selected (assigned)
 - `/qrspi-worktree <ticket-id>` — Build a session-aware task DAG
 - `/qrspi-implement <ticket-id> <slice-number>` — Implement one vertical slice
 - `/qrspi-pr <ticket-id>` — Prepare pull request summary
+- `/using-omlx-cli <task>` — Operate the omlx CLI for local LLM inference on Apple Silicon (serve, memory tiers, OpenAI-compatible API, MCP/agents, troubleshooting)
 
 ### Workflow rules
 

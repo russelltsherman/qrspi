@@ -28,3 +28,27 @@
 - omlx technical specifics (flags, endpoints, tiers) were sourced from design.md §Desired End State; `omlx` has zero in-repo hits (external CLI), so exact flag values should be reconfirmed against a real `omlx --help` if ever validated against the live tool.
 
 ---
+
+## Session 2 — Slice 2 (Register skill in human-facing catalog)
+
+**Timestamp:** 2026-06-06T21:03:53Z
+**Tasks completed:** T18, T19, T20
+**Tasks failed:** none
+**Tests:**
+
+- `grep -n 'using-omlx-cli' .claude/CLAUDE.md` → 1 match (line 68, in "Available skills" list)
+- `grep -c 'using-omlx-cli' .claude/CLAUDE.md` → 1 (exactly one new entry)
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none
+
+**Notes for next session:**
+
+- Slice 2 (the optional OQ3 polish) is now complete: `.claude/CLAUDE.md` "Available skills" list gained one line — `/using-omlx-cli <task>` — appended immediately after the `/qrspi-pr` entry; all existing entries untouched. Pure documentation edit, no behavior change.
+- Description was derived from the SKILL.md frontmatter (`name`/`description`/`command`) authored in Slice 1: a one-line summary covering serve, memory tiers, OpenAI-compatible API, MCP/agents, and troubleshooting for local LLM inference on Apple Silicon.
+- This was the final planned slice; no further implementation slices remain.
