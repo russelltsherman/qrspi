@@ -5,6 +5,7 @@ export const meta = {
   phases: [
     { title: 'Query', detail: 'List assigned Selected + in-flight (Design/Plan/Code Review) tickets' },
     { title: 'Resolve', detail: 'Per ticket: worktree + PR-state gather + tested resolver → decision (worker agent)' },
+    { title: 'Restack', detail: 'Per ticket: restack the stack onto current trunk so drift/conflicts surface early (worker agent)' },
     { title: 'Design', detail: 'action=run_design → questions/research/design phase agents' },
     { title: 'Plan', detail: 'action=advance(plan) → structure/plan/worktree phase agents' },
     { title: 'Implementation', detail: 'action=advance(implementation) → qrspi-implement per slice + qrspi-pr' },
@@ -123,6 +124,18 @@ function parseResolveEnvelope(text, ticketId) {
     return { ok: false, error: `resolve: worktreeDir not <repo>/.worktrees/${ticketId} (got ${env.worktreeDir})` }
   if (!env.decision || !RESOLVE_ACTIONS.has(env.decision.action))
     return { ok: false, error: `resolve: unknown decision.action (${env.decision && env.decision.action})` }
+  return env
+}
+
+// Parse + validate the restack worker's text into the qrspi_restack.py envelope
+// ({ ok, restacked, error? }). Same text-return + JS-parse shape as resolve (no
+// StructuredOutput). A garbled echo becomes a clean ok:false → the ticket is skipped.
+function parseRestackEnvelope(text, ticketId) {
+  const raw = extractJsonObject(text)
+  if (!raw) return { ok: false, error: 'restack: no JSON envelope in worker output' }
+  let env
+  try { env = JSON.parse(raw) } catch (e) { return { ok: false, error: `restack: unparseable envelope (${e.message})` } }
+  if (typeof env.ok !== 'boolean') return { ok: false, error: 'restack: envelope missing ok flag' }
   return env
 }
 
@@ -299,6 +312,47 @@ Do EXACTLY these steps — no exploration, no path guessing, no extra commentary
 }
 
 // ===========================================================================
+// RESTACK — drift gate: every ticket that enters the queue is restacked onto current
+// trunk, regardless of its decision (RUS-51). Run ONCE per ticket in the main loop
+// right after resolve and before dispatch — NOT per action — so that long-lived
+// review-stage branches (wait/revise) and land/reset, which never reach a build/submit
+// handler, still get realigned and surface their conflicts EARLY instead of at the
+// eventual `gt submit`/`gt merge`. When trunk advances, stacked branches drift to
+// "(needs restack)" and a stale parent fails those ops. qrspi_restack.py runs
+// `gt restack --downstack` deterministically and idempotently (no-op when already
+// aligned); when a branch actually moves it force-pushes the realigned stack
+// (`gt submit --publish --stack --force`) so the open PRs stop pointing at the
+// pre-restack commits — a restack that only updates local branches would leave the
+// remote stale and re-surface the same drift at the eventual submit/merge. A restack
+// CONFLICT (or a push failure) comes back ok:false (on conflict the script `gt abort`s
+// to keep the tree clean) and the loop surfaces + skips the ticket for the run. The
+// worktree it operates on was already provisioned by resolve's setup_worktree, so this
+// needs no pre-provisioning. Restacks onto LOCAL trunk only — never `gt sync` a held
+// stack, never touch trunk.
+// ===========================================================================
+async function ensureRestacked(t, phaseLabel) {
+  const out = await agent(
+    `You are the RESTACK worker for QRSPI ticket ${t.id}. Your cwd is the main repo root.
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives,
+no other git/gt commands:
+
+  python3 scripts/qrspi_restack.py --ticket ${t.id}
+
+It restacks the ticket's stack onto the current trunk (self-locating; idempotent) and,
+when a branch moved, force-pushes the realigned stack to its PRs; it prints a JSON
+envelope { ok, restacked, submitted, error? }. Output that JSON as your FINAL message,
+exactly and verbatim — NO surrounding prose, NO code fences, NO edits. Do NOT call any
+structured-output tool. If it printed ok:false, still output that JSON verbatim (HARD
+STOP — do NOT retry, do NOT run gt restack/abort/sync yourself or improvise paths).`,
+    { label: `restack:${t.id}`, phase: phaseLabel }
+  )
+  const rs = parseRestackEnvelope(out, t.id)
+  if (!rs.ok) log(`  ${t.id}: restack failed — ${rs.error ?? 'unknown'} (skipping; stack left clean)`)
+  else if (rs.restacked) log(`  ${t.id}: restacked stack onto current trunk${rs.submitted ? ' and force-pushed to PRs' : ''}`)
+  return rs
+}
+
+// ===========================================================================
 // ACTION: run_design  (questions → research → design, then submit Design PR)
 // ===========================================================================
 async function doDesign(t, r) {
@@ -387,6 +441,7 @@ Return: ok, prUrl, newStatus, summary.`,
 // ===========================================================================
 async function doImplementation(t, r) {
   phase('Implementation')
+
   const setup = await agent(
     `You are the implementation setup worker for ${t.id}. Follow the "action: advance → nextPhase == implementation" Preflight of ${SKILL}.
 1. Reuse/create the worktree and ensure you are on ${t.id}/plan (or the latest slice branch if resuming).
@@ -472,6 +527,7 @@ Return: ok, prUrl (slice-1 PR), newStatus, summary.`,
 // ===========================================================================
 async function doSubmit(t, r) {
   phase('Finalize')
+
   const fin = await agent(
     `You are the submit worker for ${t.id} (active phase: ${r.decision.phase}), in ${r.worktreeDir}. Follow the "action: submit" steps of ${SKILL}: the phase branch exists but its PR was not opened. Verify the phase's artifacts are present+non-empty (if any are missing AND cannot be produced, return ok:false — never fabricate), then submit the PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\` (add --stack for implementation)${reviewerFlags(r) ? ' — submit the reviewer flag EXACTLY as written, it surfaces the PR in the reviewer\'s Graphite queue' : ''} and BEST-EFFORT project the matching Linear review status.
 Return: ok, prUrl, newStatus, summary.`,
@@ -574,6 +630,21 @@ for (let i = 0; i < tickets.length; i++) {
     if (!r || !r.ok) {
       log(`  ${t.id}: resolve failed — ${r?.error ?? 'no result'}`)
       results.push({ ticketId: t.id, action: 'resolve_failed', summary: r?.error ?? 'unknown' })
+      continue
+    }
+
+    // Drift gate (RUS-51): restack EVERY queued ticket onto current trunk before we
+    // dispatch its action — including wait/revise/land/reset, which never reach a
+    // build/submit handler — so trunk-divergence conflicts surface here, early and
+    // clean, instead of at the eventual gt submit/merge. A conflict comes back ok:false
+    // (qrspi_restack.py already `gt abort`ed, leaving the tree clean); we record it and
+    // skip the ticket for this run rather than driving an action onto a wedged stack.
+    // The worktree was provisioned by resolve, so restack has something to operate on.
+    phase('Restack')
+    const rs = await ensureRestacked(t, 'Restack')
+    if (!rs.ok) {
+      log(`  ${t.id}: restack CONFLICT — ${rs.error ?? 'unknown'} (surfaced; not advanced this run; tree left clean)`)
+      results.push({ ticketId: t.id, action: 'restack_conflict', summary: rs.error ?? 'restack conflict' })
       continue
     }
 
