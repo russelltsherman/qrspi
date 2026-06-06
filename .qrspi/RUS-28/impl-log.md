@@ -28,3 +28,32 @@
 - PyYAML is unavailable here; any future yaml-based verification must use a stdlib fallback.
 
 ---
+
+## Session 2 — Slice 2: Reference content fill + final cross-checks
+
+**Timestamp:** 2026-06-06
+**Tasks completed:** T14, T15, T16, T17, T18, T19, T20, T21, T22
+**Tasks failed:** none
+**Tests:**
+
+- Slice-2 standalone-H1 + non-stub check (`head -1 | grep '^# '` and `wc -l > 5` over all six refs) → 6/6 OK: rules.md (111), includes-extends.md (150), cache-artifacts.md (127), environments.md (114), security.md (104), architecture.md (215) → PASS
+- Slice-1 re-run: all six `references/*.md` body links in SKILL.md resolve to shipped files → 6/6 PASS
+- SKILL.md budget unchanged at 83 lines (≤ 500) → PASS
+- Cross-check (manual): every design §Desired End State concern maps to a non-stub reference (rules→rules.md, DRY/Catalog→includes-extends.md, cache/artifacts→cache-artifacts.md, environments/review-apps→environments.md, security→security.md, architecture/multi-project/parent-child→architecture.md) → PASS
+- Version gates present inline: CI/CD Catalog + `component:` GA 17.0 note in includes-extends.md; scanner tier/version note in security.md → PASS
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none. Plan steps 14–22 executed as written; the §13 PyYAML issue from Slice 1 does not recur (Slice 2 verification is grep/wc-based, no YAML parse).
+
+**Notes for next session:**
+
+- All six `references/*.md` are now full standalone deep-dive docs (H1 + substantive body, 104–215 lines each). The body→reference link contract in SKILL.md still resolves; do not rename a reference file without updating the `## See references/` index in SKILL.md.
+- OQ4 (GitLab target version) was handled, not formally answered: version-gated features carry inline notes (CI/CD Catalog/`component:` GA 17.0 in includes-extends.md; scanner tiers/version in security.md). If the author wants a single pinned target version, add it to SKILL.md — current approach is principle-based per the design's risk mitigation.
+- OQ1 (`command` field) and OQ3 (`allowed-tools`) remain at the Slice-1 defaults (flagged for author); Slice 2 did not touch SKILL.md frontmatter.
+- The design §Desired End State / §39 body outline mentions a standalone "Services" section; the shipped SKILL.md (Slice 1) folds service usage into the DAG/architecture guidance rather than a dedicated section. Not a Slice-2 reference concern — flag for author if a dedicated Services treatment is wanted.
+- No test/validation harness applies (PyYAML absent, eval harness is a placeholder); verification is grep/wc + manual cross-check only.
