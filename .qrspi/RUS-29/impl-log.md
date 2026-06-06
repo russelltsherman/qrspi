@@ -30,3 +30,32 @@
 - Skill authored following skill-creator conventions (capability-first "pushy" description with enumerated triggers, progressive disclosure via references/, imperative cues). The full skill-creator eval/benchmark loop is interactive and out of scope for an automated slice; T12 treated as the process/convention step per plan.
 
 ---
+
+## Session 4 — Slice 2
+
+**Timestamp:** 2026-06-06T16:37:01Z
+**Tasks completed:** T14, T15, T16, T17
+**Tasks failed:** none
+**Tests:**
+
+- `ls references/languages/` → all five files present: go.md, node.md, python.md, java.md, rust.md ✓
+- cue-path contract (forward) → every `references/languages/*.md` path cited in SKILL.md resolves to an existing file (5/5) ✓
+- cue-path contract (reverse) → every new language file is cued by SKILL.md (no orphans) ✓
+- convention check per file → each has multi-stage `FROM ... AS` (go/java/python/rust=2, node=3), exactly one `USER` line, one exec-form `ENTRYPOINT`/`CMD`, and zero `:latest` base tags (pinned tags used) ✓
+- hadolint → NOT INSTALLED; optional lint check skipped. Dockerfile syntax verified manually (see deviation re: rust `--mount`).
+
+**Deviations from structure.md:**
+
+- none. Nested layout `references/languages/{go,node,python,java,rust}.md` kept (OQ3 default; not flattened), matching the cues SKILL.md already authored in Slice 1.
+
+**Deviations from plan.md:**
+
+- T17 "Optional: hadolint-clean" — hadolint is not installed in this environment, so the optional automated lint pass was skipped. Manually verified each embedded Dockerfile for hadolint-relevant correctness (pinned non-`latest` bases, `--no-install-recommends` + apt-list cleanup in same layer, exec-form ENTRYPOINT/CMD). Corrected one syntax error during authoring: the rust.md stub-build step had a `--mount=type=cache` flag placed after `&&` inside the RUN body (invalid — BuildKit mount flags must lead the RUN instruction); moved it onto the RUN line.
+- T17 "Final skill-creator eval pass" — the interactive skill-creator eval/benchmark loop is out of scope for an automated slice (consistent with Slice 1's T12 handling). Verified the now-complete skill structurally instead: progressive-disclosure cues resolve end-to-end and each example instantiates the four topic references.
+
+**Notes for next session:**
+
+- Slice 2 completes the skill: SKILL.md + four topic references (Slice 1) + five per-language examples (Slice 2). The cue-path contract is fully closed in both directions.
+- Each language example cross-references the topic files (base-images.md, multistage-and-caching.md, security.md, runtime.md) rather than duplicating their guidance, per Slice 1's note.
+- Base-image choices per example: Go/Rust → distroless/static (static binary); Node → distroless/nodejs20; Java → distroless/java21; Python → python:3.12-slim (glibc, supports curl HEALTHCHECK) with distroless/python3 noted as the smaller-surface alternative. All bases carry a pinned tag with a `@sha256:` digest recommended in-prose (digests left as `<digest>` placeholders since they are environment/arch-specific).
+- If a reviewer prefers the flattened layout (OQ3), rename to `references/lang-<name>.md` and update the five cue lines in SKILL.md (functionally equivalent).
