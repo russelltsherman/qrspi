@@ -31,9 +31,8 @@ echo 'yolo() { clear; command claude --dangerously-skip-permissions "$@"; printf
 #   - Auth goes via ANTHROPIC_AUTH_TOKEN as a Bearer token
 #   - Large API_TIMEOUT_MS for local inference (model loading + generation)
 #   - Disable attribution header and non-essential traffic
-#   - Override model slots so Claude Code doesn't request unavailable models
-#     (OMLX_OPUS_MODEL / OMLX_SONNET_MODEL / OMLX_HAIKU_MODEL override
-#      individual tiers; OMLX_MODEL is the fallback for any tier not set)
+#   - Override all model slots so Claude Code doesn't request unavailable models
+# Set OMLX_MODEL on the host to the model id you want (e.g. "qwen3-32b-4bit").
 cat >> ~/.bashrc << 'BASHRC'
 omlx() {
   clear
