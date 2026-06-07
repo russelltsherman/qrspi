@@ -65,6 +65,7 @@ Selected (assigned)
 - `/qrspi-worktree <ticket-id>` — Build a session-aware task DAG
 - `/qrspi-implement <ticket-id> <slice-number>` — Implement one vertical slice
 - `/qrspi-pr <ticket-id>` — Prepare pull request summary
+- `/using-terraform-cli <what you want to do>` — Operate Terraform/OpenTofu safely from the CLI (lifecycle, remote state, version pinning, import/moved/removed, CI/CD with OIDC, secrets, workspaces, modules + testing)
 
 ### Workflow rules
 
