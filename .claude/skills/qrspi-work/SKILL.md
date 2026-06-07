@@ -234,17 +234,35 @@ git add <every file shown, but NOT __pycache__/ or *.pyc>
 gt create <ticket-id>/slice-<N> --no-interactive -m "$(cat <<'EOF'
 <ticket-id> [I] <N>/<total>: <goal>
 
+Part <N>/<total> of <ticket-id>. See the slice-1 PR for the full feature summary.
+
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
+The slice commit **message body is the PR description** — Graphite seeds each PR's body
+from its branch commit message when it *creates* the PR (this is also how the design/plan
+PRs get their bodies). So every slice from 2..N gets the focused "Part N/total" body above
+at creation; slice 1 gets the full `pr-summary.md` (next paragraph). **Do not** set PR
+bodies with `gh pr edit` — the gh PAT cannot write PRs on this repo (see
+[Why bodies are authored at creation](#why-pr-bodies-are-authored-at-graphite-creation)).
+
 After all slices: spawn `qrspi-pr` to produce `pr-summary.md`, amend it into the **last**
-slice commit (`git add .qrspi/<ticket-id>/pr-summary.md && gt modify --no-interactive`).
-Submit the whole stack and set PR bodies:
+slice commit as the durable artifact
+(`git add .qrspi/<ticket-id>/pr-summary.md && gt modify --no-interactive`). Then splice
+`pr-summary.md` into the **slice-1** commit *message* (so the slice-1 PR body is the full
+summary at creation) with the deterministic, self-locating helper — never hand-build this:
+```bash
+python3 scripts/qrspi_pr_body.py --ticket <ticket-id> --slice 1 \
+  --body-file .qrspi/<ticket-id>/pr-summary.md
+```
+It preserves the slice-1 commit subject + trailer, splices the summary in between, amends
+via `gt modify -m` (auto-restacking the slices above), and prints
+`{ ok, branch, subject, bytes, error? }`. If it reports `ok:false`, HARD STOP — do not
+improvise a `gh`/`gt` alternative. Then submit the whole stack (bodies are already in the
+commit messages, so `--no-edit` keeps them):
 ```bash
 gt submit --publish --stack --no-edit --no-interactive
-gh pr edit <slice-1-pr> --body "$(cat .qrspi/<ticket-id>/pr-summary.md)"
-# focused body per subsequent slice PR
 ```
 **Project Linear** → `Code Review`. Print: "Implementation submitted: `<N>` slice PRs. → Code Review."
 
@@ -256,8 +274,13 @@ gh pr edit <slice-1-pr> --body "$(cat .qrspi/<ticket-id>/pr-summary.md)"
 
 A phase branch exists but its PR was never opened (e.g. a crashed prior run). Ensure the
 phase's artifacts are present and non-empty; if any are missing, finish them by spawning
-the remaining phase agents (same as `run_design`/`advance`), then submit:
+the remaining phase agents (same as `run_design`/`advance`). This path **creates** the PR,
+so for implementation seed the slice-1 body into its commit message first (the PR body is
+authored at creation — see [Why PR bodies are authored at Graphite creation](#why-pr-bodies-are-authored-at-graphite-creation)):
 ```bash
+# implementation only: splice pr-summary into the slice-1 commit message before submit
+python3 scripts/qrspi_pr_body.py --ticket <ticket-id> --slice 1 \
+  --body-file .qrspi/<ticket-id>/pr-summary.md
 gt submit --publish --no-edit --no-interactive   # add `--stack` if the active phase is implementation
 ```
 Project the matching Linear status. If artifacts are missing **and** cannot be produced,
@@ -518,6 +541,26 @@ gt submit --publish --force --no-edit --no-interactive # creates a brand-new PR
 Only apply when `gt info` shows a `(Closed)`/`(Merged)` PR; never rename a branch with an
 **open** PR, and never use `--force` on the normal submit path. This is a recognized state,
 not an infrastructure error — the HARD STOP rule does not apply.
+
+### Why PR bodies are authored at Graphite creation
+
+PR descriptions are set **only** through the branch commit message, which Graphite uses to
+seed the PR title (subject line) and body (the rest) **when it creates the PR**. There is no
+`gh pr edit` step anywhere in this lifecycle, by design:
+
+- `gt submit` (1.8.x) has **no** `--body`/`--body-file` flag — the commit message is the
+  only non-interactive lever for the description, and Graphite reads it **at creation only**
+  (re-submitting an existing PR does *not* re-sync its body from the commit message).
+- The `gh`-authenticated token is a fine-grained PAT owned by a **different personal account**
+  than the repo owner. It can read this public repo but every authenticated PR write returns
+  `403 Resource not accessible by personal access token` (REST `PATCH /pulls`, GraphQL
+  `updatePullRequest`, and `gh pr edit` all fail). `gt submit` itself works because Graphite
+  authenticates through its own GitHub-App credential — a separate, write-capable path.
+
+So: design/plan PRs carry their heredoc commit message as the body; implementation slice PRs
+get a focused "Part N/total" body from the slice commit, and slice 1's commit message is
+overwritten with the full `pr-summary.md` via `scripts/qrspi_pr_body.py` **before** the
+creating `gt submit`. Trying to set a body with `gh` is a guaranteed 403 — do not add it back.
 
 ---
 

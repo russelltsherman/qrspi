@@ -14,9 +14,6 @@
     "OMLX_API_KEY": "${localEnv:OMLX_API_KEY}",
     "OMLX_PORT": "${localEnv:OMLX_PORT}",
     "OMLX_MODEL": "${localEnv:OMLX_MODEL}",
-    "OMLX_OPUS_MODEL": "${localEnv:OMLX_OPUS_MODEL}",
-    "OMLX_SONNET_MODEL": "${localEnv:OMLX_SONNET_MODEL}",
-    "OMLX_HAIKU_MODEL": "${localEnv:OMLX_HAIKU_MODEL}",
     "OMLX_CONTEXT_WINDOW": "${localEnv:OMLX_CONTEXT_WINDOW}",
 
     // Ollama local model server on the host. Forwarded to the ollama/ollama-yolo
@@ -36,6 +33,7 @@
   "mounts": [
     // Mount host config repos for each AI coding tool so credentials
     // and settings are available without being committed to the image.
+    
     // shared agents configuration
     "source=${localEnv:HOME}/.agents/,target=/home/vscode/.agents/,type=bind",
 

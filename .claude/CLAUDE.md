@@ -101,6 +101,13 @@ stays on `main`; all ticket work happens in worktrees. `.worktrees/` is gitignor
   `.qrspi/config.json` (gitignored; see `.qrspi/config.example.json`), falling back to the `@me`
   default, which expands to the gh-authenticated user (set `"reviewers": []` to opt out). Requesting
   a reviewer is what surfaces a PR in that user's Graphite review queue.
+- PR **bodies are authored at Graphite creation**, never via `gh pr edit`: `gt submit` has no
+  body flag and seeds the PR description from the branch commit message *at creation only*, and
+  the gh PAT (a fine-grained token owned by a different account than the repo owner) 403s on every
+  authenticated PR write while Graphite's own GitHub-App credential succeeds. Design/plan PRs use
+  their heredoc commit message as the body; for implementation, `scripts/qrspi_pr_body.py`
+  (self-locating, like the resolver) splices `pr-summary.md` into the slice-1 commit message before
+  `gt submit`, and slices 2..N carry a focused "Part N/total" body from their own commit messages.
 - All of the above have stdlib-only unit tests as `_test.py` siblings (`scripts/qrspi_*_test.py`, run with `python3`).
 - Artifact templates live in `.qrspi/templates/` (reference only — not written locally)
 - The `evals/` + `scripts/run_eval.py` harness is a **non-functional placeholder** — verify
