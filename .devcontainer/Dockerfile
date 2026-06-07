@@ -63,7 +63,9 @@ RUN chmod 0755 /usr/local/bin/show-motd \
 COPY etc/sudoers.d/vscode /etc/sudoers.d/vscode
 RUN chmod 0440 /etc/sudoers.d/vscode
 
-copy bin /home/vscode/bin
+# BIN scripts
+COPY --chown=vscode:vscode bin /home/vscode/bin
+
 # Install Claude Code as vscode user (native installer writes to ~/.local/bin)
 USER vscode
 
