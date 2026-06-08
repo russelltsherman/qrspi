@@ -8,18 +8,22 @@ Exits 0 if all checks pass, 1 on the first failure.
 
 Slice 1 scope: assert the SKILL.md frontmatter parses as YAML with exactly the
 five expected keys, the body is non-empty, and the body line count is <= 500.
-Reference-existence assertions (references/*.md) are added in Slice 2.
+
+Slice 2 scope (added): assert the four references/*.md depth docs exist and are
+non-empty, and that every references/ link in the SKILL.md body resolves to a
+file that actually exists (no dangling links).
 """
 
 import os
+import re
 import sys
 
 # Self-locate the repo root from this file's path so the test runs from any cwd.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
-SKILL_PATH = os.path.join(
-    REPO_ROOT, ".claude", "skills", "using-claude-cli", "SKILL.md"
-)
+SKILL_DIR = os.path.join(REPO_ROOT, ".claude", "skills", "using-claude-cli")
+SKILL_PATH = os.path.join(SKILL_DIR, "SKILL.md")
+REFERENCES_DIR = os.path.join(SKILL_DIR, "references")
 
 EXPECTED_KEYS = {
     "name",
@@ -29,6 +33,20 @@ EXPECTED_KEYS = {
     "allowed-tools",
 }
 MAX_BODY_LINES = 500
+
+# The four advanced-topic depth docs the SKILL.md body links out to. Slice 2
+# creates these; the contract is that the body's references/ links resolve to
+# exactly this set (no missing, no dangling).
+EXPECTED_REFERENCES = {
+    "advanced-cli-flags.md",
+    "hook-examples.md",
+    "agent-team-orchestration.md",
+    "permission-rule-patterns.md",
+}
+
+# Matches a Markdown link target pointing into the references/ directory, e.g.
+# `[text](references/advanced-cli-flags.md)`. Captures the bare filename.
+_REF_LINK_RE = re.compile(r"\]\(\s*references/([^)\s#]+)")
 
 
 def split_frontmatter(text):
@@ -77,6 +95,50 @@ def parse_frontmatter_keys(fm):
     return keys
 
 
+def _nonempty_file(path):
+    """True if path is a file with non-whitespace content."""
+    if not os.path.isfile(path):
+        return False
+    with open(path, "r", encoding="utf-8") as fh:
+        return bool(fh.read().strip())
+
+
+def validate_references(body):
+    """Assert the references/ depth docs exist and the body links resolve.
+
+    Two halves of the same contract:
+      1. Each expected references/*.md file exists and is non-empty.
+      2. Every references/ link in the SKILL.md body points at a file that
+         actually exists (no dangling links).
+
+    Returns the sorted list of referenced filenames found in the body.
+    """
+    # 1. Each expected reference file exists and is non-empty.
+    for name in sorted(EXPECTED_REFERENCES):
+        path = os.path.join(REFERENCES_DIR, name)
+        assert os.path.isfile(path), (
+            "expected reference file missing: references/%s" % name
+        )
+        assert _nonempty_file(path), (
+            "reference file is empty: references/%s" % name
+        )
+
+    # 2. Every references/ link in the body resolves to a real file.
+    linked = sorted(set(_REF_LINK_RE.findall(body)))
+    assert linked, (
+        "SKILL.md body has no references/ links; expected links to %s"
+        % sorted(EXPECTED_REFERENCES)
+    )
+    for name in linked:
+        path = os.path.join(REFERENCES_DIR, name)
+        assert os.path.isfile(path) and _nonempty_file(path), (
+            "dangling references/ link in SKILL.md: references/%s "
+            "does not resolve to a non-empty file" % name
+        )
+
+    return linked
+
+
 def validate_skill_structure():
     assert os.path.isfile(SKILL_PATH), "SKILL.md not found at %s" % SKILL_PATH
     with open(SKILL_PATH, "r", encoding="utf-8") as fh:
@@ -98,14 +160,21 @@ def validate_skill_structure():
         % (body_lines, MAX_BODY_LINES)
     )
 
-    return body_lines
+    linked = validate_references(body)
+
+    return body_lines, linked
 
 
 def main():
-    body_lines = validate_skill_structure()
+    body_lines, linked = validate_skill_structure()
     print("OK: using-claude-cli SKILL.md")
     print("  frontmatter keys: exactly %d expected keys" % len(EXPECTED_KEYS))
     print("  body: non-empty, %d lines (<= %d)" % (body_lines, MAX_BODY_LINES))
+    print(
+        "  references: %d expected files present & non-empty; "
+        "%d body link(s) resolve"
+        % (len(EXPECTED_REFERENCES), len(linked))
+    )
     return 0
 
 

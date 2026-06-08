@@ -26,3 +26,26 @@
 - Body is 150/500 lines, leaving ample room; no line-budget pressure for any Slice-2 SKILL.md edits.
 
 ---
+
+## Session 2 — Slice 2: Advanced reference docs
+
+**Timestamp:** 2026-06-06T23:40:00Z
+**Tasks completed:** T9, T10, T11, T12, T13, T14
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/using_claude_cli_skill_test.py` → passed (exit 0): frontmatter 5 keys; body 150 lines (≤ 500); 4 expected reference files present & non-empty; 4 SKILL.md `references/` links resolve (no dangling).
+
+**Deviations from structure.md:**
+
+- none. Created exactly the four `references/*.md` files in the contract (`advanced-cli-flags.md`, `hook-examples.md`, `agent-team-orchestration.md`, `permission-rule-patterns.md`); all are non-empty. `validate_skill_structure()` extended per the `validate_skill_structure()` contract (asserts the four files exist non-empty AND every body `references/` link resolves). Frontmatter parser untouched (no nested YAML introduced).
+
+**Deviations from plan.md:**
+
+- none. SKILL.md body was not modified — its Slice-1 References section already linked exactly the four files with the correct relative paths, so no edit was needed to satisfy the no-dangling-links requirement.
+
+**Notes for next session:**
+
+- Final slice. No further implementation sessions; stack ready for PR.
+- Test now self-locates `references/` via `SKILL_DIR`/`REFERENCES_DIR`. New reusable pieces: `EXPECTED_REFERENCES` (the four filenames), `_REF_LINK_RE` (regex capturing `](references/<name>` link targets), `_nonempty_file(path)` helper, and `validate_references(body)` (returns the sorted list of linked filenames). `validate_skill_structure()` now returns a `(body_lines, linked)` tuple — callers updated in `main()`.
+- All four reference docs carry the `[CLI-spec]` provenance banner (externally-derived, unverified against the repo) per the design's Unverified Assumptions; `permission-rule-patterns.md` and `agent-team-orchestration.md` also cite the `[in-project]` facts (`--dangerously-skip-permissions` in `.devcontainer/post-create.sh`; the QRSPI worktree-per-ticket pattern).
