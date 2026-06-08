@@ -182,9 +182,10 @@ EOF
 )"     # first run adds the single commit; on resume it amends the same commit
 ```
 Then submit as a **published** PR — review gates need a reviewable (non-draft) PR, and
-`gt submit` defaults to draft in non-interactive mode. Handle a stale closed-PR association
-per [Resubmitting](#resubmitting-when-the-prior-pr-was-closed-or-merged):
+`gt submit` defaults to draft in non-interactive mode. Clear any stale closed-PR association
+FIRST (see [Resubmitting](#resubmitting-when-the-prior-pr-was-closed-or-merged)):
 ```bash
+python3 <repo-root>/scripts/qrspi_clear_stale_pr.py --ticket <id>
 gt submit --publish --no-edit --no-interactive
 ```
 Capture the PR URL. **Project Linear** → `Design Review` (best-effort; see
@@ -535,16 +536,14 @@ This is a hard boundary. If the plan references files outside the project, repor
   its commit; re-running within the same phase amends with `gt modify` (no `-c`). Commit
   subjects: `<id> [QR]: Design`, `<id> [SP]: Plan`, `<id> [I] <N>/<total>: <goal>` (slices, e.g. `RUS-44 [I] 1/2: …`).
 - After mutations, run `gt log short --no-interactive` to verify stack state.
-- Never use `gt sync` mid-feature on a held stack — it deletes branches whose PRs were
-  closed (which is correct only after merge). Post-merge cleanup is owned by
-  `scripts/qrspi_cleanup.py` (the only sanctioned `gt sync`/worktree-removal path); do not
-  hand-run those mutations.
-- **Proactively check for a stale PR association before every `gt submit`.** Run
-  `gt info <branch> --no-interactive`; if it shows a PR in state `(Closed)` or `(Merged)`,
-  run the [Resubmitting](#resubmitting-when-the-prior-pr-was-closed-or-merged) recovery
-  FIRST — do not wait for the submit to fail. This happens routinely on reset→rerun: a
-  reset closes a phase PR, and recreating the same-named branch re-hydrates the dead
-  association from `.git/.graphite_pr_info`.
+- Never use `gt sync` mid-feature on a held stack except in `land` cleanup — it deletes
+  branches whose PRs were closed (which is correct only after merge).
+- **Clear any stale PR association before every `gt submit`.** Run the idempotent
+  `python3 <repo-root>/scripts/qrspi_clear_stale_pr.py --ticket <id>` FIRST — no `gt info`
+  pre-check needed (the helper is a no-op when nothing is stale), and do not wait for the
+  submit to fail. See [Resubmitting](#resubmitting-when-the-prior-pr-was-closed-or-merged).
+  This happens routinely on reset→rerun: a reset closes a phase PR, and recreating the
+  same-named branch re-hydrates the dead association from `.git/.graphite_pr_info`.
 
 ### Staging — NEVER use `-a`
 
@@ -557,18 +556,26 @@ before committing.
 
 ### Resubmitting when the prior PR was closed or merged
 
-Graphite pins each branch to the first PR it created, in `.git/.graphite_pr_info`. After a
-reset/rework closed a PR, that association is stale and `gt submit` refuses to open a fresh
-PR. Recovery (run as one uninterrupted sequence, on the branch being submitted):
+Graphite pins each branch to the first PR it created, in the SHARED `.git/.graphite_pr_info`
+cache (keyed by `headRefName` → PR number + state). After a reset/rework closed a PR — or a
+previously-landed ticket is rerun — that association is stale and `gt submit` refuses to open
+a fresh PR under the same name. `--force` does not help (it governs the force-push, not the
+association), and the interactive "publish a new PR?" prompt is unreachable to agents: gt
+collapses to non-interactive whenever stdin is not a TTY and silently drops any piped
+selection.
+
+Recovery is a single idempotent command — run it before the submit:
 ```bash
-gt rename <branch>-stale --no-interactive   # detaches the dead PR
-gt rename <branch>        --no-interactive   # restores the canonical name
-gt info <branch> --no-interactive            # confirm no "(Closed)/(Merged)" PR line remains
-gt submit --publish --force --no-edit --no-interactive # creates a brand-new PR
+python3 <repo-root>/scripts/qrspi_clear_stale_pr.py --ticket <id>
 ```
-Only apply when `gt info` shows a `(Closed)`/`(Merged)` PR; never rename a branch with an
-**open** PR, and never use `--force` on the normal submit path. This is a recognized state,
-not an infrastructure error — the HARD STOP rule does not apply.
+It removes ONLY this ticket's `(Closed)`/`(Merged)` entries from the cache (OPEN associations
+and other tickets are left untouched), so the branch resubmits as a brand-new PR under the
+SAME name — no rename, no temp branch, no `--force`. Safe to run before every submit: with
+nothing stale it is a no-op, and a missing/garbled cache degrades to a no-op (the submit then
+aborts visibly, never worse). It supersedes the old `gt rename <branch>-stale` roundtrip,
+whose fixed temp name COLLIDES across cycles when a recovery is interrupted between its two
+renames (`fatal: a branch named '<branch>-stale' already exists`). This is a recognized
+state, not an infrastructure error — the HARD STOP rule does not apply.
 
 ### Why PR bodies are authored at Graphite creation
 
