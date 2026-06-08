@@ -10,6 +10,7 @@ export const meta = {
     { title: 'Plan', detail: 'action=advance(plan) → structure/plan/worktree phase agents' },
     { title: 'Implementation', detail: 'action=advance(implementation) → qrspi-implement per slice + qrspi-pr' },
     { title: 'Finalize', detail: 'Commit/submit/reset/land + best-effort Linear projection (worker agent)' },
+    { title: 'Reconcile', detail: 'Opt-in: reap stranded already-merged worktrees via qrspi_cleanup.py (dry-run by default)' },
   ],
 }
 
@@ -49,7 +50,8 @@ export const meta = {
 const SKILL = '.claude/skills/qrspi-work/SKILL.md'
 
 // --- args ------------------------------------------------------------------
-// Optional overrides: { statuses?: string[], project?: string }
+// Optional overrides: { statuses?: string[], project?: string,
+//                       reconcile?: boolean, reconcileDryRun?: boolean }
 const input = typeof args === 'string'
   ? (() => { try { return JSON.parse(args) } catch { return undefined } })()
   : args
@@ -58,6 +60,14 @@ const input = typeof args === 'string'
 // in the PR), so we sweep the review statuses to detect approvals and auto-advance.
 const STATUSES = input?.statuses ?? ['Selected', 'Design Review', 'Plan Review', 'Code Review']
 const PROJECT = input?.project // undefined ⇒ all projects
+// Reconciliation pass (RUS-52): reap already-merged-but-uncleaned tickets stranded in
+// `.worktrees/` (the backlog the old per-land prose left behind on failure/skip). It is
+// OPT-IN (default off — a normal batch run doesn't sweep the whole worktree dir) and
+// DRY-RUN BY DEFAULT when enabled, so the first invocation only LISTS the backlog and
+// touches nothing; pass reconcileDryRun:false to actually reap. The cleanup script is
+// the safety gate — it reaps ONLY a fully-merged clean stack and skips everything else.
+const RECONCILE = input?.reconcile === true
+const RECONCILE_DRY_RUN = input?.reconcileDryRun !== false // default true
 
 // --- schemas ---------------------------------------------------------------
 
@@ -143,6 +153,21 @@ function parseRestackEnvelope(text, ticketId) {
   let env
   try { env = JSON.parse(raw) } catch (e) { return { ok: false, error: `restack: unparseable envelope (${e.message})` } }
   if (typeof env.ok !== 'boolean') return { ok: false, error: 'restack: envelope missing ok flag' }
+  return env
+}
+
+// Parse + validate the cleanup worker's text into the qrspi_cleanup.py envelope
+// ({ ok, repoRoot, decision, reason, removed{worktree,branches[],remotes[]}, dryRun,
+// error? }). Same text-return + JS-parse shape as resolve/restack (no StructuredOutput,
+// which the weak local worker could not populate). A garbled echo becomes a clean
+// ok:false so the caller logs it and moves on rather than acting on a corrupt verdict.
+function parseCleanupEnvelope(text) {
+  const raw = extractJsonObject(text)
+  if (!raw) return { ok: false, decision: 'skip', error: 'cleanup: no JSON envelope in worker output' }
+  let env
+  try { env = JSON.parse(raw) } catch (e) { return { ok: false, decision: 'skip', error: `cleanup: unparseable envelope (${e.message})` } }
+  if (typeof env.ok !== 'boolean') return { ok: false, decision: 'skip', error: 'cleanup: envelope missing ok flag' }
+  if (typeof env.decision !== 'string') return { ok: false, decision: 'skip', error: 'cleanup: envelope missing decision' }
   return env
 }
 
@@ -602,16 +627,59 @@ Return: ok, prUrl, newStatus, summary (name what you changed and confirm review 
 }
 
 // ===========================================================================
+// CLEANUP — deterministic post-merge reap (RUS-52). Replaces the old unsafe
+// `gt sync --force` / `git worktree remove --force 2>/dev/null` prose with a single
+// verbatim invocation of the self-locating, tested qrspi_cleanup.py. The script
+// derives REPO_ROOT from its own path, so it MUST run from the MAIN checkout (cwd =
+// main repo root) for the destroy path to see the real `.worktrees/<id>` — run from
+// inside the worktree, REPO_ROOT would be the worktree and the target absent → skip.
+// It computes a classifier verdict (blocked > destroy > skip), reaps only on a
+// fully-merged clean stack, and gates ALL destruction behind --dry-run. A dirty
+// worktree comes back decision:"blocked" (logged + left for a human, never forced).
+// Infra errors surface ONCE as ok:false and are never retried.
+// ===========================================================================
+async function runCleanup(ticketId, dryRun, phaseLabel) {
+  const dryFlag = dryRun ? ' --dry-run' : ''
+  const out = await agent(
+    `You are the CLEANUP worker for QRSPI ticket ${ticketId}. Your cwd is the MAIN repo root (NOT a worktree — the script self-locates REPO_ROOT from its own path and must see the real .worktrees/${ticketId}).
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives, no other git/gt/gh commands, do NOT run \`gt sync --force\` or \`git worktree remove\` yourself:
+
+  python3 scripts/qrspi_cleanup.py --ticket ${ticketId}${dryFlag}
+
+It computes the cleanup verdict and (unless --dry-run) reaps the ticket's worktree, local branches, and remote refs, printing a JSON envelope { ok, repoRoot, decision, reason, removed{worktree,branches[],remotes[]}, dryRun, error? }. Output that JSON as your FINAL message, exactly and verbatim — NO surrounding prose, NO code fences, NO edits. Do NOT call any structured-output tool. If it printed ok:false, still output that JSON verbatim (HARD STOP — do NOT retry or improvise).`,
+    { label: `cleanup:${ticketId}`, phase: phaseLabel }
+  )
+  return parseCleanupEnvelope(out)
+}
+
+// ===========================================================================
 // ACTION: land  (all PRs approved+clean — merge the stack bottom-up, finalize)
 // ===========================================================================
 async function doLand(t, r) {
   phase('Finalize')
+  // 1. Merge the stack bottom-up + best-effort Linear → Done (the land worker; it no
+  //    longer does worktree/branch cleanup — that is the deterministic script below).
   const fin = await agent(
-    `You are the LAND worker for ${t.id}, in ${r.worktreeDir}. Every PR in the stack is approved+clean. Follow the "action: land" steps of ${SKILL}: ensure the stack is current (gt submit --publish --stack), merge bottom-up (gt merge --confirm), gt sync, remove leftover .qrspi/${t.id}/ artifacts (cleanup PR if needed), remove the worktree, and BEST-EFFORT project Linear → "Done". Treat any infrastructure/merge error as a HARD STOP (return ok:false, verbatim error).
+    `You are the LAND worker for ${t.id}, in ${r.worktreeDir}. Every PR in the stack is approved+clean. Follow the "action: land" steps of ${SKILL}: ensure the stack is current (gt submit --publish --stack), merge bottom-up (gt merge --confirm), then BEST-EFFORT project Linear → "Done". Do NOT remove the worktree, delete branches, or run \`gt sync --force\` — a separate deterministic cleanup step (qrspi_cleanup.py) handles all reaping AFTER the merge. Treat any infrastructure/merge error as a HARD STOP (return ok:false, verbatim error).
 Return: ok, prUrl, newStatus, summary.`,
     { label: `land:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
-  return finResult(t, fin, 'land')
+  const res = finResult(t, fin, 'land')
+  // 2. Only reap if the merge actually succeeded — never destroy a worktree behind a
+  //    failed/partial land (the idempotent cleanup script will reap on a later run once
+  //    the stack truly merged). The script itself re-verifies full-merge state, so a
+  //    transient land result that lost its merge verdict still can't cause a bad reap.
+  if (!fin || !fin.ok) return res
+  const cl = await runCleanup(t.id, /* dryRun */ false, 'Finalize')
+  if (!cl.ok) {
+    log(`  ${t.id}: cleanup failed after land — ${cl.error ?? 'unknown'} (worktree left for a later reconciliation pass)`)
+  } else if (cl.decision === 'destroy') {
+    log(`  ${t.id}: cleaned up — worktree ${cl.removed?.worktree ? 'removed' : 'absent'}, branches [${(cl.removed?.branches ?? []).join(', ')}], remotes [${(cl.removed?.remotes ?? []).join(', ')}]`)
+  } else {
+    log(`  ${t.id}: cleanup decision=${cl.decision} — ${cl.reason ?? ''} (no reap)`)
+  }
+  res.cleanup = { decision: cl.decision, ok: cl.ok, removed: cl.removed }
+  return res
 }
 
 // --- result helpers --------------------------------------------------------
@@ -624,6 +692,80 @@ function finResult(t, fin, action) {
     return { ticketId: t.id, action, summary: `${action} finalize failed: ${fin?.error ?? 'unknown'}` }
   }
   return { ticketId: t.id, action, newStatus: fin.newStatus, summary: fin.summary, prUrl: fin.prUrl }
+}
+
+// ===========================================================================
+// RECONCILIATION — reap already-merged-but-uncleaned tickets (RUS-52, AC4/AC5).
+// Candidate finished tickets are enumerated from git/GitHub state — the live
+// `.worktrees/<id>` directories — NOT a Linear `Done` sweep (ref: Q8, OQ1): Linear
+// status is a best-effort projection and can lag/diverge from the real merged state,
+// so the authoritative signal is "a worktree still exists on disk." Every candidate is
+// then handed to qrspi_cleanup.py, which is the per-ticket safety gate: it independently
+// classifies (blocked > destroy > skip) and reaps ONLY a fully-merged clean stack —
+// an in-flight stack comes back `skip` (untouched), a dirty one `blocked` (logged and
+// skipped, NEVER forced), so enumerating every worktree is safe. One blocked/failed
+// ticket is logged and the pass proceeds to the rest (ref: OQ2).
+// ===========================================================================
+const RECONCILE_CANDIDATES_SCHEMA = {
+  type: 'object',
+  required: ['tickets'],
+  properties: {
+    tickets: { type: 'array', items: { type: 'string' } },
+  },
+}
+
+async function reconcileCandidates() {
+  const out = await agent(
+    `You are the RECONCILE-ENUMERATE worker. Your cwd is the MAIN repo root.
+Run EXACTLY these read-only commands (no destruction, no git/gt/gh mutations) to list the
+candidate ticket ids whose worktree still exists on disk — the stranded backlog:
+
+  ls -1 .worktrees 2>/dev/null
+
+Each immediate subdirectory name of \`.worktrees/\` that looks like a ticket id (e.g. RUS-52,
+matching ^[A-Z]+-[0-9]+$) is a candidate. Ignore any other entries (files, dotfiles, names
+that don't match). Return ONLY the matching directory names.
+Return a StructuredOutput with shape { tickets: string[] } — the deduplicated, sorted list of
+candidate ticket ids. If \`.worktrees\` is absent or empty, return { tickets: [] }.`,
+    { label: 'reconcile-enumerate', phase: 'Reconcile', schema: RECONCILE_CANDIDATES_SCHEMA }
+  )
+  if (!out || !Array.isArray(out.tickets)) return []
+  // De-dup + keep only well-formed ticket ids (defensive — the worker is told to filter,
+  // but a corrupt echo must not feed a junk id to the cleanup script).
+  const valid = /^[A-Z]+-[0-9]+$/
+  return [...new Set(out.tickets.filter(id => typeof id === 'string' && valid.test(id)))].sort()
+}
+
+async function runReconciliation(alreadyProcessed) {
+  phase('Reconcile')
+  const candidates = await reconcileCandidates()
+  // Skip tickets the main loop already handled this run (a land just reaped them) so we
+  // don't double-invoke cleanup on a worktree that's mid-reap or already gone.
+  const pending = candidates.filter(id => !alreadyProcessed.has(id))
+  log(`Reconciliation: ${candidates.length} worktree candidate(s)` +
+      `${alreadyProcessed.size ? `, ${pending.length} after excluding this run's ${alreadyProcessed.size} processed` : ''}` +
+      ` — ${RECONCILE_DRY_RUN ? 'DRY-RUN (listing only, touching nothing)' : 'REAPING for real'}`)
+  if (pending.length === 0) return []
+  const reaped = []
+  // Sequential: tickets share one .git index, so worktree/branch reaps must not race.
+  for (const id of pending) {
+    const cl = await runCleanup(id, RECONCILE_DRY_RUN, 'Reconcile')
+    if (!cl.ok) {
+      log(`  ${id}: reconcile cleanup failed — ${cl.error ?? 'unknown'} (skipped; pass continues)`)
+      reaped.push({ ticketId: id, decision: cl.decision ?? 'skip', ok: false, dryRun: RECONCILE_DRY_RUN, error: cl.error })
+      continue
+    }
+    if (cl.decision === 'destroy') {
+      log(`  ${id}: ${RECONCILE_DRY_RUN ? 'WOULD reap' : 'reaped'} — worktree ${cl.removed?.worktree ? (RECONCILE_DRY_RUN ? 'present' : 'removed') : 'absent'}, branches [${(cl.removed?.branches ?? []).join(', ')}], remotes [${(cl.removed?.remotes ?? []).join(', ')}]`)
+    } else if (cl.decision === 'blocked') {
+      // A dirty worktree — logged and SKIPPED, never forced; the pass proceeds (OQ2).
+      log(`  ${id}: BLOCKED — ${cl.reason ?? 'dirty worktree'} (left untouched for a human; pass continues)`)
+    } else {
+      log(`  ${id}: skip — ${cl.reason ?? 'not fully merged'} (in-flight; left untouched)`)
+    }
+    reaped.push({ ticketId: id, decision: cl.decision, ok: cl.ok, dryRun: RECONCILE_DRY_RUN, removed: cl.removed })
+  }
+  return reaped
 }
 
 // ===========================================================================
@@ -658,11 +800,16 @@ for (const b of batches) {
 
 log(`Found ${tickets.length} ticket(s): ${tickets.map(t => `${t.id} (${t.status})`).join(', ') || '(none)'}`)
 if (tickets.length === 0) {
-  return { ticketsProcessed: 0, note: `No tickets in ${STATUSES.join(' / ')}` }
+  // No in-flight queue, but the reconciliation backlog is independent of it — still
+  // reap stranded merged worktrees when the pass is enabled.
+  const reconciliation = RECONCILE ? await runReconciliation(new Set()) : undefined
+  return { ticketsProcessed: 0, note: `No tickets in ${STATUSES.join(' / ')}`, reconciliation }
 }
 
 // Sequential: tickets share one .git index, so worktree/Graphite ops must not race.
 const results = []
+// Tickets handled this run (a land already reaped these) — excluded from reconciliation.
+const processed = new Set()
 for (let i = 0; i < tickets.length; i++) {
   const t = tickets[i]
   log(`[${i + 1}/${tickets.length}] ${t.id} (${t.status}): ${t.title}`)
@@ -715,6 +862,7 @@ for (let i = 0; i < tickets.length; i++) {
         log(`  ${t.id}: skipped (${a})`)
     }
     results.push(res)
+    processed.add(t.id)
     log(`[${i + 1}/${tickets.length}] ${t.id} → ${res.action}${res.newStatus ? ` (${res.newStatus})` : ''}`)
   } catch (err) {
     const summary = err?.message ?? String(err)
@@ -723,4 +871,8 @@ for (let i = 0; i < tickets.length; i++) {
   }
 }
 
-return { ticketsProcessed: results.length, results }
+// Reconciliation pass (RUS-52): reap stranded already-merged worktrees the per-land
+// path missed. Opt-in (RECONCILE) and dry-run by default; excludes this run's tickets.
+const reconciliation = RECONCILE ? await runReconciliation(processed) : undefined
+
+return { ticketsProcessed: results.length, results, reconciliation }
