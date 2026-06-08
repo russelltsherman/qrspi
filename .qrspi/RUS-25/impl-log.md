@@ -29,3 +29,26 @@
 - Slice 2 must add this entry to all three files: `.claude/CLAUDE.md`, `README.md`, `docs/qrspi_claude_code_guide.md`.
 
 ---
+
+## Session 2 — Slice 2
+
+**Timestamp:** 2026-06-08T03:02:20Z
+**Tasks completed:** T17, T18, T19, T20, T21, T22 (originally added the three skill-list entries; all subsequently removed per review — see Deviations)
+**Tasks failed:** none
+**Tests:**
+
+- `grep -rn "/adr" README.md docs/qrspi_claude_code_guide.md .claude/CLAUDE.md` → zero matches across all three markdown files. PASS (no skill index in any markdown file, per review directive).
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- Review feedback (PR #152 CHANGES_REQUESTED): the reviewer directed "indexing skills in claude.md is redundant, don't do this; do not index skills in README.md, do not index skills in any markdown file." The plan's instruction to sync the three hand-maintained skill lists is therefore fully superseded. Slice 2 indexes the `/adr` skill in **no** markdown file: the entry was removed from `.claude/CLAUDE.md` (prior pass), and now also from `README.md` and `docs/qrspi_claude_code_guide.md`. The skill is discovered via its `.claude/skills/adr/SKILL.md` frontmatter alone; no hand-maintained markdown index is updated.
+
+**Notes for next session:**
+
+- Slice 2 carries no feature-code edit: per review, the `/adr` skill is intentionally NOT indexed in any markdown file (`.claude/CLAUDE.md`, `README.md`, `docs/qrspi_claude_code_guide.md` all carry zero `/adr` entries). Slice 2's diff is limited to the QRSPI workflow artifacts (this impl-log + pr-summary).
+
+---
