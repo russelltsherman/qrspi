@@ -16,8 +16,13 @@ def _phase(branch=True, pr=True, decision="REVIEW_REQUIRED", threads=0):
             "reviewDecision": decision, "unresolvedThreads": threads}
 
 
-def _impl(slices):
-    return {"branchExists": bool(slices), "slices": slices}
+def _impl(slices, expected=None, pr_summary=True):
+    """Build an implementation phase. Defaults model a COMPLETE phase (pr-summary.md
+    committed, expectedSlices == committed) so pre-existing review/land/reset cases
+    are unaffected. Pass expected=/pr_summary= to exercise the completeness gate."""
+    return {"branchExists": bool(slices), "slices": slices,
+            "expectedSlices": len(slices) if expected is None else expected,
+            "prSummaryCommitted": pr_summary}
 
 
 def _slice(n, pr=True, decision="REVIEW_REQUIRED", threads=0):
@@ -77,6 +82,37 @@ case("design approved but plan under review -> wait on plan (frontier)",
      state(phases={"design": _phase(decision="APPROVED"),
                    "plan": _phase(decision="REVIEW_REQUIRED")}),
      {"action": "wait", "phase": "plan"})
+
+# --- implementation completeness gate (slices mandatory; optionality NOT honored) ---
+case("impl 1/2 slices, pr-summary missing -> advance to finish (was wrongly submit)",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, pr=False, decision=None)],
+                                           expected=2, pr_summary=False)}),
+     {"action": "advance", "phase": "implementation", "nextPhase": "implementation"})
+
+case("impl 2/2 committed but pr-summary not committed -> advance to finish",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1), _slice(2)],
+                                           expected=2, pr_summary=False)}),
+     {"action": "advance", "phase": "implementation", "nextPhase": "implementation"})
+
+case("impl complete (2/2 + pr-summary), PRs not opened -> submit",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, pr=False, decision=None),
+                                            _slice(2, pr=False, decision=None)],
+                                           expected=2, pr_summary=True)}),
+     {"action": "submit", "phase": "implementation"})
+
+case("impl all slices present + pr-summary but one slice PR missing -> submit",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="APPROVED"),
+                                            _slice(2, pr=False, decision=None)],
+                                           expected=2, pr_summary=True)}),
+     {"action": "submit", "phase": "implementation"})
 
 # --- implementation stack ---------------------------------------------------
 case("all slices approved+clean -> land",

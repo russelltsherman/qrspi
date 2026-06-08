@@ -446,7 +446,7 @@ async function doImplementation(t, r) {
     `You are the implementation setup worker for ${t.id}. Follow the "action: advance → nextPhase == implementation" Preflight of ${SKILL}.
 1. Reuse/create the worktree and ensure you are on ${t.id}/plan (or the latest slice branch if resuming).
 2. Verify structure.md, plan.md, worktree.md exist+non-empty; if not, return ok:false.
-3. Parse them and return one entry per vertical slice, in order: structureSlice (Types+Contracts+"Slice N"), planSlice ("Slice N"), worktreeSession (session N), goal (one line), alreadyCommitted (true if a ${t.id}/slice-N branch already has code committed).
+3. Parse them and return one entry per vertical slice the PLAN defines, in order. EVERY planned slice is MANDATORY: do NOT omit, skip, merge, or collapse a slice because an artifact marks it optional, gated, conditional, or "pending OQx" — optionality is NOT honored here, so a plan with N \`## Slice\` headings MUST yield N entries. Fields per entry: structureSlice (Types+Contracts+"Slice N"), planSlice ("Slice N"), worktreeSession (session N), goal (one line), alreadyCommitted (true ONLY if a ${t.id}/slice-N branch already has its code committed — this is the SOLE legal per-slice skip, for resume; a slice being "gated"/"optional" is NOT a reason to set it).
 Return: ok, worktreeDir, slices[]. Do NOT implement anything or change Linear.`,
     { label: `impl-setup:${t.id}`, phase: 'Implementation', schema: IMPL_SETUP_SCHEMA }
   )

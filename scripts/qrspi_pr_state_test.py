@@ -11,6 +11,7 @@ from qrspi_pr_state import (
     slice_numbers,
     branch_set,
     real_branches,
+    count_plan_slices,
 )
 
 failures = 0
@@ -101,6 +102,34 @@ check("mixed: real design, empty plan placeholder",
 check("branch missing from ahead map is not real (defensive)",
       real_branches({"RUS-1/design"}, {}),
       set())
+
+
+# --- count_plan_slices (mandatory-slice gate; optionality NOT honored) ------
+check("counts two slice headings",
+      count_plan_slices("# Plan\n## Slice 1: do x\n### Setup\n"
+                        "## Slice 2: do y (optional, pending OQ4)\n### Verify Slice 2\n"),
+      2)
+
+check("optionality/gating annotations do NOT reduce the count",
+      count_plan_slices("## Slice 1: a\n## Slice 2: b (optional)\n"
+                        "## Slice 3: c (gated on OQ5)\n"),
+      3)
+
+check("no slice headings -> 0",
+      count_plan_slices("# Plan\n## Overview\n## Rollback Notes\n"),
+      0)
+
+check("ignores '### Verify Slice N' subheadings (not top-level ## Slice)",
+      count_plan_slices("## Slice 1: a\n### Verify Slice 1\n"),
+      1)
+
+check("dedupes a repeated slice number",
+      count_plan_slices("## Slice 1: a\n## Slice 1: a (restated)\n"),
+      1)
+
+check("empty / None plan text -> 0",
+      count_plan_slices(""),
+      0)
 
 
 def run():

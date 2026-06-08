@@ -12,6 +12,11 @@ it unit-testable without GitHub or Linear.
 Phase order is design -> plan -> implementation. design and plan are single PRs;
 implementation is a stack of slice PRs reviewed as a whole.
 
+The implementation phase is COMPLETE only when every planned slice is committed AND
+its terminal artifact pr-summary.md is committed on the stack. Slices are mandatory:
+optionality is NOT honored (N planned slices means N required). A short or unfinished
+stack routes back to `advance -> implementation` to build the rest, never `submit`.
+
 Predicates (design doc §5):
     READY(pr)             reviewDecision == "APPROVED" AND unresolvedThreads == 0
     RESET_TRIGGER(pr)     reviewDecision == "CHANGES_REQUESTED"
@@ -19,10 +24,11 @@ Predicates (design doc §5):
 Decision actions:
     entry_blocked   not assigned+Selected and no design branch yet -> do nothing
     run_design      entry gate satisfied, no design branch -> build the design phase
-    submit          active phase branch exists but its PR does not -> submit it
+    submit          active phase complete, its branch exists but its PR does not -> submit it
     wait            active phase PR exists, not approved, no unresolved threads
     revise          active phase PR has unresolved threads to address (manual)
-    advance         active phase READY and not the top phase -> build the next phase
+    advance         active phase READY and not the top phase -> build the next phase;
+                    OR implementation exists but is unfinished -> build the rest
     land            implementation stack fully READY -> land the whole stack
     reset           an upstream phase has CHANGES_REQUESTED -> discard downstream,
                     return to that phase for revision (automatic discard, decision 10)
@@ -123,10 +129,33 @@ def resolve(state):
                         reason="%s PR approved and clean; advance to %s." % (active, nxt))
 
     # active == implementation: reviewed as a whole stack.
+    #
+    # COMPLETENESS GATE — slices are MANDATORY; optionality is NOT honored. The phase
+    # is "done" only when every planned slice is committed AND its terminal artifact
+    # pr-summary.md is committed on the stack (qrspi-pr writes pr-summary.md only after
+    # the whole slice loop, so its presence means the phase ran to the end). A short
+    # stack (fewer committed slice branches than the plan defines) or a missing
+    # pr-summary means the phase is unfinished, so route back to advance->implementation
+    # to build the rest (doImplementation resumes idempotently, skipping alreadyCommitted
+    # slices). This is what separates "implementation in progress" from "implementation
+    # done, PR(s) just not opened": the old code conflated them and emitted `submit` for
+    # a half-built stack, whose finalize then hard-stopped on the absent pr-summary.md.
+    impl = phases.get("implementation", {})
     slices = _impl_slices(phases)
-    if not slices or any(not s.get("prExists") for s in slices):
+    committed = len(slices)
+    expected = impl.get("expectedSlices", committed)
+    pr_summary = impl.get("prSummaryCommitted", False)
+    if committed < expected or not pr_summary:
+        return decision("advance", phase="implementation", nextPhase="implementation",
+                        reason="Implementation incomplete (%d/%d slices committed, "
+                               "pr-summary.md %s); finish the remaining work."
+                               % (committed, expected,
+                                  "committed" if pr_summary else "missing"))
+    # Complete: every planned slice is committed and pr-summary.md is in the stack. Now
+    # gate on PR existence/review exactly as before.
+    if any(not s.get("prExists") for s in slices):
         return decision("submit", phase="implementation",
-                        reason="Implementation stack incomplete or not fully submitted.")
+                        reason="Implementation complete; open the slice PR(s).")
     if any(s.get("unresolvedThreads", 0) > 0 for s in slices):
         return decision("revise", phase="implementation",
                         reason="One or more slice PRs have unresolved review threads.")

@@ -76,6 +76,22 @@ def slice_numbers(branch_lines):
     return sorted(nums)
 
 
+def count_plan_slices(plan_text):
+    """Count the slices a plan DEFINES, from its `## Slice <n>:` headings.
+
+    Slices are MANDATORY — an 'optional'/'gated'/'pending OQx' annotation on a heading
+    does NOT reduce the count (optionality is not honored; see qrspi_resolve_state's
+    completeness gate). Distinct slice NUMBERS are counted, so a repeated heading for
+    the same slice counts once. Deeper subheadings like '### Verify Slice 1' are ignored
+    (they are not top-level `## Slice` headings). Pure, so it is unit-testable."""
+    nums = set()
+    for line in (plan_text or "").splitlines():
+        m = re.match(r"^##\s+Slice\s+(\d+)\b", line.strip())
+        if m:
+            nums.add(int(m.group(1)))
+    return len(nums)
+
+
 def branch_set(branch_lines):
     """Normalize `git branch --list` lines to a set of bare branch names.
 
@@ -132,6 +148,23 @@ def _commits_ahead(branch, trunk):
         return 0
 
 
+def _git_show(ref_path):
+    """`git show <ref>:<path>` text, or "" on any error (missing file or ref). Read-only,
+    so an absent artifact/branch degrades to an empty string rather than crashing."""
+    res = subprocess.run(["git", "show", ref_path], capture_output=True, text=True)
+    return res.stdout if res.returncode == 0 else ""
+
+
+def _file_in_tree(ref, path):
+    """True iff `path` exists in `ref`'s committed tree (git cat-file -e). False on any
+    error (missing file, missing ref, or no ref given)."""
+    if not ref:
+        return False
+    res = subprocess.run(["git", "cat-file", "-e", "%s:%s" % (ref, path)],
+                         capture_output=True, text=True)
+    return res.returncode == 0
+
+
 def _query_pr(owner, repo, head):
     res = subprocess.run(
         ["gh", "api", "graphql",
@@ -171,6 +204,20 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main"):
         pr["n"] = n
         slices.append(pr)
 
+    # Completeness signals for the resolver's mandatory-slice gate (read from git refs,
+    # no worktree needed — consistent with the rest of this gather):
+    #   expectedSlices      how many slices the plan DEFINES (`## Slice <n>:` headings on
+    #                       the plan branch; optionality is not honored). 0 if unreadable.
+    #   prSummaryCommitted  whether the phase's terminal artifact pr-summary.md is
+    #                       committed on the top slice (qrspi-pr writes it only after the
+    #                       whole slice loop, so it marks the phase ran to completion).
+    top_slice = "%s/slice-%d" % (ticket, max(real_snums)) if real_snums else None
+    plan_ref = "%s/plan" % ticket
+    plan_src = plan_ref if plan_ref in branches else top_slice
+    expected_slices = count_plan_slices(
+        _git_show("%s:.qrspi/%s/plan.md" % (plan_src, ticket))) if plan_src else 0
+    pr_summary_committed = _file_in_tree(top_slice, ".qrspi/%s/pr-summary.md" % ticket)
+
     return {
         "ticketId": ticket,
         "assigned": assigned,
@@ -178,7 +225,12 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main"):
         "phases": {
             "design": phase_pr("design"),
             "plan": phase_pr("plan"),
-            "implementation": {"branchExists": bool(real_snums), "slices": slices},
+            "implementation": {
+                "branchExists": bool(real_snums),
+                "slices": slices,
+                "expectedSlices": expected_slices,
+                "prSummaryCommitted": pr_summary_committed,
+            },
         },
     }
 
