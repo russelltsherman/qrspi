@@ -25,8 +25,19 @@ Decision actions:
     entry_blocked   not assigned+Selected and no design branch yet -> do nothing
     run_design      entry gate satisfied, no design branch -> build the design phase
     submit          active phase complete, its branch exists but its PR does not -> submit it
-    wait            active phase PR exists, not approved, no unresolved threads
-    revise          active phase PR has unresolved threads to address (manual)
+    wait            active phase PR exists but is not actionable autonomously: it is
+                    awaiting review, OR it carries unresolved review threads but NO formal
+                    change request. Unresolved threads cannot be cleared here (GitHub thread
+                    mutations 403 on this cross-owned repo — see the gh-cross-account note),
+                    so a thread-only PR is left for the reviewer to resolve rather than
+                    looping an autonomous revise that can never satisfy the thread gate.
+    revise          frontier phase PR carries a formal CHANGES_REQUESTED -> address the
+                    feedback in place and re-request review (AUTONOMOUS). Driven by the
+                    CHANGES_REQUESTED decision, NOT by thread count: the revise worker
+                    re-requests review, which flips reviewDecision back to REVIEW_REQUIRED,
+                    so the next pass returns `wait` instead of re-firing. That decision flip
+                    is the only loop-safe termination signal we have (threads can't be
+                    auto-resolved). Thread resolution is left to the reviewer.
     advance         active phase READY and not the top phase -> build the next phase;
                     OR implementation exists but is unfinished -> build the rest
     land            implementation stack fully READY -> land the whole stack
@@ -104,9 +115,13 @@ def resolve(state):
             return decision("reset", resetToPhase=k, discardPhases=above,
                             reason="Changes requested on %s; discard downstream (%s) and return to %s."
                                    % (k, ", ".join(above), k))
-        # k is the highest existing phase: nothing to discard, revise in place.
+        # k is the highest existing phase: nothing downstream to discard, so address the
+        # change request in place. This is the AUTONOMOUS revise trigger — the revise worker
+        # edits the phase's own artifacts/code and re-requests review (which clears the
+        # CHANGES_REQUESTED), never touching threads (it can't) or downstream phases.
         return decision("revise", phase=k,
-                        reason="Changes requested on %s (top phase); revise in place." % k)
+                        reason="Changes requested on %s (top phase); address in place and "
+                               "re-request review." % k)
 
     # 3. Active phase = highest existing phase.
     active = max(existing, key=_order)
@@ -117,9 +132,15 @@ def resolve(state):
             return decision("submit", phase=active,
                             reason="%s branch exists but its PR has not been submitted." % active)
         if pr.get("unresolvedThreads", 0) > 0:
-            return decision("revise", phase=active,
-                            reason="%s PR has %d unresolved review thread(s) to address."
-                                   % (active, pr["unresolvedThreads"]))
+            # The reset check above already handled CHANGES_REQUESTED, so this is a PR with
+            # lingering review threads but NO formal change request. Threads cannot be
+            # resolved here (GitHub mutations 403 on this cross-owned repo), so an autonomous
+            # revise could never clear the thread gate and would loop. Leave it for the
+            # reviewer to resolve -> wait.
+            return decision("wait", phase=active,
+                            reason="%s PR has %d unresolved review thread(s) and no change "
+                                   "request; left for the reviewer to resolve (threads cannot "
+                                   "be auto-resolved here)." % (active, pr["unresolvedThreads"]))
         if pr.get("reviewDecision") != "APPROVED":
             return decision("wait", phase=active,
                             reason="%s PR awaiting review (reviewDecision=%s)."
@@ -157,8 +178,12 @@ def resolve(state):
         return decision("submit", phase="implementation",
                         reason="Implementation complete; open the slice PR(s).")
     if any(s.get("unresolvedThreads", 0) > 0 for s in slices):
-        return decision("revise", phase="implementation",
-                        reason="One or more slice PRs have unresolved review threads.")
+        # As in the design/plan case: a slice carrying CHANGES_REQUESTED is caught by the
+        # reset check above and routed to revise. Reaching here means unresolved threads with
+        # no change request, which we cannot auto-resolve, so leave them for the reviewer.
+        return decision("wait", phase="implementation",
+                        reason="One or more slice PRs have unresolved review threads and no "
+                               "change request; left for the reviewer to resolve.")
     if any(s.get("reviewDecision") != "APPROVED" for s in slices):
         return decision("wait", phase="implementation",
                         reason="Not all slice PRs are approved yet.")

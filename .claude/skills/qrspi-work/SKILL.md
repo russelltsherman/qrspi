@@ -39,8 +39,12 @@ trunk
 - A formal **CHANGES_REQUESTED** on an upstream phase PR **resets**: all downstream
   phases are discarded (PRs closed, branches deleted, stale artifacts removed) and the
   ticket returns to that phase for revision. Discard is **automatic**.
-- Addressing review feedback (revise) is **manual** — it only happens on an explicit
-  invocation, never from passive automation.
+- Addressing a formal **CHANGES_REQUESTED** on a frontier phase PR (revise) is
+  **autonomous**: the feedback is addressed in place, the phase commit is amended, and
+  review is re-requested (which clears the change request). Review *threads* cannot be
+  resolved here (every gh PR-write mutation 403s on this cross-owned repo), so a PR carrying
+  unresolved threads but **no** change request is left for the reviewer and routes to
+  `wait`, not revise.
 - Nothing merges until **every** PR in the stack is approved + clean; then the whole
   stack lands bottom-up.
 
@@ -290,28 +294,37 @@ hard-stop with the error — never fabricate.
 
 ## action: wait
 
-The active phase PR exists and is awaiting review (no unresolved threads, not yet approved).
-There is nothing to do autonomously — advancement waits on a human reviewer approving the PR.
+The active phase PR exists but cannot be advanced autonomously. Either it is **awaiting
+review** (not yet approved, no change request), or it carries **unresolved review threads
+but no formal change request**. Threads cannot be resolved here — every authenticated gh
+PR-write mutation 403s on this cross-owned repo — so a thread-only PR is left for the
+reviewer to resolve rather than looped through revise (which could never clear the thread
+gate). Advancement waits on the human reviewer.
 
-Print: "`<ticket-id>` `<phase>` PR is awaiting review (`<reviewDecision>`). Nothing to do
-until it is approved. Re-run `work on <ticket-id>` after review." Then exit.
+Print: "`<ticket-id>` `<phase>` PR is awaiting review (`<reviewDecision>`)`<, N unresolved
+thread(s) left for the reviewer>`. Nothing to do until it is approved. Re-run
+`work on <ticket-id>` after review." Then exit.
 
 ---
 
 ## action: revise
 
-The active phase PR has unresolved review threads to address. This is the **manual**
-feedback path. Address feedback **within this phase only** — the cascade is bounded to the
-phase's own artifacts (see `references/review-cascade.md`). Do NOT touch downstream phases
-here; a design-level change that invalidates plan/impl is handled by `reset`, not revise.
+The frontier phase PR carries a formal **CHANGES_REQUESTED**. This is now **autonomous**:
+address the feedback **within this phase only** — the cascade is bounded to the phase's own
+artifacts (see `references/review-cascade.md`). Do NOT touch downstream phases here; a
+design-level change that invalidates plan/impl is handled by `reset`, not revise.
+
+> The resolver emits `revise` **only** for a CHANGES_REQUESTED frontier PR, never for
+> threads alone — re-requesting review clears the change request (the loop-safe termination
+> signal), whereas threads cannot be cleared here, so a thread-only PR routes to `wait`.
 
 1. Ensure you're on the phase branch:
    ```bash
-   gt checkout <ticket-id>/<phase> --no-interactive    # for implementation, the affected slice branch
+   gt checkout <ticket-id>/<phase> --no-interactive    # for implementation, the affected slice branch(es), lowest first
    ```
-2. Read the unresolved threads:
+2. Read the change request — these are **read-only queries** (writes 403; see below):
    ```bash
-   gh pr view <number> --json reviews,comments --jq '.reviews[] | select(.state != "APPROVED")'
+   gh pr view <number> --json reviews,comments --jq '.reviews[] | select(.state == "CHANGES_REQUESTED")'
    gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved comments(first:20){nodes{path body}}}}}}}' \
      -F o="$OWNER" -F r="$REPO" -F n=<number> --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)'
    ```
@@ -329,11 +342,19 @@ here; a design-level change that invalidates plan/impl is handled by `reset`, no
    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
    EOF
    )"
-   gt submit --publish --no-edit --no-interactive  # --stack if implementation
    ```
-5. Resolve the addressed threads on GitHub if appropriate, and print which artifacts/files
-   changed. Note: the reviewer must re-review — `CHANGES_REQUESTED` stays in force until
-   they approve.
+5. **Re-request review** so the stale `CHANGES_REQUESTED` is cleared (this is what lets the
+   next pass return `wait` rather than re-firing revise):
+   ```bash
+   gt submit --publish --no-edit --rerequest-review --no-interactive  # --stack if implementation
+   ```
+6. **Do NOT resolve or reply to review threads, and do NOT run any `gh pr`/GraphQL
+   mutation.** Every authenticated gh PR write 403s here (the bot's fine-grained PAT cannot
+   write a repo owned by a *different* user — see the gh-cross-account note). Thread
+   resolution is the reviewer's job; leave threads as-is. Re-requesting review (via
+   Graphite's write-capable App credential) flips `reviewDecision` back to
+   `REVIEW_REQUIRED`; the reviewer must still re-review to approve. Print which
+   artifacts/files changed.
 
 ---
 

@@ -45,14 +45,20 @@ Selected (assigned)
   unresolved review threads) builds the next phase on top.
 - **Reset** is automatic: a formal `CHANGES_REQUESTED` on an upstream phase PR discards every
   downstream phase (PRs closed, branches deleted, stale artifacts removed) and returns the
-  ticket to that phase. **Revise** (addressing review comments) is *manual* — only on an
-  explicit invocation.
+  ticket to that phase. **Revise** is also automatic: a formal `CHANGES_REQUESTED` on a
+  *frontier* phase PR (nothing downstream to discard) is addressed in place — the worker edits
+  the phase's own artifacts/code, amends the phase commit, and re-requests review (which clears
+  the change request, the loop-safe termination signal). Review *threads* cannot be resolved
+  here (every `gh` PR-write mutation 403s on this cross-owned repo), so a PR with unresolved
+  threads but **no** change request is left for the reviewer and resolves to `wait`, not revise.
 - **`*Approved` Linear states were dropped** — approval lives in the PR. Reporting statuses:
   `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.
 - The decision is computed by a tested resolver (`scripts/qrspi_resolve_state.py`, unit-tested);
   the orchestrator and batch both call it rather than re-deriving state logic.
 - The `qrspi-batch` workflow drives the autonomously-runnable actions across assigned tickets
-  (run_design, advance, submit, land, automatic reset); it skips `wait` and the manual `revise`.
+  (run_design, advance, submit, land, automatic reset, and revise — addressing a frontier
+  `CHANGES_REQUESTED` PR then re-requesting review); it skips only `wait` (not-yet-approved or
+  thread-only PRs awaiting the reviewer).
 
 ### Available skills (invoke with / or let Claude auto-invoke)
 

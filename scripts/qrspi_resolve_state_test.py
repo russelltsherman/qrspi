@@ -64,9 +64,12 @@ case("design PR under review, no threads -> wait",
      state(phases={"design": _phase(decision="REVIEW_REQUIRED")}),
      {"action": "wait", "phase": "design"})
 
-case("design PR with unresolved threads -> revise",
+# Unresolved threads WITHOUT a formal change request are no longer an autonomous revise:
+# threads can't be resolved here (GitHub mutations 403 on this cross-owned repo), so firing
+# revise would loop. They route to `wait` for the reviewer instead.
+case("design PR approved but with unresolved threads -> wait (threads can't be auto-resolved)",
      state(phases={"design": _phase(decision="APPROVED", threads=2)}),
-     {"action": "revise", "phase": "design"})
+     {"action": "wait", "phase": "design"})
 
 # --- advance ----------------------------------------------------------------
 case("design approved+clean, no plan -> advance to plan",
@@ -129,12 +132,12 @@ case("one slice not approved -> wait",
                                             _slice(2, decision="REVIEW_REQUIRED")])}),
      {"action": "wait", "phase": "implementation"})
 
-case("one slice has unresolved threads -> revise",
+case("one slice has unresolved threads but no change request -> wait (reviewer resolves)",
      state(phases={"design": _phase(decision="APPROVED"),
                    "plan": _phase(decision="APPROVED"),
                    "implementation": _impl([_slice(1, decision="APPROVED", threads=1),
                                             _slice(2, decision="APPROVED")])}),
-     {"action": "revise", "phase": "implementation"})
+     {"action": "wait", "phase": "implementation"})
 
 # --- reset (symmetric, decisions 7 & 8) -------------------------------------
 case("design changes requested with plan+impl -> reset to design, discard both",
@@ -156,6 +159,20 @@ case("implementation changes requested (top) -> revise in place, no discard",
                    "plan": _phase(decision="APPROVED"),
                    "implementation": _impl([_slice(1, decision="CHANGES_REQUESTED")])}),
      {"action": "revise", "phase": "implementation"})
+
+# A formal change request OUTRANKS the threads->wait routing: a frontier PR that is
+# CHANGES_REQUESTED *and* carries unresolved threads is still an autonomous revise (the
+# worker addresses the feedback and re-requests review; the lingering thread is left to the
+# reviewer). Guards against a future reorder that would let threads->wait swallow a CR.
+case("impl CHANGES_REQUESTED with unresolved threads (top) -> revise (CR outranks threads)",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="CHANGES_REQUESTED", threads=3)])}),
+     {"action": "revise", "phase": "implementation"})
+
+case("design CHANGES_REQUESTED with unresolved threads (top) -> revise (CR outranks threads)",
+     state(phases={"design": _phase(decision="CHANGES_REQUESTED", threads=2)}),
+     {"action": "revise", "phase": "design"})
 
 case("design AND plan changes requested -> reset to lowest (design)",
      state(phases={"design": _phase(decision="CHANGES_REQUESTED"),

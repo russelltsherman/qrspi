@@ -1,7 +1,7 @@
 export const meta = {
   name: 'qrspi-batch',
   description: 'Drive every assigned in-flight QRSPI ticket one PR-gated step forward by resolving each ticket\'s PR review state and spawning the typed phase agents from the workflow script itself',
-  whenToUse: 'After assigning tickets and moving them to Selected, or after approving phase PRs. Runs the autonomously-runnable actions (run_design, advance, submit, land, and automatic reset/discard); leaves manual review-revision (revise) and not-yet-approved tickets (wait) untouched.',
+  whenToUse: 'After assigning tickets and moving them to Selected, or after approving phase PRs. Runs the autonomously-runnable actions (run_design, advance, submit, land, automatic reset/discard, and revise — addressing a CHANGES_REQUESTED phase PR in place then re-requesting review); leaves not-yet-approved tickets (wait) untouched.',
   phases: [
     { title: 'Query', detail: 'List assigned Selected + in-flight (Design/Plan/Code Review) tickets' },
     { title: 'Resolve', detail: 'Per ticket: worktree + PR-state gather + tested resolver → decision (worker agent)' },
@@ -33,10 +33,17 @@ export const meta = {
 // re-derive the decision logic in JS — that would drift from the tested resolver.
 //
 // Per run, each ticket advances at most ONE autonomous step (each step lands the
-// ticket in a review-wait state). Manual `revise` (addressing CHANGES_REQUESTED
-// comments) and not-yet-approved `wait` tickets are skipped. Automatic downstream
-// `reset`/discard IS performed (decision 10), then the ticket stops for manual
-// revise of the reset-to phase.
+// ticket in a review-wait state). `revise` (addressing a formal CHANGES_REQUESTED on a
+// frontier phase PR) IS now autonomous: the revise worker edits the phase's own
+// artifacts/code in place, amends the phase commit keeping its subject, and re-requests
+// review via `gt submit --rerequest-review`. Re-requesting flips the PR's reviewDecision
+// back to REVIEW_REQUIRED, so the next pass resolves to `wait` instead of re-firing —
+// that decision flip is the loop-safe termination signal, because review THREADS cannot
+// be resolved here (GitHub thread mutations 403 on this cross-owned repo — see the
+// gh-cross-account note), so threads are left for the reviewer and a thread-only PR (no
+// change request) resolves to `wait`, never revise. Not-yet-approved `wait` tickets are
+// skipped. Automatic downstream `reset`/discard IS performed (decision 10), then the
+// ticket stops at the reset-to phase for its own (now autonomous) CHANGES_REQUESTED revise.
 // ---------------------------------------------------------------------------
 
 const SKILL = '.claude/skills/qrspi-work/SKILL.md'
@@ -558,6 +565,43 @@ Return: ok, newStatus, summary (name what was discarded).`,
 }
 
 // ===========================================================================
+// ACTION: revise  (a formal CHANGES_REQUESTED on a frontier phase PR — address the
+// feedback in place, amend the phase commit, and re-request review)
+// ===========================================================================
+// AUTONOMOUS (per the user's decision). The resolver only emits `revise` when the frontier
+// phase PR carries a formal CHANGES_REQUESTED (NOT for thread-only PRs — those route to
+// `wait`, since their threads can't be cleared here). The worker:
+//   - reads the change-request feedback (a READ via gh graphql/pr view — works fine),
+//   - addresses it WITHIN the phase only (the cascade is bounded to the phase's own
+//     artifacts; a design-level change that invalidates plan/impl is `reset`, not revise),
+//   - amends the phase commit IN PLACE keeping its exact subject, then
+//   - `gt submit --publish --no-edit --rerequest-review` (+ `--stack` for implementation).
+// Re-requesting review (Graphite's write-capable App credential) flips reviewDecision back
+// to REVIEW_REQUIRED, which is what lets the next batch pass return `wait` instead of looping.
+// It NEVER attempts to resolve or reply to review threads: every authenticated gh PR-write
+// mutation 403s on this cross-owned repo (see the gh-cross-account note), so thread
+// resolution is left to the reviewer, exactly as for the rare thread-only `wait` PR.
+async function doRevise(t, r) {
+  phase('Finalize')
+  const d = r.decision
+  const fin = await agent(
+    `You are the REVISE worker for ${t.id} (frontier phase: ${d.phase}), in ${r.worktreeDir}. A formal CHANGES_REQUESTED landed on the ${d.phase} PR. Address it AUTONOMOUSLY, following the "action: revise" steps of ${SKILL}, with these REQUIRED adaptations:
+- DO NOT attempt to resolve or reply to review threads, and DO NOT run any \`gh pr\`/GraphQL mutation: every authenticated gh PR write 403s on this repo. Reading feedback via \`gh pr view\`/\`gh api graphql\` queries is fine. Thread resolution is the reviewer's job — leave threads as-is.
+- Stay WITHIN the ${d.phase} phase only — never edit a downstream phase's artifacts (that is \`reset\`, not revise).
+Steps:
+1. Identify the branch(es) to fix. For design/plan: \`gt checkout ${t.id}/${d.phase} --no-interactive\`. For implementation: query the ticket's slice PRs (\`gh pr list --head ${t.id}/slice-... \` or graphql) and address EVERY slice whose PR is CHANGES_REQUESTED, lowest slice number first (changes restack upward).
+2. Read the change request: the CHANGES_REQUESTED review body AND any unresolved thread comments (READ-only queries per the SKILL).
+3. Address the feedback by editing the phase's artifacts/code in ${r.worktreeDir}.
+4. Amend the phase commit IN PLACE with \`gt modify --no-interactive\`, keeping its EXISTING subject verbatim (\`${t.id} [QR]: Design\` / \`${t.id} [SP]: Plan\` / \`${t.id} [I] <N>/<total>: <goal>\` for a slice) — do NOT rename it to an "address feedback" subject.
+5. Re-request review so the stale CHANGES_REQUESTED is cleared: \`gt submit --publish --no-edit --rerequest-review${reviewerFlags(r)}${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`. Do NOT run \`gh pr edit\`.
+6. BEST-EFFORT keep Linear in the current review status (a failed Linear write is a WARN, still return ok:true if the changes were pushed and review re-requested).
+Return: ok, prUrl, newStatus, summary (name what you changed and confirm review was re-requested; if you could not address the feedback, return ok:false with the verbatim reason — never fabricate a fix).`,
+    { label: `revise:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
+  )
+  return finResult(t, fin, `revise:${d.phase}`)
+}
+
+// ===========================================================================
 // ACTION: land  (all PRs approved+clean — merge the stack bottom-up, finalize)
 // ===========================================================================
 async function doLand(t, r) {
@@ -662,9 +706,9 @@ for (let i = 0; i < tickets.length; i++) {
         break
       case 'submit': res = await doSubmit(t, r); break
       case 'reset': res = await doReset(t, r); break
+      case 'revise': res = await doRevise(t, r); break
       case 'land': res = await doLand(t, r); break
-      case 'wait':         // not-yet-approved: nothing to do
-      case 'revise':       // manual feedback path — never automated
+      case 'wait':         // not-yet-approved (or thread-only PR awaiting reviewer): nothing to do
       case 'entry_blocked':
       default:
         res = skip(t, r.decision, `Skipped (${a}): ${r.decision.reason}`)
