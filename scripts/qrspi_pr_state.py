@@ -26,9 +26,12 @@ import sys
 PR_QUERY = """
 query($owner:String!, $repo:String!, $head:String!) {
   repository(owner:$owner, name:$repo) {
-    pullRequests(headRefName:$head, first:5, states:OPEN, orderBy:{field:CREATED_AT, direction:DESC}) {
+    pullRequests(headRefName:$head, first:5, orderBy:{field:CREATED_AT, direction:DESC}) {
       nodes {
         number
+        state
+        merged
+        mergedAt
         reviewDecision
         reviewThreads(first:100) { nodes { isResolved } }
       }
@@ -51,10 +54,15 @@ def parse_pr_nodes(nodes):
     normalized PR shape. No open PR -> prExists False.
 
     GitHub's reviewDecision is null until a review exists; we normalize null to
-    None so the resolver treats it as 'awaiting review' (not approved)."""
+    None so the resolver treats it as 'awaiting review' (not approved).
+
+    The merge fields (merged/state/mergedAt) are ADDITIVE: existing OPEN-path
+    callers (resolver/restack) read only prExists/number/reviewDecision/
+    unresolvedThreads and are unaffected (ref: Decision 1, Q2, Q7)."""
     if not nodes:
         return {"prExists": False, "number": None,
-                "reviewDecision": None, "unresolvedThreads": 0}
+                "reviewDecision": None, "unresolvedThreads": 0,
+                "merged": False, "state": None, "mergedAt": None}
     node = nodes[0]
     threads = (node.get("reviewThreads") or {}).get("nodes", [])
     return {
@@ -62,7 +70,48 @@ def parse_pr_nodes(nodes):
         "number": node.get("number"),
         "reviewDecision": node.get("reviewDecision"),
         "unresolvedThreads": unresolved_thread_count(threads),
+        "merged": bool(node.get("merged")),
+        "state": node.get("state"),
+        "mergedAt": node.get("mergedAt"),
     }
+
+
+def stack_merge_state(branches, graphql_nodes):
+    """Map each real branch to its merge status from MERGED-aware GraphQL results.
+
+    `branches` is the list of real branch head-ref names for one ticket's stack.
+    `graphql_nodes` maps a branch head-ref name -> the GraphQL pullRequests.nodes
+    list returned for that head ref (the same shape parse_pr_nodes consumes). A
+    branch whose head ref GitHub has ALREADY DELETED (post-merge ref cleanup) — or
+    that simply has no PR node — is mapped to the documented sentinel
+    {merged: False, prNumber: None, state: None}, so an absent ref never crashes
+    the gather (ref: Contracts, OQ3).
+
+    Returns the StackMergeState shape:
+        { branch: { merged: bool, prNumber: int|None, state: str|None } }"""
+    out = {}
+    for b in branches:
+        nodes = (graphql_nodes or {}).get(b)
+        if not nodes:
+            out[b] = {"merged": False, "prNumber": None, "state": None}
+            continue
+        pr = parse_pr_nodes(nodes)
+        out[b] = {
+            "merged": pr["merged"],
+            "prNumber": pr["number"],
+            "state": pr["state"],
+        }
+    return out
+
+
+def is_stack_fully_merged(merge_state):
+    """True only when EVERY real branch's PR is merged (all-or-nothing, AC2).
+
+    An empty stack returns False (nothing merged is not 'fully merged'), and any
+    single unmerged branch makes the whole stack not-fully-merged."""
+    if not merge_state:
+        return False
+    return all(entry.get("merged") for entry in merge_state.values())
 
 
 def slice_numbers(branch_lines):
@@ -192,7 +241,7 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main"):
         head = "%s/%s" % (ticket, name)
         exists = head in real
         pr = parse_pr_nodes(_query_pr(owner, repo, head)) if exists else \
-            {"prExists": False, "number": None, "reviewDecision": None, "unresolvedThreads": 0}
+            parse_pr_nodes([])
         pr["branchExists"] = exists
         return pr
 
