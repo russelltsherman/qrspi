@@ -12,6 +12,8 @@ from qrspi_pr_state import (
     branch_set,
     real_branches,
     count_plan_slices,
+    stack_merge_state,
+    is_stack_fully_merged,
 )
 
 failures = 0
@@ -41,23 +43,35 @@ check("missing isResolved treated as unresolved",
 # --- parse_pr_nodes ---------------------------------------------------------
 check("no PR nodes -> prExists False",
       parse_pr_nodes([]),
-      {"prExists": False, "number": None, "reviewDecision": None, "unresolvedThreads": 0})
+      {"prExists": False, "number": None, "reviewDecision": None, "unresolvedThreads": 0,
+       "merged": False, "state": None, "mergedAt": None})
 
 check("approved, all threads resolved",
-      parse_pr_nodes([{"number": 52, "reviewDecision": "APPROVED",
+      parse_pr_nodes([{"number": 52, "reviewDecision": "APPROVED", "state": "OPEN",
                        "reviewThreads": {"nodes": [{"isResolved": True}]}}]),
-      {"prExists": True, "number": 52, "reviewDecision": "APPROVED", "unresolvedThreads": 0})
+      {"prExists": True, "number": 52, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
+       "merged": False, "state": "OPEN", "mergedAt": None})
 
 check("changes requested with unresolved threads",
-      parse_pr_nodes([{"number": 7, "reviewDecision": "CHANGES_REQUESTED",
+      parse_pr_nodes([{"number": 7, "reviewDecision": "CHANGES_REQUESTED", "state": "OPEN",
                        "reviewThreads": {"nodes": [{"isResolved": False},
                                                    {"isResolved": True}]}}]),
-      {"prExists": True, "number": 7, "reviewDecision": "CHANGES_REQUESTED", "unresolvedThreads": 1})
+      {"prExists": True, "number": 7, "reviewDecision": "CHANGES_REQUESTED", "unresolvedThreads": 1,
+       "merged": False, "state": "OPEN", "mergedAt": None})
 
 check("null reviewDecision normalized to None",
-      parse_pr_nodes([{"number": 9, "reviewDecision": None,
+      parse_pr_nodes([{"number": 9, "reviewDecision": None, "state": "OPEN",
                        "reviewThreads": {"nodes": []}}]),
-      {"prExists": True, "number": 9, "reviewDecision": None, "unresolvedThreads": 0})
+      {"prExists": True, "number": 9, "reviewDecision": None, "unresolvedThreads": 0,
+       "merged": False, "state": "OPEN", "mergedAt": None})
+
+# --- parse_pr_nodes: additive merge fields (Decision 1, Q2, Q7) -------------
+check("merged PR surfaces merged/state/mergedAt",
+      parse_pr_nodes([{"number": 60, "reviewDecision": "APPROVED", "state": "MERGED",
+                       "merged": True, "mergedAt": "2026-06-08T00:00:00Z",
+                       "reviewThreads": {"nodes": []}}]),
+      {"prExists": True, "number": 60, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
+       "merged": True, "state": "MERGED", "mergedAt": "2026-06-08T00:00:00Z"})
 
 check("picks first node when multiple returned",
       parse_pr_nodes([{"number": 100, "reviewDecision": "APPROVED",
@@ -130,6 +144,55 @@ check("dedupes a repeated slice number",
 check("empty / None plan text -> 0",
       count_plan_slices(""),
       0)
+
+
+# --- stack_merge_state / is_stack_fully_merged (Decision 1, AC2, OQ3) -------
+def _node(number, state, merged):
+    return [{"number": number, "state": state, "merged": merged,
+             "reviewDecision": "APPROVED", "reviewThreads": {"nodes": []}}]
+
+
+# Case 1: fully-merged stack -> every branch merged True + predicate True.
+_fully_merged = stack_merge_state(
+    ["RUS-1/slice-1", "RUS-1/slice-2"],
+    {"RUS-1/slice-1": _node(10, "MERGED", True),
+     "RUS-1/slice-2": _node(11, "MERGED", True)})
+check("fully-merged: all branches merged",
+      _fully_merged,
+      {"RUS-1/slice-1": {"merged": True, "prNumber": 10, "state": "MERGED"},
+       "RUS-1/slice-2": {"merged": True, "prNumber": 11, "state": "MERGED"}})
+check("fully-merged: predicate True",
+      is_stack_fully_merged(_fully_merged), True)
+
+# Case 2: partially-merged -> predicate False.
+_partial = stack_merge_state(
+    ["RUS-1/slice-1", "RUS-1/slice-2"],
+    {"RUS-1/slice-1": _node(10, "MERGED", True),
+     "RUS-1/slice-2": _node(11, "OPEN", False)})
+check("partially-merged: predicate False",
+      is_stack_fully_merged(_partial), False)
+
+# Case 3: in-flight (all OPEN) -> predicate False.
+_inflight = stack_merge_state(
+    ["RUS-1/slice-1", "RUS-1/slice-2"],
+    {"RUS-1/slice-1": _node(10, "OPEN", False),
+     "RUS-1/slice-2": _node(11, "OPEN", False)})
+check("in-flight (all OPEN): predicate False",
+      is_stack_fully_merged(_inflight), False)
+
+# Case 4: GitHub already deleted the head ref -> sentinel, no crash.
+_deleted = stack_merge_state(
+    ["RUS-1/slice-1", "RUS-1/slice-2"],
+    {"RUS-1/slice-1": _node(10, "MERGED", True)})  # slice-2 head ref absent
+check("deleted head ref -> documented sentinel",
+      _deleted["RUS-1/slice-2"],
+      {"merged": False, "prNumber": None, "state": None})
+check("deleted head ref makes stack not fully merged",
+      is_stack_fully_merged(_deleted), False)
+
+# Edge: empty stack -> predicate False (nothing merged is not 'fully merged').
+check("empty stack: predicate False",
+      is_stack_fully_merged({}), False)
 
 
 def run():
