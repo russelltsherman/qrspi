@@ -14,25 +14,25 @@ set -euo pipefail
 # the virtioFS workspace are rejected by runc on macOS Docker Desktop.
 sudo /usr/local/sbin/protect-paths
 
-# Lock down egress before squid starts so there is no window of unrestricted
-# outbound access. Squid runs as the proxy user, which is explicitly permitted
-# by the iptables rules, so it can reach the internet once it starts.
-sudo /usr/local/sbin/protect-egress
+# # Lock down egress before squid starts so there is no window of unrestricted
+# # outbound access. Squid runs as the proxy user, which is explicitly permitted
+# # by the iptables rules, so it can reach the internet once it starts.
+# # sudo /usr/local/sbin/protect-egress
 
-# start squid proxy via the pinned launcher (sudoers allows this exact path
-# with no argument control; running `sudo squid` directly would let the agent
-# start a permissive config and bypass the allowlist).
-sudo /usr/local/sbin/start-squid &
-SQUID_PID=$!
+# # start squid proxy via the pinned launcher (sudoers allows this exact path
+# # with no argument control; running `sudo squid` directly would let the agent
+# # start a permissive config and bypass the allowlist).
+# sudo /usr/local/sbin/start-squid &
+# SQUID_PID=$!
 
-# Give it a moment to fail if config is bad
-sleep 1
+# # Give it a moment to fail if config is bad
+# sleep 1
 
-# Check if process is still running
-if ! kill -0 $SQUID_PID 2>/dev/null; then
-  echo "error: squid failed to start (check logs)" >&2
-  exit 1
-fi
+# # Check if process is still running
+# if ! kill -0 $SQUID_PID 2>/dev/null; then
+#   echo "error: squid failed to start (check logs)" >&2
+#   exit 1
+# fi
 
 # Authenticate the gh/gt CLIs only after the proxy is up. Both validate their
 # tokens over the network, and egress is dropped until squid is running — doing

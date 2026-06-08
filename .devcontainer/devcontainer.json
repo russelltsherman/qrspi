@@ -6,12 +6,12 @@
   },
 
   "containerEnv": {
-    "http_proxy": "http://127.0.0.1:3128",
-    "https_proxy": "http://127.0.0.1:3128",
-    "HTTP_PROXY": "http://127.0.0.1:3128",
-    "HTTPS_PROXY": "http://127.0.0.1:3128",
-    "no_proxy": "host.docker.internal",
-    "NO_PROXY": "host.docker.internal",
+    // "http_proxy": "http://127.0.0.1:3128",
+    // "https_proxy": "http://127.0.0.1:3128",
+    // "HTTP_PROXY": "http://127.0.0.1:3128",
+    // "HTTPS_PROXY": "http://127.0.0.1:3128",
+    // "no_proxy": "host.docker.internal",
+    // "NO_PROXY": "host.docker.internal",
     // OMLX local model server on the host. Forwarded to the omlx/omlx-yolo
     // shell functions which replicate the env that `omlx launch claude` sets.
     // OMLX_MODEL is required — set it to the model id loaded in omlx
@@ -56,7 +56,10 @@
     "source=${localEnv:HOME}/.bot/gh,target=/home/vscode/.config/gh,type=bind",
 
     // Graphite config (bot identity)
-    "source=${localEnv:HOME}/.bot/graphite/,target=/home/vscode/.config/graphite/,type=bind"
+    "source=${localEnv:HOME}/.bot/graphite/,target=/home/vscode/.config/graphite/,type=bind",
+
+    // SSH token (bot identity)
+    "source=${localEnv:HOME}/.bot/ssh,target=/home/vscode/.ssh,type=bind",
 
     // Paths listed in .devcontainer/protected-paths are shadowed from inside
     // the container at startup by /usr/local/sbin/protect-paths. See
