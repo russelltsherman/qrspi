@@ -26,7 +26,7 @@ import sys
 PR_QUERY = """
 query($owner:String!, $repo:String!, $head:String!) {
   repository(owner:$owner, name:$repo) {
-    pullRequests(headRefName:$head, first:5, orderBy:{field:CREATED_AT, direction:DESC}) {
+    pullRequests(headRefName:$head, first:25, orderBy:{field:CREATED_AT, direction:DESC}) {
       nodes {
         number
         state
@@ -49,6 +49,35 @@ def unresolved_thread_count(review_threads):
     return sum(1 for t in (review_threads or []) if not t.get("isResolved"))
 
 
+def select_pr(nodes, prefer):
+    """Pick one PR node from the GraphQL pullRequests.nodes list for one head ref.
+
+    A single named selection primitive over the fetched nodes so the two
+    consumers (advancement vs merge/land) state their intent explicitly instead
+    of both reaching for nodes[0] (ref: Contracts select_pr; Decision 1 Option C,
+    Decision 2 Option A).
+
+    prefer="active"  -> the advancement-facing PR: identity nodes[0] (newest by
+                        CREATED_AT DESC), or None for an empty list. This reduces
+                        to the current selection byte-for-byte for the common
+                        single-PR case (AC3, Q10, OQ3).
+    prefer="merged"  -> the merge/land-facing PR: the first node whose merged is
+                        True if ANY fetched node is MERGED ("any MERGED node wins",
+                        order-independent), else falls back to the active selection
+                        so all-open/all-closed branches behave exactly as today
+                        (AC1, Q8/Q9, Unverified Assumption 3).
+
+    Any other prefer raises ValueError."""
+    if prefer == "active":
+        return nodes[0] if nodes else None
+    if prefer == "merged":
+        for node in (nodes or []):
+            if node.get("merged") is True:
+                return node
+        return nodes[0] if nodes else None
+    raise ValueError("unknown prefer: %r" % (prefer,))
+
+
 def parse_pr_nodes(nodes):
     """Reduce the GraphQL pullRequests.nodes list for one head branch to the
     normalized PR shape. No open PR -> prExists False.
@@ -58,12 +87,16 @@ def parse_pr_nodes(nodes):
 
     The merge fields (merged/state/mergedAt) are ADDITIVE: existing OPEN-path
     callers (resolver/restack) read only prExists/number/reviewDecision/
-    unresolvedThreads and are unaffected (ref: Decision 1, Q2, Q7)."""
-    if not nodes:
+    unresolvedThreads and are unaffected (ref: Decision 1, Q2, Q7).
+
+    Selection is the advancement-facing PR via select_pr(nodes, prefer="active")
+    — identity nodes[0] — so this stays byte-for-byte the current behavior; the
+    merge/land path uses prefer="merged" separately (ref: AC3, Q10, OQ3)."""
+    node = select_pr(nodes, prefer="active")
+    if node is None:
         return {"prExists": False, "number": None,
                 "reviewDecision": None, "unresolvedThreads": 0,
                 "merged": False, "state": None, "mergedAt": None}
-    node = nodes[0]
     threads = (node.get("reviewThreads") or {}).get("nodes", [])
     return {
         "prExists": True,
@@ -87,19 +120,33 @@ def stack_merge_state(branches, graphql_nodes):
     {merged: False, prNumber: None, state: None}, so an absent ref never crashes
     the gather (ref: Contracts, OQ3).
 
+    Per-branch merge status is sourced from the MERGED-preferring selection
+    (select_pr(nodes, prefer="merged")) — "any fetched node is MERGED" wins — so a
+    branch whose work merged reports merged: True even when a NEWER non-merged PR
+    sits on the same head ref (the index-0 bug that stranded landed stacks). For
+    an all-open/all-closed branch the scan falls back to the active selection, so
+    merged stays False exactly as today (ref: AC1, AC2, AC5; Unverified Assumption 3).
+
     Returns the StackMergeState shape:
-        { branch: { merged: bool, prNumber: int|None, state: str|None } }"""
+        { branch: { merged: bool, prNumber: int|None, state: str|None,
+                    mergedByPr: int|None } }
+    mergedByPr is purely additive observability — the number of the PR that drove
+    the merged: True verdict (None when not merged); no consumer depends on it
+    (ref: New Types note, Design Delta §1, Q13)."""
     out = {}
     for b in branches:
         nodes = (graphql_nodes or {}).get(b)
         if not nodes:
-            out[b] = {"merged": False, "prNumber": None, "state": None}
+            out[b] = {"merged": False, "prNumber": None, "state": None,
+                      "mergedByPr": None}
             continue
-        pr = parse_pr_nodes(nodes)
+        node = select_pr(nodes, prefer="merged")
+        merged = bool(node.get("merged"))
         out[b] = {
-            "merged": pr["merged"],
-            "prNumber": pr["number"],
-            "state": pr["state"],
+            "merged": merged,
+            "prNumber": node.get("number"),
+            "state": node.get("state"),
+            "mergedByPr": node.get("number") if merged else None,
         }
     return out
 
