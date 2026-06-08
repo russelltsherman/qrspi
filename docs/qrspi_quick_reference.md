@@ -368,7 +368,7 @@ gt delete <id>/plan       --force --close --no-interactive
 
 # LAND: only when EVERY PR is approved + clean — merge bottom-up
 gt checkout <id>/slice-1 --no-interactive   # or <id>/design if plan-only
-gt merge --confirm --no-interactive          # merges the stack bottom-up
+gt merge --no-interactive                    # merges the stack bottom-up (NOT --confirm: forces a prompt --no-interactive can't satisfy)
 ```
 
 > The held-open stack is never `gt sync`'d mid-feature (that would delete branches

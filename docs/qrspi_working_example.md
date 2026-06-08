@@ -1189,7 +1189,7 @@ The engineer **approves all three slice PRs**. Now every PR in the stack — des
 ```
 gt checkout RUS-42/slice-1 --no-interactive
 gt submit --stack --no-edit --no-interactive   # ensure remotes current
-gt merge --confirm --no-interactive            # merges design → plan → slice-1..3, bottom-up
+gt merge --no-interactive                      # merges design → plan → slice-1..3, bottom-up (NOT --confirm: forces a prompt --no-interactive can't satisfy)
 ```
 
 After the merge, the orchestrator syncs `main` (`gt sync --force`, which prunes the merged branches), removes the `.qrspi/RUS-42/` artifacts and the `.worktrees/RUS-42/` worktree, and projects the Linear status to **Done** (best-effort).

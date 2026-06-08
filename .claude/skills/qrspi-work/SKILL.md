@@ -401,7 +401,7 @@ Every PR in the stack is approved + clean. Land the whole stack bottom-up and fi
    ```bash
    gt checkout <ticket-id>/slice-1 --no-interactive   # or <id>/design if no slices/plan-only feature
    gt submit --publish --stack --no-edit --no-interactive   # ensure remotes current
-   gt merge --confirm --no-interactive                 # merges bottom-up
+   gt merge --no-interactive                           # merges bottom-up (NOT --confirm: it forces a prompt that --no-interactive cannot satisfy)
    ```
 2. Reap the worktree, local branches, and remote refs with the deterministic, tested
    cleanup script — **do NOT** hand-run `gt sync --force` or `git worktree remove --force`
