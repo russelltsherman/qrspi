@@ -49,9 +49,6 @@
     // Codex Config
     "source=${localEnv:HOME}/.codex/,target=/home/vscode/.codex/,type=bind",
 
-    // SSH config (bot identity)
-    "source=${localEnv:HOME}/.bot/ssh/,target=/home/vscode/.ssh/,type=bind",
-
     // Git config (bot identity)
     "source=${localEnv:HOME}/.bot/gitconfig,target=/home/vscode/.gitconfig,type=bind",
 
