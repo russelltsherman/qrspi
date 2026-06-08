@@ -60,3 +60,36 @@
 - Infra errors (gh/git/gt failures) are caught once in `run()` and surfaced as `{ok:false, decision:"skip", error:"<verbatim>"}` — never retried.
 
 ---
+
+## Session 3 — Slice 3
+
+**Timestamp:** 2026-06-08
+**Tasks completed:** T19, T20, T21, T24 (T22/T23 partial — see e2e gaps)
+**Tasks failed:** none
+**Tests:**
+
+- `node --check .claude/workflows/qrspi-batch.js` → SYNTAX_OK (ESM + top-level await parse clean)
+- `python3 scripts/qrspi_cleanup_test.py` → 8 passed, 0 failed (contract unchanged; confirms no incidental break)
+- `parseCleanupEnvelope` verified in-node against the REAL `qrspi_cleanup.py --dry-run` stdout plus destroy/blocked/infra/garbled edges → all 5 PASS; candidate-id filter (`/^[A-Z]+-[0-9]+$/` + dedup + sort) verified → drops non-ticket/lowercase, dedups, sorts
+- T24 grep `grep -nE 'git worktree remove --force|gt sync --force' .claude/skills/qrspi-work/SKILL.md` → the only remaining hit (line 406) is the new *prohibition* ("do NOT hand-run …") inside the script-invocation prose; the old executable land-cleanup commands are gone
+
+**Deviations from structure.md:**
+
+- none on contracts. `doLand` now invokes `qrspi_cleanup.py --ticket <id>` as a single verbatim command and folds the parsed `CleanupEnvelope` into `results` (per the batch-invocation contract); reconciliation invokes the same script per candidate.
+
+**Deviations from plan.md:**
+
+- none. T19/T20/T21 implemented as specified. One scope clarification on T24: `git worktree remove "$WORKTREE_PATH" --force 2>/dev/null` in the SKILL's "Stale worktree recovery" section (the pre-`git worktree add` retry path, now line 603) is INTENTIONALLY preserved — it is not land-cleanup and the cleanup script does not cover that path. Only the `action: land` executable cleanup prose was replaced. The remaining `--force` grep hit (line 406) is a negated reference instructing the worker NOT to hand-run those mutations.
+
+**Real e2e gaps (carried from Slice 2 — still need a real merged ticket + the live Workflow runner):**
+
+- T22 (e2e land) and T23 (e2e reconciliation real-reap) were NOT run against an actually-merged ticket: the JS Workflow runner is not executable in this sandbox and no merged ticket exists in-flight. Verified instead: the JS parses cleanly; the cleanup script's `--dry-run` envelope (the exact shape `doLand`/reconciliation consume) is well-formed and round-trips through `parseCleanupEnvelope`; the classifier `destroy`/`blocked`/`skip` paths are unit-tested (Slice 2). The destroy reap (`git worktree remove` + `git branch -D` + `gt sync --force`, all inside the script) has STILL not been run for real — only the dry-run gate and classifier.
+
+**Notes for next session:**
+
+- `doLand` (`.claude/workflows/qrspi-batch.js`) now: (1) runs the land worker for merge + Linear→Done ONLY (the worker no longer removes the worktree / deletes branches / runs `gt sync --force` — its prompt forbids it); (2) iff `fin.ok`, calls `runCleanup(t.id, dryRun=false, 'Finalize')`. A failed/partial land skips the reap (the idempotent script reaps on a later run / reconciliation). The cleanup outcome is attached as `res.cleanup`.
+- New `runCleanup(ticketId, dryRun, phaseLabel)` worker: cwd MUST be the MAIN repo root (the script self-locates REPO_ROOT and needs the real `.worktrees/<id>` for destroy). Returns the parsed `CleanupEnvelope`. `parseCleanupEnvelope` mirrors `parseRestackEnvelope` (text-return + JS-parse, no StructuredOutput) and validates `ok` + `decision`; garbled echo → clean `{ok:false, decision:"skip", error}`.
+- Reconciliation pass (`runReconciliation(processed)` + `reconcileCandidates()`): OPT-IN via input `reconcile:true` (default OFF), DRY-RUN by default via `reconcileDryRun` (default true — pass `false` to actually reap). Candidates are enumerated from `ls -1 .worktrees` filtered to `^[A-Z]+-[0-9]+$` (git/disk state, NOT a Linear `Done` sweep — Q8/OQ1). Excludes tickets this run's main loop already processed. Per-ticket: `blocked` is logged and SKIPPED, `skip` (in-flight) left untouched, `destroy` reaped — one ticket never halts the pass (OQ2). Runs even when the in-flight queue is empty (the early-return path also fires it). New meta phase `Reconcile`; outcomes returned under top-level `reconciliation`.
+- SKILL `action: land`: step 2 now invokes `python3 scripts/qrspi_cleanup.py --ticket <ticket-id>` from `$REPO_ROOT`; the standing rule (former line 538) now names the script as the only sanctioned `gt sync`/worktree-removal path.
+
+---

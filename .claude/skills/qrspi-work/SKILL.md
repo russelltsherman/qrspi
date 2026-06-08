@@ -402,20 +402,25 @@ Every PR in the stack is approved + clean. Land the whole stack bottom-up and fi
    gt submit --publish --stack --no-edit --no-interactive   # ensure remotes current
    gt merge --confirm --no-interactive                 # merges bottom-up
    ```
-2. Sync and clean up:
+2. Reap the worktree, local branches, and remote refs with the deterministic, tested
+   cleanup script — **do NOT** hand-run `gt sync --force` or `git worktree remove --force`
+   here. The script self-locates `REPO_ROOT` from its own path, so run it from the **main
+   checkout** (never from inside the worktree) so it sees the real `.worktrees/<ticket-id>`:
    ```bash
    cd "$REPO_ROOT"
-   git checkout main
-   gt sync --force --no-interactive       # deletes merged branches, prunes
+   python3 scripts/qrspi_cleanup.py --ticket <ticket-id>
    ```
+   It computes a classifier verdict (`blocked` > `destroy` > `skip`) and reaps **only** a
+   fully-merged clean stack: it removes the worktree, deletes the merged local branches, and
+   prunes their remote refs, printing one JSON envelope
+   `{ ok, decision, reason, removed{worktree,branches[],remotes[]}, dryRun, error? }`. A dirty
+   worktree comes back `decision:"blocked"` (left for a human, never forced); an infra error
+   is `ok:false` (HARD STOP — do not retry or improvise). Pass `--dry-run` first to preview
+   without destroying anything.
 3. Remove planning artifacts from `main` (they were only needed during review) — open a
    small cleanup PR if `.qrspi/<ticket-id>/` survived the merge, mirroring the old Cleanup
    flow; otherwise skip.
-4. Remove the worktree:
-   ```bash
-   git worktree remove "$REPO_ROOT/.worktrees/<ticket-id>" --force 2>/dev/null; git worktree prune
-   ```
-5. **Project Linear** → `Done`. Print: "`<ticket-id>` landed and cleaned up. → Done."
+4. **Project Linear** → `Done`. Print: "`<ticket-id>` landed and cleaned up. → Done."
 
 ---
 
@@ -530,8 +535,10 @@ This is a hard boundary. If the plan references files outside the project, repor
   its commit; re-running within the same phase amends with `gt modify` (no `-c`). Commit
   subjects: `<id> [QR]: Design`, `<id> [SP]: Plan`, `<id> [I] <N>/<total>: <goal>` (slices, e.g. `RUS-44 [I] 1/2: …`).
 - After mutations, run `gt log short --no-interactive` to verify stack state.
-- Never use `gt sync` mid-feature on a held stack except in `land` cleanup — it deletes
-  branches whose PRs were closed (which is correct only after merge).
+- Never use `gt sync` mid-feature on a held stack — it deletes branches whose PRs were
+  closed (which is correct only after merge). Post-merge cleanup is owned by
+  `scripts/qrspi_cleanup.py` (the only sanctioned `gt sync`/worktree-removal path); do not
+  hand-run those mutations.
 - **Proactively check for a stale PR association before every `gt submit`.** Run
   `gt info <branch> --no-interactive`; if it shows a PR in state `(Closed)` or `(Merged)`,
   run the [Resubmitting](#resubmitting-when-the-prior-pr-was-closed-or-merged) recovery
