@@ -8,6 +8,7 @@ import sys
 from qrspi_pr_state import (
     unresolved_thread_count,
     parse_pr_nodes,
+    select_pr,
     slice_numbers,
     branch_set,
     real_branches,
@@ -28,6 +29,17 @@ def check(name, got, want):
         failures += 1
     else:
         print("ok: %s" % name)
+
+
+def _raises(fn, exc):
+    """True iff calling fn() raises an instance of exc."""
+    try:
+        fn()
+    except exc:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 # --- unresolved_thread_count -----------------------------------------------
@@ -73,12 +85,52 @@ check("merged PR surfaces merged/state/mergedAt",
       {"prExists": True, "number": 60, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
        "merged": True, "state": "MERGED", "mergedAt": "2026-06-08T00:00:00Z"})
 
-check("picks first node when multiple returned",
-      parse_pr_nodes([{"number": 100, "reviewDecision": "APPROVED",
-                       "reviewThreads": {"nodes": []}},
-                      {"number": 99, "reviewDecision": "CHANGES_REQUESTED",
-                       "reviewThreads": {"nodes": [{"isResolved": False}]}}])["number"],
-      100)
+# --- select_pr (named selection primitive: advancement vs merge/land) -------
+_multi = [{"number": 100, "merged": False, "reviewDecision": "APPROVED",
+           "reviewThreads": {"nodes": []}},
+          {"number": 99, "merged": False, "reviewDecision": "CHANGES_REQUESTED",
+           "reviewThreads": {"nodes": [{"isResolved": False}]}}]
+
+check("select_pr empty active -> None", select_pr([], "active"), None)
+check("select_pr empty merged -> None", select_pr([], "merged"), None)
+
+# prefer='active' is identity nodes[0] (newest by CREATED_AT DESC).
+check("select_pr active picks nodes[0]", select_pr(_multi, "active")["number"], 100)
+
+# Advancement path (parse_pr_nodes) still uses the active selection: newest node.
+check("parse_pr_nodes picks active (newest) node when multiple returned",
+      parse_pr_nodes(_multi)["number"], 100)
+
+# prefer='merged' wins on ANY MERGED node, order-independent.
+_merged_then_closed = [{"number": 200, "merged": True, "state": "MERGED",
+                        "reviewThreads": {"nodes": []}},
+                       {"number": 201, "merged": False, "state": "CLOSED",
+                        "reviewThreads": {"nodes": []}}]
+_closed_then_merged = [{"number": 211, "merged": False, "state": "CLOSED",
+                        "reviewThreads": {"nodes": []}},
+                       {"number": 210, "merged": True, "state": "MERGED",
+                        "reviewThreads": {"nodes": []}}]
+check("select_pr merged wins (merged is nodes[0])",
+      select_pr(_merged_then_closed, "merged")["number"], 200)
+check("select_pr merged wins (merged is nodes[1], order-independent)",
+      select_pr(_closed_then_merged, "merged")["number"], 210)
+
+# No MERGED node -> prefer='merged' falls back to the active (nodes[0]) selection.
+check("select_pr merged falls back to active when no node merged",
+      select_pr(_multi, "merged")["number"], 100)
+
+# Single-PR identity: select_pr returns the SAME object (AC3, AC4, Q10, OQ3).
+_single = {"number": 52, "merged": False, "reviewDecision": "APPROVED", "state": "OPEN",
+           "reviewThreads": {"nodes": [{"isResolved": True}]}}
+check("select_pr active single-PR identity (same object)",
+      select_pr([_single], "active") is _single, True)
+check("parse_pr_nodes single-PR shape unchanged",
+      parse_pr_nodes([_single]),
+      {"prExists": True, "number": 52, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
+       "merged": False, "state": "OPEN", "mergedAt": None})
+
+check("select_pr unknown prefer raises ValueError",
+      _raises(lambda: select_pr(_multi, "bogus"), ValueError), True)
 
 # --- slice_numbers ----------------------------------------------------------
 check("extracts and sorts slice numbers",
@@ -159,8 +211,10 @@ _fully_merged = stack_merge_state(
      "RUS-1/slice-2": _node(11, "MERGED", True)})
 check("fully-merged: all branches merged",
       _fully_merged,
-      {"RUS-1/slice-1": {"merged": True, "prNumber": 10, "state": "MERGED"},
-       "RUS-1/slice-2": {"merged": True, "prNumber": 11, "state": "MERGED"}})
+      {"RUS-1/slice-1": {"merged": True, "prNumber": 10, "state": "MERGED",
+                         "mergedByPr": 10},
+       "RUS-1/slice-2": {"merged": True, "prNumber": 11, "state": "MERGED",
+                         "mergedByPr": 11}})
 check("fully-merged: predicate True",
       is_stack_fully_merged(_fully_merged), True)
 
@@ -186,13 +240,67 @@ _deleted = stack_merge_state(
     {"RUS-1/slice-1": _node(10, "MERGED", True)})  # slice-2 head ref absent
 check("deleted head ref -> documented sentinel",
       _deleted["RUS-1/slice-2"],
-      {"merged": False, "prNumber": None, "state": None})
+      {"merged": False, "prNumber": None, "state": None, "mergedByPr": None})
 check("deleted head ref makes stack not fully merged",
       is_stack_fully_merged(_deleted), False)
 
 # Edge: empty stack -> predicate False (nothing merged is not 'fully merged').
 check("empty stack: predicate False",
       is_stack_fully_merged({}), False)
+
+
+# --- merge-aware selection: a branch with MULTIPLE PRs on one head ref -------
+# (RUS-53 root fix: a NEWER non-merged PR must NOT mask an earlier MERGED one.)
+def _nodes(*specs):
+    """Build a pullRequests.nodes list. Each spec is (number, state, merged)."""
+    return [{"number": n, "state": s, "merged": m,
+             "reviewDecision": "APPROVED", "reviewThreads": {"nodes": []}}
+            for (n, s, m) in specs]
+
+
+# Step 6 — merged + newer-closed (RUS-30 shape): nodes CREATED_AT DESC put the
+# newer non-merged PR at index 0, the earlier MERGED PR after it. Expect merged.
+_merged_newer_closed = stack_merge_state(
+    ["RUS-1/slice-1"],
+    {"RUS-1/slice-1": _nodes((301, "CLOSED", False), (300, "MERGED", True))})
+check("merged + newer-closed: branch reads merged True (RUS-30 reaped)",
+      _merged_newer_closed["RUS-1/slice-1"],
+      {"merged": True, "prNumber": 300, "state": "MERGED", "mergedByPr": 300})
+check("merged + newer-closed: single-branch stack is fully merged -> destroy",
+      is_stack_fully_merged(_merged_newer_closed), True)
+
+# Step 7 — inverse order: closed first, newer MERGED second. Still merged
+# (selection is order-independent).
+_closed_newer_merged = stack_merge_state(
+    ["RUS-1/slice-1"],
+    {"RUS-1/slice-1": _nodes((310, "MERGED", True), (311, "CLOSED", False))})
+check("closed + newer-merged: branch reads merged True (order-independent)",
+      _closed_newer_merged["RUS-1/slice-1"],
+      {"merged": True, "prNumber": 310, "state": "MERGED", "mergedByPr": 310})
+
+# Step 10 — deleted head ref WITH a MERGED fetched node still reads merged True.
+# (The ref is gone but the GraphQL query by headRefName still returns the node.)
+_deleted_ref_with_merged = stack_merge_state(
+    ["RUS-1/slice-1"],
+    {"RUS-1/slice-1": _nodes((320, "MERGED", True))})
+check("deleted head ref with MERGED fetched node reads merged True (AC5)",
+      _deleted_ref_with_merged["RUS-1/slice-1"],
+      {"merged": True, "prNumber": 320, "state": "MERGED", "mergedByPr": 320})
+
+# Step 11 — no MERGED node (all-open / all-closed): falls back to active (nodes[0])
+# and reads merged False, so non-landed branches behave exactly as today.
+_all_open = stack_merge_state(
+    ["RUS-1/slice-1"],
+    {"RUS-1/slice-1": _nodes((330, "OPEN", False), (329, "OPEN", False))})
+check("all-open (no MERGED node): merged False, active fallback to nodes[0]",
+      _all_open["RUS-1/slice-1"],
+      {"merged": False, "prNumber": 330, "state": "OPEN", "mergedByPr": None})
+_all_closed = stack_merge_state(
+    ["RUS-1/slice-1"],
+    {"RUS-1/slice-1": _nodes((340, "CLOSED", False), (339, "CLOSED", False))})
+check("all-closed (no MERGED node): merged False, active fallback to nodes[0]",
+      _all_closed["RUS-1/slice-1"],
+      {"merged": False, "prNumber": 340, "state": "CLOSED", "mergedByPr": None})
 
 
 def run():
