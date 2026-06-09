@@ -175,7 +175,7 @@ branch already exists, so `gt create` fails.)
 ```bash
 git add .qrspi/<ticket-id>/questions.md .qrspi/<ticket-id>/research.md .qrspi/<ticket-id>/design.md
 gt modify -c --no-interactive -m "$(cat <<'EOF'
-<ticket-id> [QR]: Design
+<ticket-id> [QR]: Design — <ticket-title>
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -209,7 +209,7 @@ Spawn, in order (see contracts): **Structure** (`qrspi-structure`), **Plan** (`q
 ```bash
 git add .qrspi/<ticket-id>/structure.md .qrspi/<ticket-id>/plan.md .qrspi/<ticket-id>/worktree.md
 gt create <ticket-id>/plan --no-interactive -m "$(cat <<'EOF'
-<ticket-id> [SP]: Plan
+<ticket-id> [SP]: Plan — <ticket-title>
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -332,13 +332,13 @@ design-level change that invalidates plan/impl is handled by `reset`, not revise
 3. Address the feedback (edit artifacts/code, cascading within the phase from the earliest
    affected artifact). For implementation, group comments by slice and start from the
    lowest-numbered affected slice (changes restack upward).
-4. Amend the phase commit **in place, keeping its existing subject** (`<id> [QR]: Design`,
-   `<id> [SP]: Plan`, or `<id> [I] <N>/<total>: <goal>` for a slice). Single-commit-per-branch means
+4. Amend the phase commit **in place, keeping its existing subject** (`<id> [QR]: Design — <ticket-title>`,
+   `<id> [SP]: Plan — <ticket-title>`, or `<id> [I] <N>/<total>: <goal>` for a slice). Single-commit-per-branch means
    there is only the one phase commit — do NOT rename it to an "Address feedback" subject:
    ```bash
    git add <changed files>
    gt modify --no-interactive -m "$(cat <<'EOF'
-   <the branch's existing commit subject, verbatim — e.g. `<id> [QR]: Design`, `<id> [SP]: Plan`, or `<id> [I] <N>/<total>: <goal>`>
+   <the branch's existing commit subject, verbatim — e.g. `<id> [QR]: Design — <ticket-title>`, `<id> [SP]: Plan — <ticket-title>`, or `<id> [I] <N>/<total>: <goal>`>
 
    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
    EOF
@@ -534,7 +534,7 @@ This is a hard boundary. If the plan references files outside the project, repor
 - The orchestrator is the ONLY place git/graphite operations happen — sub-agents never commit.
 - **One commit per phase branch** (Graphite convention): `gt create` opens the branch with
   its commit; re-running within the same phase amends with `gt modify` (no `-c`). Commit
-  subjects: `<id> [QR]: Design`, `<id> [SP]: Plan`, `<id> [I] <N>/<total>: <goal>` (slices, e.g. `RUS-44 [I] 1/2: …`).
+  subjects: `<id> [QR]: Design — <ticket-title>`, `<id> [SP]: Plan — <ticket-title>`, `<id> [I] <N>/<total>: <goal>` (slices, e.g. `RUS-44 [I] 1/2: …`).
 - After mutations, run `gt log short --no-interactive` to verify stack state.
 - Never use `gt sync` mid-feature on a held stack except in `land` cleanup — it deletes
   branches whose PRs were closed (which is correct only after merge).
