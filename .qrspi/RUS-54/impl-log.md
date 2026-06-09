@@ -30,4 +30,30 @@
 - Inline "addressed" = a later bot-authored comment in the same thread (createdAt-ordered). Top-level "addressed" = some bot top-level comment with strictly greater createdAt. Ordering is by `createdAt` ascending, not array order (plan Plan-phase decision).
 - `_bot_login()` uses `gh api user`; in tests the bot login is passed explicitly, so no gh dependency in the unit tests.
 
+## Session 2 — Slice 2: Comment-reply write helper + gh-write re-verification gate
+
+**Timestamp:** 2026-06-09T00:00:00Z
+**Tasks completed:** T20, T21, T22, T23, T24, T25, T26, T27, T28
+**Tasks failed:** none (T29 manual gh-write gate deferred — see notes)
+**Tests:**
+
+- `python3 scripts/qrspi_comment_reply_test.py` → 15 passed, 0 failed (exit 0)
+
+**Deviations from structure.md:**
+
+- none. `qrspi_comment_reply.py` implements `--ticket --pr --comment-id --reply-mode {inline|toplevel} --body-file`; inline → `POST /repos/{owner}/{repo}/pulls/{n}/comments/{comment_id}/replies`; top-level → `gh pr comment`; stdout is the `ReplyEnvelope {ok, replyId, inReplyToId, error}` JSON. `mode_to_request` and `response_to_envelope` are the pure core, exactly as the plan names them.
+
+**Deviations from plan.md:**
+
+- none functionally. Implementation notes (additive, within slice scope):
+  - Owner/repo are resolved via `resolve_owner_repo()` (`gh repo view --json owner,name`), self-located like the rest of the harness, since the plan says "resolve owner/repo (self-located)" but the existing `qrspi_pr_state.py` takes owner/repo as explicit CLI args. This script takes neither owner nor repo on the CLI — it derives both — matching the self-locating convention of `qrspi_revise_amend.py`/`qrspi_persist.py`.
+  - `response_to_envelope` fails CLOSED for inline replies on non-JSON / missing / null `.id` (ok=false + error) rather than reporting success with a null replyId. Top-level returns ok=true with replyId=null because `gh pr comment` prints a URL, not JSON (no numeric id to capture). This is the faithful reading of "captures the created `.id`" + the AC7 replyId-match check.
+  - Added a small pure `error_envelope()` helper plus `_as_int_or_none`/`_envelope` so the impure `main()` failure paths (body-file read error, owner/repo resolve error, gh subprocess non-zero) all emit the canonical `ok:false` ReplyEnvelope. `error_envelope` is unit-tested too.
+
+**Notes for next session:**
+
+- `scripts/qrspi_comment_reply.py` exists with pure core `mode_to_request(reply_mode, owner, repo, pr, comment_id, body) -> dict` and `response_to_envelope(reply_mode, raw_response, in_reply_to_id) -> ReplyEnvelope`. Downstream orchestration (Slice 3) invokes the CLI once per `CommentTarget`, passing `--reply-mode` = the target's `threadType` and `--comment-id` = the target's `commentId`, with the reply body written to a `--body-file`.
+- The CLI prints the `ReplyEnvelope` JSON to stdout and exits 0 only when `ok:true`; non-zero exit + `ok:false` envelope on any failure. Slice 3 should read `ok`/`replyId` off stdout, not infer success from exit code alone.
+- T29's manual gh-write re-verification gate (post a real inline + top-level reply against a live test PR with the bot credential, confirm no 403 and replyId matches) was NOT executed here — it needs a live PR and network writes, which is the reviewer/orchestrator's manual checkpoint, not an automated unit test. Per project memory (`gh-pr-writes-impossible-crossaccount-pat.md`, 2026-06-08) gh PR writes now succeed with the bot's classic PAT, so the gate is expected to pass, but this was not asserted by running it. If that gate ever 403s, Slice 3 must NOT rely on `respond_comment` and the `wait` sink stays correct (Risk Register row 1).
+
 ---
