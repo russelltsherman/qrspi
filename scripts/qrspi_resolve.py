@@ -314,9 +314,15 @@ def main():
                              "caller staged; its contents are embedded as ticketContent so "
                              "the worker never hand-assembles the envelope")
     parser.add_argument("--trunk", default="main", help="Trunk branch (default: main)")
+    parser.add_argument("--blocked-open", action="store_true",
+                        help="At least one open Linear blocker was detected (from Linear, supplied by caller)")
+    parser.add_argument("--blocked-by", action="append", default=[],
+                        help="Identifier of an open blocker (repeatable; comma-joined values also accepted). "
+                             "From Linear, supplied by caller.")
     args = parser.parse_args()
 
     ticket_content = read_ticket_content(args.ticket_content_file)
+    blocked_by = [tok.strip() for raw in args.blocked_by for tok in raw.split(",") if tok.strip()]
 
     # Any infrastructure failure -> ONE ok:false envelope with the verbatim error.
     # Never partial-retry: a clean stop is what keeps a weak model from spiralling.
@@ -326,7 +332,8 @@ def main():
         # entry_blocked ticket never leaves a stray branch behind.
         owner, repo = parse_name_with_owner(_gh_name_with_owner())
         state = build_state(owner, repo, args.ticket, args.assigned, args.linear_status,
-                            trunk=args.trunk)
+                            trunk=args.trunk, blocked_open=args.blocked_open,
+                            blocked_by=blocked_by)
         decision = resolve(state)
         worktree = setup_worktree(args.ticket, trunk=args.trunk,
                                   create_design=(decision["action"] == "run_design"))
