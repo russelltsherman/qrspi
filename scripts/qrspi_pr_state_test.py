@@ -5,6 +5,7 @@ branch parsing). Stdlib-only, assert-based. Run: python3 scripts/qrspi_pr_state_
 
 import sys
 
+import qrspi_pr_state
 from qrspi_pr_state import (
     unresolved_thread_count,
     parse_pr_nodes,
@@ -15,6 +16,7 @@ from qrspi_pr_state import (
     count_plan_slices,
     stack_merge_state,
     is_stack_fully_merged,
+    build_state,
 )
 
 failures = 0
@@ -301,6 +303,40 @@ _all_closed = stack_merge_state(
 check("all-closed (no MERGED node): merged False, active fallback to nodes[0]",
       _all_closed["RUS-1/slice-1"],
       {"merged": False, "prNumber": 340, "state": "CLOSED", "mergedByPr": None})
+
+
+# --- build_state: additive blocker keys (RUS-50) ----------------------------
+# build_state shells out to git/gh; stub the subprocess-backed helpers so the test
+# is hermetic and exercises only the new blocked_open/blocked_by plumbing. A
+# branch-less ticket means no PR queries fire, so only _git_branches is needed.
+def _build_state_blocker_case():
+    saved = (qrspi_pr_state._git_branches,
+             qrspi_pr_state._git_show,
+             qrspi_pr_state._file_in_tree)
+    qrspi_pr_state._git_branches = lambda ticket: []
+    qrspi_pr_state._git_show = lambda ref_path: ""
+    qrspi_pr_state._file_in_tree = lambda ref, path: False
+    try:
+        blocked = build_state("o", "r", "RUS-1", True, "Selected",
+                              blocked_open=True, blocked_by=["RUS-99"])
+        default = build_state("o", "r", "RUS-1", True, "Selected")
+    finally:
+        (qrspi_pr_state._git_branches,
+         qrspi_pr_state._git_show,
+         qrspi_pr_state._file_in_tree) = saved
+    return blocked, default
+
+
+_blocked, _default = _build_state_blocker_case()
+check("build_state(blocked_open=True) -> blockedOpen True",
+      _blocked["blockedOpen"], True)
+check("build_state(blocked_by=['RUS-99']) -> blockedBy ['RUS-99']",
+      _blocked["blockedBy"], ["RUS-99"])
+# Defaults keep existing callers green: blocker keys default falsy/empty.
+check("build_state default -> blockedOpen False",
+      _default["blockedOpen"], False)
+check("build_state default -> blockedBy []",
+      _default["blockedBy"], [])
 
 
 def run():

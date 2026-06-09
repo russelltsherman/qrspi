@@ -273,7 +273,8 @@ def _query_pr(owner, repo, head):
     return data["data"]["repository"]["pullRequests"]["nodes"]
 
 
-def build_state(owner, repo, ticket, assigned, linear_status, trunk="main"):
+def build_state(owner, repo, ticket, assigned, linear_status, trunk="main",
+                blocked_open=False, blocked_by=None):
     lines = _git_branches(ticket)
     branches = branch_set(lines)
     snums = slice_numbers(lines)
@@ -318,6 +319,8 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main"):
         "ticketId": ticket,
         "assigned": assigned,
         "linearStatus": linear_status,
+        "blockedOpen": blocked_open,
+        "blockedBy": list(blocked_by or []),
         "phases": {
             "design": phase_pr("design"),
             "plan": phase_pr("plan"),
@@ -342,10 +345,16 @@ def main():
                         help="Current Linear status name (from Linear, supplied by caller)")
     parser.add_argument("--trunk", default="main",
                         help="Trunk branch a phase branch must be ahead of to count as real (default: main)")
+    parser.add_argument("--blocked-open", action="store_true",
+                        help="At least one open Linear blocker was detected (from Linear, supplied by caller)")
+    parser.add_argument("--blocked-by", action="append", default=[],
+                        help="Identifier of an open blocker (repeatable; comma-joined values also accepted). "
+                             "From Linear, supplied by caller.")
     args = parser.parse_args()
 
+    blocked_by = [tok.strip() for raw in args.blocked_by for tok in raw.split(",") if tok.strip()]
     state = build_state(args.owner, args.repo, args.ticket, args.assigned, args.linear_status,
-                        trunk=args.trunk)
+                        trunk=args.trunk, blocked_open=args.blocked_open, blocked_by=blocked_by)
     json.dump(state, sys.stdout, indent=2)
     print()
 

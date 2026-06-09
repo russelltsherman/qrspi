@@ -101,6 +101,15 @@ def resolve(state):
     # 1. Entry gate — nothing exists yet. Linear is read ONLY here.
     if "design" not in existing:
         if state.get("assigned") and state.get("linearStatus") == "Selected":
+            # Even a satisfied entry gate is held when Linear reports an OPEN blocker
+            # (blockedBy relation). Fold every open-blocker identifier into the reason so
+            # the held ticket names what it waits on (RD4).
+            if state.get("blockedOpen"):
+                blockers = state.get("blockedBy") or []
+                joined = ", ".join(blockers) if blockers else "an unnamed blocker"
+                return decision("entry_blocked",
+                                reason="Entry gate satisfied (assigned + Selected) but blocked by "
+                                       "open Linear blocker(s): %s; held until they close." % joined)
             return decision("run_design", phase="design",
                             reason="Entry gate satisfied (assigned + Selected); no design branch yet.")
         return decision("entry_blocked",
