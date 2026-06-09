@@ -316,8 +316,24 @@ async function resolveTicket(t) {
 
 Do EXACTLY these steps — no exploration, no path guessing, no extra commentary:
 
-1. Fetch the ticket: mcp__linear__get_issue (identifier ${t.id}). Read its status name and
-   whether it is assigned (assignee non-null). Retry once on failure.
+1. Fetch the ticket: mcp__linear__get_issue (identifier ${t.id}, includeRelations: true).
+   Read three things and retry once on failure:
+     a. its status name;
+     b. whether it is assigned (assignee non-null);
+     c. its blockedBy relations — the issues this ticket is BLOCKED BY. Look in the returned
+        relations for entries whose type is "blocks" pointing AT this ticket (i.e. this ticket
+        is the blocked side), commonly surfaced as a "blockedBy" list. For EACH such blocker
+        you need its identifier (e.g. RUS-99) AND its status TYPE (the workflow-state category:
+        one of backlog / unstarted / started / completed / canceled / triage — NOT the display
+        name). If the includeRelations payload does NOT carry each blocker's status type
+        inline, do a per-blocker follow-up mcp__linear__get_issue (identifier = that blocker)
+        and read its status type from there. (RD1: one call vs per-blocker read — adapt to what
+        the live payload actually exposes; do not assume.)
+
+   Classify each blocker: it is CLOSED only if its status type is exactly "completed" or
+   "canceled". Treat EVERY other type — backlog, unstarted, started, triage, or any
+   unrecognized/unreadable value — as OPEN (RD3: fail toward blocking). Collect the identifiers
+   of all OPEN blockers into an open-blocker list.
 
 2. Stage the ticket text (so the resolver embeds it — you never hand-assemble JSON): run
    Bash \`mkdir -p /tmp/phase-stage/${t.id}\`, then use the Write tool to write the ticket's
@@ -332,6 +348,14 @@ Do EXACTLY these steps — no exploration, no path guessing, no extra commentary
 
    Replace <status> with the Linear status name from step 1. If (and only if) step 1 found the
    ticket assigned, also append the flag  --assigned  to that command.
+
+   Blocker flags (append ONLY on positive detection — fail-safe): if and ONLY if the
+   open-blocker list from step 1 has at least one entry, also append  --blocked-open  and one
+   --blocked-by <id>  per open blocker (e.g.  --blocked-open --blocked-by RUS-99 --blocked-by
+   RUS-100 ). If the open-blocker list is empty — no blockedBy relations, all blockers
+   completed/canceled, or the relations were absent/empty/unreadable — append NEITHER flag (the
+   script then resolves to run_design). Never invent blocker ids; pass only ids you actually
+   read.
 
 4. Output the command's STDOUT — the JSON envelope — as your FINAL message: exactly and
    verbatim, with NO surrounding prose, NO code fences, NO edits. That JSON is your entire
