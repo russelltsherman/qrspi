@@ -48,9 +48,14 @@ Selected (assigned)
   ticket to that phase. **Revise** is also automatic: a formal `CHANGES_REQUESTED` on a
   *frontier* phase PR (nothing downstream to discard) is addressed in place — the worker edits
   the phase's own artifacts/code, amends the phase commit, and re-requests review (which clears
-  the change request, the loop-safe termination signal). Review *threads* cannot be resolved
-  here (every `gh` PR-write mutation 403s on this cross-owned repo), so a PR with unresolved
-  threads but **no** change request is left for the reviewer and resolves to `wait`, not revise.
+  the change request, the loop-safe termination signal). **Respond-comment** is also automatic
+  (RUS-54): a phase PR carrying unaddressed reviewer **comments** (no formal change request) is
+  handled in place — a peer-reviewer worker answers / applies+amends / declines-with-rationale
+  per comment and posts the rationale as an in-thread reply via `scripts/qrspi_comment_reply.py`
+  (gh comment writes succeed with the bot's classic PAT — the old cross-account write block is
+  gone). Review *threads* still cannot be auto-**resolved** (only the reviewer resolves a thread),
+  so a PR whose only outstanding signal is unresolved threads with neither a change request nor an
+  unaddressed reviewer comment is left for the reviewer and resolves to `wait`.
 - **`*Approved` Linear states were dropped** — approval lives in the PR. Reporting statuses:
   `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.
 - The decision is computed by a tested resolver (`scripts/qrspi_resolve_state.py`, unit-tested);
@@ -109,9 +114,10 @@ stays on `main`; all ticket work happens in worktrees. `.worktrees/` is gitignor
   default, which expands to the gh-authenticated user (set `"reviewers": []` to opt out). Requesting
   a reviewer is what surfaces a PR in that user's Graphite review queue.
 - PR **bodies are authored at Graphite creation**, never via `gh pr edit`: `gt submit` has no
-  body flag and seeds the PR description from the branch commit message *at creation only*, and
-  the gh PAT (a fine-grained token owned by a different account than the repo owner) 403s on every
-  authenticated PR write while Graphite's own GitHub-App credential succeeds. Design/plan PRs use
+  body flag and seeds the PR description from the branch commit message *at creation only*, so the
+  commit message is the only non-interactive lever for the body — this is a `gt`/commit-message
+  constraint, independent of token capability (the bot's classic PAT can write PR comments fine;
+  see RUS-54 / the gh-cross-account note). Design/plan PRs use
   their heredoc commit message as the body; for implementation, `scripts/qrspi_pr_body.py`
   (self-locating, like the resolver) splices `pr-summary.md` into the slice-1 commit message before
   `gt submit`, and slices 2..N carry a focused "Part N/total" body from their own commit messages.

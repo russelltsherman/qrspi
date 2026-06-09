@@ -57,3 +57,34 @@
 - T29's manual gh-write re-verification gate (post a real inline + top-level reply against a live test PR with the bot credential, confirm no 403 and replyId matches) was NOT executed here — it needs a live PR and network writes, which is the reviewer/orchestrator's manual checkpoint, not an automated unit test. Per project memory (`gh-pr-writes-impossible-crossaccount-pat.md`, 2026-06-08) gh PR writes now succeed with the bot's classic PAT, so the gate is expected to pass, but this was not asserted by running it. If that gate ever 403s, Slice 3 must NOT rely on `respond_comment` and the `wait` sink stays correct (Risk Register row 1).
 
 ---
+
+## Session 3 — Slice 3: Envelope wiring, batch dispatch, and peer-reviewer worker
+
+**Timestamp:** 2026-06-09T00:00:00Z
+**Tasks completed:** T30 (satisfied internally — see deviations), T31, T32, T33, T34, T35 (as an inline batch-worker prompt — see deviations), T36, T37, T38 (automated portion)
+**Tasks failed:** none. T38's LIVE-PR manual e2e (worker posts an in-thread reply against a real PR; second run does not re-respond) is DEFERRED to the reviewer/orchestrator — it needs a live PR + network writes, like Slice 2's T29 gate. The CR-outranks-respond_comment portion of T38 IS covered by passing resolver unit tests.
+**Tests:**
+
+- `python3 scripts/qrspi_resolve_test.py` → 59 passed, 0 failed
+- `python3 scripts/qrspi_pr_state_test.py` → 64 passed, 0 failed
+- `python3 scripts/qrspi_resolve_state_test.py` → 33 passed, 0 failed
+- `python3 scripts/qrspi_comment_reply_test.py` → OK (15 passed)
+- `node --check .claude/workflows/qrspi-batch.js` → passes
+- `grep -rn "gh PR writes 403\|every gh mutation 403s\|gh.*403" .claude/CLAUDE.md .claude/workflows/qrspi-batch.js .claude/skills/` → no matches (exit 1)
+
+**Deviations from structure.md:**
+
+- T35 / "the existing revise worker definition (`.claude/agents/qrspi-*`)": NO such file exists. `.claude/agents/` holds only the phase agents (qrspi-design/plan/structure/.../pr); `grep -rl "CHANGES_REQUESTED\|revise" .claude/agents/` returns nothing. The revise worker is an INLINE agent() prompt inside `doRevise()` in `qrspi-batch.js`, not a separate agent file. So the AC2–AC4 peer-reviewer worker was implemented as the inline `agent()` prompt inside the NEW `doRespondComment()` handler in `qrspi-batch.js` (the natural home for the respond_comment worker), not by editing a `.claude/agents/*` file. The structure/plan's file reference predates Slice 1's implementation choices.
+
+**Deviations from plan.md:**
+
+- T30 ("pass `_gh_authenticated_login()` into the gather so comments filter by bot login"): already satisfied by Slice 1. `qrspi_pr_state.build_state` self-resolves the bot login via its own `_bot_login()` (`gh api user`) and threads it through `phase_pr`/the slice loop, and `parse_pr_nodes` attaches per-phase/per-slice `commentTargets`. `qrspi_resolve.py` calls `build_state` (not `parse_pr_nodes` directly), so the login is ALREADY wired in. Adding a redundant `bot_login` param to `build_state` would have been dead surface. No code change was needed for T30; recorded here for honesty.
+- T31 (re-emit top-level `commentTargets`): implemented as `build_envelope` now mirroring `decision["commentTargets"]` (the active phase's targets the resolver already folds in) into a top-level `commentTargets` field, via a new pure `comment_targets_of(decision)` helper (None/missing/non-list → `[]`). This matches the structure Contract that `doRespondComment` iterates `r.commentTargets`. Unit-tested in `qrspi_resolve_test.py` (top-level field empty for non-respond decisions and the error envelope; populated for a respond_comment decision; `comment_targets_of` edge cases).
+- Doc-correction scope (T36/T37 + the in-file batch strings): the stale BLANKET "every gh PR-write mutation 403s" / "gh PR writes 403" assertions were corrected to reflect that gh COMMENT writes now succeed with the bot's classic PAT (per `gh-pr-writes-impossible-crossaccount-pat.md`, 2026-06-08), and that thread-carrying PRs with unaddressed reviewer comments now route to `respond_comment`. The still-true design fact (PR BODIES are authored at Graphite creation) was preserved but re-grounded in the real reason — `gt submit` has no body flag and seeds the body from the commit message at creation only — NOT a 403/permission wall. "Thread RESOLUTION is the reviewer's job" was kept (only the reviewer can resolve a thread); the false "thread mutations 403" justification was removed. Surfaces touched: `.claude/CLAUDE.md`, `.claude/skills/qrspi-work/SKILL.md` (added an `## action: respond_comment` section + dispatch-table row), and the comment/prompt strings in `.claude/workflows/qrspi-batch.js`.
+
+**Notes for next session:**
+
+- This is the final implementation slice. Next step is the qrspi-pr phase (pr-summary.md) and stack submission — not another implement slice.
+- `doRespondComment(t, r)` (in `qrspi-batch.js`) iterates `r.commentTargets` and spawns ONE peer-reviewer `agent()` per comment (label `respond-comment:<id>#<i>`), returning `{ ticketId, action:'respond_comment', summary, prUrl }`. Each worker resolves the PR number from the phase branch (READ-only `gh pr list --head`), then answers / applies+amends (via `qrspi_revise_amend.py` + `gt submit --publish --no-edit [--stack]`) / declines, and posts the reply via `qrspi_comment_reply.py --reply-mode <threadType> --comment-id <commentId> --body-file <staged>`. Result schema: `COMMENT_REPLY_SCHEMA` = `{ ok, applied?, error?, prUrl?, summary }`.
+- DEFERRED MANUAL GATE (carried from Slice 2's T29 + Slice 3's T38 live portion): no live-PR end-to-end run was executed (post a real inline + top-level reply, confirm the second pass does NOT re-respond). It is a reviewer/orchestrator network-write checkpoint, not an automated test. Per project memory gh comment writes are expected to succeed (classic PAT). If a real write fails, the worker returns ok:false and `respond_comment` must not be relied on — the `wait` sink remains correct (Risk Register row 1).
+- Idempotency is STRUCTURAL, not stateful: once a bot reply lands in a thread (or a newer bot top-level comment exists), `unaddressed_reviewer_comments` (Slice 1) drops that target, so the next gather/resolve no longer emits `respond_comment` for it. No local dedupe state is kept.

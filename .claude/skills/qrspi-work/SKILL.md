@@ -41,10 +41,15 @@ trunk
   ticket returns to that phase for revision. Discard is **automatic**.
 - Addressing a formal **CHANGES_REQUESTED** on a frontier phase PR (revise) is
   **autonomous**: the feedback is addressed in place, the phase commit is amended, and
-  review is re-requested (which clears the change request). Review *threads* cannot be
-  resolved here (every gh PR-write mutation 403s on this cross-owned repo), so a PR carrying
-  unresolved threads but **no** change request is left for the reviewer and routes to
-  `wait`, not revise.
+  review is re-requested (which clears the change request).
+- Addressing unaddressed reviewer **comments** on a phase PR (respond_comment) is also
+  **autonomous** (RUS-54): a peer-reviewer worker answers / applies+amends / declines each
+  comment with a concrete rationale and posts it as an in-thread reply via
+  `scripts/qrspi_comment_reply.py` (gh comment writes succeed with the bot's classic PAT —
+  the old cross-account write block is gone). A formal CHANGES_REQUESTED still outranks this.
+  Review *threads* still cannot be auto-**resolved** (only the reviewer resolves a thread), so
+  a PR whose sole outstanding signal is unresolved threads — with neither a change request nor
+  an unaddressed reviewer comment — is left for the reviewer and routes to `wait`.
 - Nothing merges until **every** PR in the stack is approved + clean; then the whole
   stack lands bottom-up.
 
@@ -89,6 +94,7 @@ trunk
 | `submit` | → [Submit](#action-submit) (finish/submit `phase`) |
 | `wait` | → [Wait](#action-wait) |
 | `revise` | → [Revise](#action-revise) (address feedback on `phase`) |
+| `respond_comment` | → [Respond Comment](#action-respond_comment) (reply to reviewer comment(s) on `phase`) |
 | `reset` | → [Reset](#action-reset) (discard `discardPhases`, return to `resetToPhase`) |
 | `land` | → [Land](#action-land) |
 
@@ -297,14 +303,55 @@ hard-stop with the error — never fabricate.
 
 The active phase PR exists but cannot be advanced autonomously. Either it is **awaiting
 review** (not yet approved, no change request), or it carries **unresolved review threads
-but no formal change request**. Threads cannot be resolved here — every authenticated gh
-PR-write mutation 403s on this cross-owned repo — so a thread-only PR is left for the
-reviewer to resolve rather than looped through revise (which could never clear the thread
-gate). Advancement waits on the human reviewer.
+but no formal change request and no unaddressed reviewer comment** (an unaddressed comment
+routes to [`respond_comment`](#action-respond_comment), which outranks `wait`). A thread cannot
+be auto-**resolved** — only the reviewer resolves a thread — so a thread-only PR is left for
+the reviewer rather than looped through revise (which could never clear the thread gate).
+Advancement waits on the human reviewer.
 
 Print: "`<ticket-id>` `<phase>` PR is awaiting review (`<reviewDecision>`)`<, N unresolved
 thread(s) left for the reviewer>`. Nothing to do until it is approved. Re-run
 `work on <ticket-id>` after review." Then exit.
+
+---
+
+## action: respond_comment
+
+A phase PR carries **one or more unaddressed reviewer comments** (the resolver's
+`commentTargets` — a reviewer comment with no later bot reply in-thread). This is
+**autonomous** (RUS-54). It fires even when the PR is **APPROVED**; a formal
+**CHANGES_REQUESTED** always outranks it (handled by `reset`/`revise` first).
+
+Engage **each** comment as an honest peer reviewer — you are **honesty-bound**, so never
+fabricate a fact, a fix, or agreement. For every target, choose exactly one:
+
+1. **Answer** — address the question/concern faithfully from the **actual** artifacts, code,
+   and PR state.
+2. **Apply** — make a sound suggested change **within this phase only** (a downstream change is
+   `reset`/`revise`, not this), then amend the phase commit in place via
+   `scripts/qrspi_revise_amend.py --ticket <id> --branch <branch>` (same self-locating
+   verify-gated amend revise uses; it FAILS if nothing was staged), and re-publish the stack
+   (`gt submit --publish --no-edit [--stack] --no-interactive`).
+3. **Decline** — give a concrete, respectful rationale grounded in the real state.
+
+Post the answer/applied-note/decline-rationale as the **in-thread reply** — that reply is the
+**only** place the rationale lives (do **not** duplicate it into artifacts or the impl-log).
+Post it with the tested, self-locating helper (it derives owner/repo; reply mode = the
+comment's `threadType`):
+
+```bash
+python3 scripts/qrspi_comment_reply.py --ticket <ticket-id> --pr <number> \
+  --comment-id <commentId> --reply-mode <inline|toplevel> --body-file <reply.md>
+```
+
+It prints a `ReplyEnvelope` `{ ok, replyId, inReplyToId, error? }`. Read `ok` off **stdout**
+(do not infer success from exit code alone). gh comment writes **succeed** here with the bot's
+classic PAT — the old cross-account write block is gone (see the gh-cross-account note); if a
+write ever fails, report it honestly and do **not** fall back to `gh pr edit`.
+
+**Idempotency is structural:** once the bot's reply is observed in the thread (or a newer bot
+top-level comment exists), the gather no longer reports that comment as unaddressed, so a later
+pass does not re-respond. Thread **resolution** is still the reviewer's job.
 
 ---
 
@@ -323,7 +370,7 @@ design-level change that invalidates plan/impl is handled by `reset`, not revise
    ```bash
    gt checkout <ticket-id>/<phase> --no-interactive    # for implementation, the affected slice branch(es), lowest first
    ```
-2. Read the change request — these are **read-only queries** (writes 403; see below):
+2. Read the change request — these are **read-only queries** (revise never mutates threads; see step 6):
    ```bash
    gh pr view <number> --json reviews,comments --jq '.reviews[] | select(.state == "CHANGES_REQUESTED")'
    gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved comments(first:20){nodes{path body}}}}}}}' \
@@ -349,13 +396,13 @@ design-level change that invalidates plan/impl is handled by `reset`, not revise
    ```bash
    gt submit --publish --no-edit --rerequest-review --no-interactive  # --stack if implementation
    ```
-6. **Do NOT resolve or reply to review threads, and do NOT run any `gh pr`/GraphQL
-   mutation.** Every authenticated gh PR write 403s here (the bot's fine-grained PAT cannot
-   write a repo owned by a *different* user — see the gh-cross-account note). Thread
-   resolution is the reviewer's job; leave threads as-is. Re-requesting review (via
-   Graphite's write-capable App credential) flips `reviewDecision` back to
-   `REVIEW_REQUIRED`; the reviewer must still re-review to approve. Print which
-   artifacts/files changed.
+6. **Do NOT resolve review threads here.** Thread **resolution** is the reviewer's job (only
+   the reviewer can mark a thread resolved); leave threads as-is. revise's termination signal
+   is the re-request-review flip, not thread clearing: re-requesting review flips
+   `reviewDecision` back to `REVIEW_REQUIRED`, so the next pass returns `wait` instead of
+   re-firing revise; the reviewer must still re-review to approve. (Replying to a reviewer's
+   *comment* is a separate, autonomous action — [`respond_comment`](#action-respond_comment) —
+   not part of revise.) Print which artifacts/files changed.
 
 ---
 
@@ -585,17 +632,19 @@ seed the PR title (subject line) and body (the rest) **when it creates the PR**.
 
 - `gt submit` (1.8.x) has **no** `--body`/`--body-file` flag — the commit message is the
   only non-interactive lever for the description, and Graphite reads it **at creation only**
-  (re-submitting an existing PR does *not* re-sync its body from the commit message).
-- The `gh`-authenticated token is a fine-grained PAT owned by a **different personal account**
-  than the repo owner. It can read this public repo but every authenticated PR write returns
-  `403 Resource not accessible by personal access token` (REST `PATCH /pulls`, GraphQL
-  `updatePullRequest`, and `gh pr edit` all fail). `gt submit` itself works because Graphite
-  authenticates through its own GitHub-App credential — a separate, write-capable path.
+  (re-submitting an existing PR does *not* re-sync its body from the commit message). This is
+  the binding constraint, and it is independent of token capability.
+- `gt submit` creates and pushes the PR through Graphite's own GitHub-App credential. The
+  `gh`-authenticated bot token (a **classic** PAT) can also write to this repo — PR *comment*
+  writes succeed (that is what `respond_comment` relies on; the old cross-account write block is
+  gone, see the gh-cross-account note) — so the reason we don't `gh pr edit` a body is purely the
+  `gt`/commit-message authoring model above, **not** a permission wall.
 
 So: design/plan PRs carry their heredoc commit message as the body; implementation slice PRs
 get a focused "Part N/total" body from the slice commit, and slice 1's commit message is
 overwritten with the full `pr-summary.md` via `scripts/qrspi_pr_body.py` **before** the
-creating `gt submit`. Trying to set a body with `gh` is a guaranteed 403 — do not add it back.
+creating `gt submit`. Bodies are seeded by the commit message at creation, so there is simply
+no `gh pr edit` step — do not add one back.
 
 ---
 
