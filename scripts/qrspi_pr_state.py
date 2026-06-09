@@ -33,7 +33,18 @@ query($owner:String!, $repo:String!, $head:String!) {
         merged
         mergedAt
         reviewDecision
-        reviewThreads(first:100) { nodes { isResolved } }
+        reviewThreads(first:100) {
+          nodes {
+            id
+            isResolved
+            comments(first:100) {
+              nodes { databaseId body createdAt author { login } }
+            }
+          }
+        }
+        comments(first:100) {
+          nodes { databaseId body createdAt author { login } }
+        }
       }
     }
   }
@@ -47,6 +58,83 @@ def unresolved_thread_count(review_threads):
     """Count threads whose isResolved is falsey. `review_threads` is the list of
     {isResolved: bool} nodes from the GraphQL reviewThreads field."""
     return sum(1 for t in (review_threads or []) if not t.get("isResolved"))
+
+
+def _comment_login(comment):
+    """The login of a comment's author, or "" if absent. Reads the API field
+    author.login — never a regex over a JSON blob (ref: AC5, AC6, Decision 2)."""
+    return ((comment or {}).get("author") or {}).get("login") or ""
+
+
+def unaddressed_reviewer_comments(pr_node, bot_login):
+    """Reviewer-authored comments on `pr_node` with no later bot reply in-thread.
+
+    Pure function (unit-tested). Given a parsed PR node and the bot/authenticated
+    login, returns a list of CommentTarget dicts:
+        {commentId, author, body, threadType, threadId, lastReplyAuthor}
+
+    Comment ids come from .databaseId and authors from author.login (API fields,
+    never a JSON-blob regex). Any comment authored by bot_login is filtered out.
+
+    Inline rule: a reviewer comment in a reviewThreads thread is unaddressed iff no
+    LATER comment in that same thread's comment chain is authored by bot_login.
+    threadType="inline", threadId=the thread id, lastReplyAuthor=the last comment's
+    author login.
+
+    Top-level rule: a top-level reviewer comment is unaddressed iff no bot-authored
+    top-level comment has a strictly greater createdAt. Both sets are ordered by
+    createdAt ascending before comparison. threadType="toplevel", threadId=None,
+    lastReplyAuthor=None (ref: AC5, AC6, Decision 1, Decision 2; plan §1.3-1.5)."""
+    targets = []
+
+    # --- inline (review-thread) comments ----------------------------------
+    threads = ((pr_node or {}).get("reviewThreads") or {}).get("nodes", []) or []
+    for thread in threads:
+        thread_id = thread.get("id")
+        comments = (thread.get("comments") or {}).get("nodes", []) or []
+        ordered = sorted(comments, key=lambda c: c.get("createdAt") or "")
+        last_reply = _comment_login(ordered[-1]) if ordered else None
+        for idx, c in enumerate(ordered):
+            author = _comment_login(c)
+            if author == bot_login:
+                continue
+            # Unaddressed iff no LATER comment in the thread is bot-authored.
+            if any(_comment_login(later) == bot_login for later in ordered[idx + 1:]):
+                continue
+            targets.append({
+                "commentId": c.get("databaseId"),
+                "author": author,
+                "body": c.get("body"),
+                "threadType": "inline",
+                "threadId": thread_id,
+                "lastReplyAuthor": last_reply,
+            })
+
+    # --- top-level comments -----------------------------------------------
+    top = ((pr_node or {}).get("comments") or {}).get("nodes", []) or []
+    top_ordered = sorted(top, key=lambda c: c.get("createdAt") or "")
+    latest_bot_created = None
+    for c in top_ordered:
+        if _comment_login(c) == bot_login:
+            latest_bot_created = c.get("createdAt") or ""
+    for c in top_ordered:
+        author = _comment_login(c)
+        if author == bot_login:
+            continue
+        created = c.get("createdAt") or ""
+        # Addressed iff some bot top-level comment is strictly newer.
+        if latest_bot_created is not None and latest_bot_created > created:
+            continue
+        targets.append({
+            "commentId": c.get("databaseId"),
+            "author": author,
+            "body": c.get("body"),
+            "threadType": "toplevel",
+            "threadId": None,
+            "lastReplyAuthor": None,
+        })
+
+    return targets
 
 
 def select_pr(nodes, prefer):
@@ -78,7 +166,7 @@ def select_pr(nodes, prefer):
     raise ValueError("unknown prefer: %r" % (prefer,))
 
 
-def parse_pr_nodes(nodes):
+def parse_pr_nodes(nodes, bot_login=None):
     """Reduce the GraphQL pullRequests.nodes list for one head branch to the
     normalized PR shape. No open PR -> prExists False.
 
@@ -89,6 +177,10 @@ def parse_pr_nodes(nodes):
     callers (resolver/restack) read only prExists/number/reviewDecision/
     unresolvedThreads and are unaffected (ref: Decision 1, Q2, Q7).
 
+    `commentTargets` is also ADDITIVE: the list of unaddressed reviewer comments on
+    the active PR (via unaddressed_reviewer_comments). It defaults to [] when no
+    bot_login is supplied or there are no comments (ref: AC1, AC5, AC6; plan §1.6).
+
     Selection is the advancement-facing PR via select_pr(nodes, prefer="active")
     — identity nodes[0] — so this stays byte-for-byte the current behavior; the
     merge/land path uses prefer="merged" separately (ref: AC3, Q10, OQ3)."""
@@ -96,8 +188,10 @@ def parse_pr_nodes(nodes):
     if node is None:
         return {"prExists": False, "number": None,
                 "reviewDecision": None, "unresolvedThreads": 0,
-                "merged": False, "state": None, "mergedAt": None}
+                "merged": False, "state": None, "mergedAt": None,
+                "commentTargets": []}
     threads = (node.get("reviewThreads") or {}).get("nodes", [])
+    targets = unaddressed_reviewer_comments(node, bot_login) if bot_login else []
     return {
         "prExists": True,
         "number": node.get("number"),
@@ -106,6 +200,7 @@ def parse_pr_nodes(nodes):
         "merged": bool(node.get("merged")),
         "state": node.get("state"),
         "mergedAt": node.get("mergedAt"),
+        "commentTargets": targets,
     }
 
 
@@ -261,6 +356,15 @@ def _file_in_tree(ref, path):
     return res.returncode == 0
 
 
+def _bot_login():
+    """The gh-authenticated login (the bot whose replies "address" a comment), or
+    "" on any error. Read-only; an unresolvable login degrades to no comment
+    detection (commentTargets default []) rather than crashing the gather."""
+    res = subprocess.run(["gh", "api", "user", "-q", ".login"],
+                         capture_output=True, text=True)
+    return res.stdout.strip() if res.returncode == 0 else ""
+
+
 def _query_pr(owner, repo, head):
     res = subprocess.run(
         ["gh", "api", "graphql",
@@ -278,6 +382,7 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main",
     lines = _git_branches(ticket)
     branches = branch_set(lines)
     snums = slice_numbers(lines)
+    bot = _bot_login()
 
     # A phase exists only if its branch carries real work (>=1 commit ahead of trunk).
     # This filters out the empty placeholder branch worktree-setup leaves on a fresh
@@ -288,8 +393,8 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main",
     def phase_pr(name):
         head = "%s/%s" % (ticket, name)
         exists = head in real
-        pr = parse_pr_nodes(_query_pr(owner, repo, head)) if exists else \
-            parse_pr_nodes([])
+        pr = parse_pr_nodes(_query_pr(owner, repo, head), bot_login=bot) if exists else \
+            parse_pr_nodes([], bot_login=bot)
         pr["branchExists"] = exists
         return pr
 
@@ -297,7 +402,7 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main",
     slices = []
     for n in real_snums:
         head = "%s/slice-%d" % (ticket, n)
-        pr = parse_pr_nodes(_query_pr(owner, repo, head))
+        pr = parse_pr_nodes(_query_pr(owner, repo, head), bot_login=bot)
         pr["n"] = n
         slices.append(pr)
 
