@@ -31,6 +31,11 @@ Decision actions:
                     mutations 403 on this cross-owned repo — see the gh-cross-account note),
                     so a thread-only PR is left for the reviewer to resolve rather than
                     looping an autonomous revise that can never satisfy the thread gate.
+    respond_comment a phase PR carries >=1 unaddressed reviewer comment (commentTargets)
+                    -> reply to the comment(s) in place (AUTONOMOUS). Fires even when the
+                    PR is APPROVED; a formal CHANGES_REQUESTED still outranks it (the
+                    reset/revise check runs first). Slotted ahead of the wait/APPROVED
+                    sinks so an approved-but-commented PR is answered, not waited on.
     revise          frontier phase PR carries a formal CHANGES_REQUESTED -> address the
                     feedback in place and re-request review (AUTONOMOUS). Driven by the
                     CHANGES_REQUESTED decision, NOT by thread count: the revise worker
@@ -50,6 +55,20 @@ import json
 import sys
 
 PHASES = ["design", "plan", "implementation"]
+
+# The legal action vocabulary the resolver may emit. respond_comment is the
+# RUS-54 addition (reply to unaddressed reviewer comments in place).
+ACTIONS = (
+    "entry_blocked",
+    "run_design",
+    "submit",
+    "wait",
+    "revise",
+    "respond_comment",
+    "advance",
+    "land",
+    "reset",
+)
 
 
 def _order(phase):
@@ -82,6 +101,18 @@ def phase_changes_requested(phases, name):
     return _pr_changes_requested(phases.get(name, {}))
 
 
+def phase_comment_targets(phases, name):
+    """The unaddressed reviewer comments carried by phase `name`. For implementation,
+    the comment targets across ALL slice PRs are aggregated (the stack is reviewed as
+    a whole). Empty list when none (ref: AC1, structure Contracts respond_comment)."""
+    if name == "implementation":
+        out = []
+        for s in _impl_slices(phases):
+            out.extend(s.get("commentTargets") or [])
+        return out
+    return phases.get(name, {}).get("commentTargets") or []
+
+
 def resolve(state):
     """Pure decision function. Returns a decision dict (see module docstring)."""
     phases = state.get("phases", {})
@@ -94,6 +125,7 @@ def resolve(state):
             "nextPhase": kw.get("nextPhase"),
             "resetToPhase": kw.get("resetToPhase"),
             "discardPhases": kw.get("discardPhases", []),
+            "commentTargets": kw.get("commentTargets", []),
             "reason": kw.get("reason", ""),
         }
         return out
@@ -131,6 +163,18 @@ def resolve(state):
         return decision("revise", phase=k,
                         reason="Changes requested on %s (top phase); address in place and "
                                "re-request review." % k)
+
+    # 2b. Respond-to-comment check — runs strictly AFTER reset/revise (so a formal
+    # CHANGES_REQUESTED always outranks it) and AHEAD of the wait/APPROVED sinks (so an
+    # approved-but-commented PR is answered, not waited on). The lowest existing phase
+    # carrying >=1 unaddressed reviewer comment wins. Fires even when the PR is APPROVED
+    # (ref: AC1, Decision precedence, Risk Register row 4).
+    commented = [p for p in existing if phase_comment_targets(phases, p)]
+    if commented:
+        c = min(commented, key=_order)
+        return decision("respond_comment", phase=c,
+                        commentTargets=phase_comment_targets(phases, c),
+                        reason="%s PR has unaddressed reviewer comment(s); reply in place." % c)
 
     # 3. Active phase = highest existing phase.
     active = max(existing, key=_order)

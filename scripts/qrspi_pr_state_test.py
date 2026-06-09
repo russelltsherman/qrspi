@@ -17,6 +17,7 @@ from qrspi_pr_state import (
     stack_merge_state,
     is_stack_fully_merged,
     build_state,
+    unaddressed_reviewer_comments,
 )
 
 failures = 0
@@ -58,26 +59,26 @@ check("missing isResolved treated as unresolved",
 check("no PR nodes -> prExists False",
       parse_pr_nodes([]),
       {"prExists": False, "number": None, "reviewDecision": None, "unresolvedThreads": 0,
-       "merged": False, "state": None, "mergedAt": None})
+       "merged": False, "state": None, "mergedAt": None, "commentTargets": []})
 
 check("approved, all threads resolved",
       parse_pr_nodes([{"number": 52, "reviewDecision": "APPROVED", "state": "OPEN",
                        "reviewThreads": {"nodes": [{"isResolved": True}]}}]),
       {"prExists": True, "number": 52, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
-       "merged": False, "state": "OPEN", "mergedAt": None})
+       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": []})
 
 check("changes requested with unresolved threads",
       parse_pr_nodes([{"number": 7, "reviewDecision": "CHANGES_REQUESTED", "state": "OPEN",
                        "reviewThreads": {"nodes": [{"isResolved": False},
                                                    {"isResolved": True}]}}]),
       {"prExists": True, "number": 7, "reviewDecision": "CHANGES_REQUESTED", "unresolvedThreads": 1,
-       "merged": False, "state": "OPEN", "mergedAt": None})
+       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": []})
 
 check("null reviewDecision normalized to None",
       parse_pr_nodes([{"number": 9, "reviewDecision": None, "state": "OPEN",
                        "reviewThreads": {"nodes": []}}]),
       {"prExists": True, "number": 9, "reviewDecision": None, "unresolvedThreads": 0,
-       "merged": False, "state": "OPEN", "mergedAt": None})
+       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": []})
 
 # --- parse_pr_nodes: additive merge fields (Decision 1, Q2, Q7) -------------
 check("merged PR surfaces merged/state/mergedAt",
@@ -85,7 +86,8 @@ check("merged PR surfaces merged/state/mergedAt",
                        "merged": True, "mergedAt": "2026-06-08T00:00:00Z",
                        "reviewThreads": {"nodes": []}}]),
       {"prExists": True, "number": 60, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
-       "merged": True, "state": "MERGED", "mergedAt": "2026-06-08T00:00:00Z"})
+       "merged": True, "state": "MERGED", "mergedAt": "2026-06-08T00:00:00Z",
+       "commentTargets": []})
 
 # --- select_pr (named selection primitive: advancement vs merge/land) -------
 _multi = [{"number": 100, "merged": False, "reviewDecision": "APPROVED",
@@ -126,10 +128,10 @@ _single = {"number": 52, "merged": False, "reviewDecision": "APPROVED", "state":
            "reviewThreads": {"nodes": [{"isResolved": True}]}}
 check("select_pr active single-PR identity (same object)",
       select_pr([_single], "active") is _single, True)
-check("parse_pr_nodes single-PR shape unchanged",
+check("parse_pr_nodes single-PR shape unchanged (commentTargets [] without bot_login)",
       parse_pr_nodes([_single]),
       {"prExists": True, "number": 52, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
-       "merged": False, "state": "OPEN", "mergedAt": None})
+       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": []})
 
 check("select_pr unknown prefer raises ValueError",
       _raises(lambda: select_pr(_multi, "bogus"), ValueError), True)
@@ -337,6 +339,98 @@ check("build_state default -> blockedOpen False",
       _default["blockedOpen"], False)
 check("build_state default -> blockedBy []",
       _default["blockedBy"], [])
+
+
+# --- unaddressed_reviewer_comments (RUS-54: comment gather, AC5/AC6) --------
+BOT = "qrspi-bot"
+
+
+def _inline_thread(thread_id, *comments):
+    """A reviewThreads node. Each comment is (databaseId, login, createdAt[, body])."""
+    nodes = []
+    for c in comments:
+        cid, login, created = c[0], c[1], c[2]
+        body = c[3] if len(c) > 3 else "b%s" % cid
+        nodes.append({"databaseId": cid, "body": body, "createdAt": created,
+                      "author": {"login": login}})
+    return {"id": thread_id, "isResolved": False, "comments": {"nodes": nodes}}
+
+
+def _pr(threads=None, top=None):
+    return {"reviewThreads": {"nodes": threads or []},
+            "comments": {"nodes": top or []}}
+
+
+def _top(cid, login, created, body=None):
+    return {"databaseId": cid, "body": body or "t%s" % cid, "createdAt": created,
+            "author": {"login": login}}
+
+
+# T9 — inline reviewer comment, no bot reply -> one CommentTarget; ids from
+# .databaseId (NOT a nested user.id), author from author.login, threadType inline.
+_t9 = unaddressed_reviewer_comments(
+    _pr(threads=[_inline_thread("THRD1",
+                                (501, "reviewer-r", "2026-06-09T01:00:00Z", "please fix"))]),
+    BOT)
+check("inline reviewer comment, no bot reply -> one target", len(_t9), 1)
+check("inline target commentId from .databaseId (not user.id)", _t9[0]["commentId"], 501)
+check("inline target author from author.login", _t9[0]["author"], "reviewer-r")
+check("inline target threadType inline", _t9[0]["threadType"], "inline")
+check("inline target threadId is the thread id", _t9[0]["threadId"], "THRD1")
+check("inline target body surfaced", _t9[0]["body"], "please fix")
+
+# T10 — bot reply LATER in the same inline thread -> not returned (idempotency/AC5).
+_t10 = unaddressed_reviewer_comments(
+    _pr(threads=[_inline_thread("THRD2",
+                                (510, "reviewer-r", "2026-06-09T01:00:00Z"),
+                                (511, BOT, "2026-06-09T02:00:00Z"))]),
+    BOT)
+check("inline reviewer comment with later bot reply -> not unaddressed", _t10, [])
+
+# T10b — bot reply EARLIER, reviewer follows up after -> still unaddressed (later wins).
+_t10b = unaddressed_reviewer_comments(
+    _pr(threads=[_inline_thread("THRD3",
+                                (520, "reviewer-r", "2026-06-09T01:00:00Z"),
+                                (521, BOT, "2026-06-09T02:00:00Z"),
+                                (522, "reviewer-r", "2026-06-09T03:00:00Z"))]),
+    BOT)
+check("reviewer follow-up after bot reply -> unaddressed again", len(_t10b), 1)
+check("reviewer follow-up target is the latest reviewer comment", _t10b[0]["commentId"], 522)
+check("inline lastReplyAuthor is the thread's last comment author",
+      _t10b[0]["lastReplyAuthor"], "reviewer-r")
+
+# T11 — top-level reviewer comment with a LATER bot top-level -> not returned;
+# without one -> returned with threadType toplevel.
+_t11_addressed = unaddressed_reviewer_comments(
+    _pr(top=[_top(530, "reviewer-r", "2026-06-09T01:00:00Z"),
+             _top(531, BOT, "2026-06-09T02:00:00Z")]),
+    BOT)
+check("top-level reviewer comment with later bot comment -> addressed", _t11_addressed, [])
+
+_t11_open = unaddressed_reviewer_comments(
+    _pr(top=[_top(540, "reviewer-r", "2026-06-09T01:00:00Z")]),
+    BOT)
+check("top-level reviewer comment, no later bot comment -> one target", len(_t11_open), 1)
+check("top-level target threadType toplevel", _t11_open[0]["threadType"], "toplevel")
+check("top-level target threadId None", _t11_open[0]["threadId"], None)
+check("top-level target commentId from .databaseId", _t11_open[0]["commentId"], 540)
+
+# T11b — bot top-level is EARLIER than the reviewer comment -> still unaddressed
+# (ordering by createdAt, not array order).
+_t11_earlier_bot = unaddressed_reviewer_comments(
+    _pr(top=[_top(550, BOT, "2026-06-09T01:00:00Z"),
+             _top(551, "reviewer-r", "2026-06-09T02:00:00Z")]),
+    BOT)
+check("top-level reviewer comment newer than bot's -> unaddressed", len(_t11_earlier_bot), 1)
+check("top-level newer-than-bot target id", _t11_earlier_bot[0]["commentId"], 551)
+
+# T12 — a comment authored by bot_login is ALWAYS filtered out (author attribution),
+# inline and top-level alike.
+_t12 = unaddressed_reviewer_comments(
+    _pr(threads=[_inline_thread("THRD9", (560, BOT, "2026-06-09T01:00:00Z"))],
+        top=[_top(561, BOT, "2026-06-09T01:00:00Z")]),
+    BOT)
+check("only bot-authored comments -> empty (filtered out)", _t12, [])
 
 
 def run():

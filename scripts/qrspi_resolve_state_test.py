@@ -11,9 +11,10 @@ import sys
 from qrspi_resolve_state import resolve
 
 
-def _phase(branch=True, pr=True, decision="REVIEW_REQUIRED", threads=0):
+def _phase(branch=True, pr=True, decision="REVIEW_REQUIRED", threads=0, comments=None):
     return {"branchExists": branch, "prExists": pr,
-            "reviewDecision": decision, "unresolvedThreads": threads}
+            "reviewDecision": decision, "unresolvedThreads": threads,
+            "commentTargets": comments or []}
 
 
 def _impl(slices, expected=None, pr_summary=True):
@@ -25,8 +26,16 @@ def _impl(slices, expected=None, pr_summary=True):
             "prSummaryCommitted": pr_summary}
 
 
-def _slice(n, pr=True, decision="REVIEW_REQUIRED", threads=0):
-    return {"n": n, "prExists": pr, "reviewDecision": decision, "unresolvedThreads": threads}
+def _slice(n, pr=True, decision="REVIEW_REQUIRED", threads=0, comments=None):
+    return {"n": n, "prExists": pr, "reviewDecision": decision,
+            "unresolvedThreads": threads, "commentTargets": comments or []}
+
+
+# A minimal CommentTarget for the resolver precedence cases (the resolver only
+# checks presence/count, not field contents).
+def _ct(cid=1):
+    return {"commentId": cid, "author": "reviewer-r", "body": "fix",
+            "threadType": "toplevel", "threadId": None, "lastReplyAuthor": None}
 
 
 def state(assigned=True, linear="Selected", phases=None,
@@ -221,6 +230,62 @@ case("in-flight (design branch) + blocked -> unchanged (advance), blocker gate i
            blockedOpen=True, blockedBy=["RUS-99"],
            phases={"design": _phase(decision="APPROVED", threads=0)}),
      {"action": "advance", "phase": "design", "nextPhase": "plan"})
+
+
+# --- respond_comment precedence (RUS-54, AC1) -------------------------------
+# T13 — commentTargets AND CHANGES_REQUESTED -> reset/revise wins (CR outranks).
+case("commentTargets + CHANGES_REQUESTED (top) -> revise, NOT respond_comment (CR outranks)",
+     state(phases={"design": _phase(decision="CHANGES_REQUESTED", comments=[_ct()])}),
+     {"action": "revise", "phase": "design"})
+
+case("commentTargets on design + CHANGES_REQUESTED on design with plan above -> reset (CR outranks)",
+     state(phases={"design": _phase(decision="CHANGES_REQUESTED", comments=[_ct()]),
+                   "plan": _phase(decision="APPROVED")}),
+     {"action": "reset", "resetToPhase": "design", "discardPhases": ["plan"]})
+
+# T14 — commentTargets + not-APPROVED / unresolved threads -> respond_comment (outranks wait).
+case("commentTargets + under review (no CR) -> respond_comment (outranks wait)",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", comments=[_ct()])}),
+     {"action": "respond_comment", "phase": "design"})
+
+case("commentTargets + unresolved threads (no CR) -> respond_comment (outranks wait)",
+     state(phases={"design": _phase(decision="APPROVED", threads=2, comments=[_ct()])}),
+     {"action": "respond_comment", "phase": "design"})
+
+# T15 — commentTargets AND APPROVED -> respond_comment (fires when APPROVED).
+case("commentTargets + APPROVED (no threads) -> respond_comment (fires when APPROVED)",
+     state(phases={"design": _phase(decision="APPROVED", comments=[_ct()])}),
+     {"action": "respond_comment", "phase": "design"})
+
+# respond_comment carries the phase's comment targets in the decision payload.
+case("respond_comment decision carries commentTargets payload",
+     state(phases={"design": _phase(decision="APPROVED", comments=[_ct(42)])}),
+     {"action": "respond_comment", "phase": "design", "commentTargets": [_ct(42)]})
+
+# respond_comment fires on the implementation stack too (aggregated across slices).
+case("commentTargets on a slice PR -> respond_comment for implementation",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="APPROVED", comments=[_ct()])])}),
+     {"action": "respond_comment", "phase": "implementation"})
+
+# Lowest phase carrying comments wins (precedence by phase order).
+case("commentTargets on both design and plan -> respond_comment for design (lowest)",
+     state(phases={"design": _phase(decision="APPROVED", comments=[_ct(1)]),
+                   "plan": _phase(decision="APPROVED", comments=[_ct(2)])}),
+     {"action": "respond_comment", "phase": "design"})
+
+# T16 — no unaddressed comments (empty commentTargets) -> does NOT fire respond_comment.
+case("no commentTargets, approved+clean -> advance, NOT respond_comment",
+     state(phases={"design": _phase(decision="APPROVED", comments=[])}),
+     {"action": "advance", "phase": "design", "nextPhase": "plan"})
+
+case("no commentTargets, approved slices -> land, NOT respond_comment",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="APPROVED"),
+                                            _slice(2, decision="APPROVED")])}),
+     {"action": "land", "phase": "implementation"})
 
 
 def run():
