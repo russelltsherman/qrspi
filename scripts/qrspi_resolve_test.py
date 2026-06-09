@@ -17,6 +17,7 @@ from qrspi_resolve import (
     detect_existing,
     pick_tip,
     build_envelope,
+    comment_targets_of,
     read_ticket_content,
     select_source,
     references_me,
@@ -120,6 +121,26 @@ check("envelope carries ticketContent",
 check("err envelope still carries ticketContent",
       build_envelope("/wt/RUS-1", None, _ex, ok=False, error="boom",
                      ticket_content="kept")["ticketContent"], "kept")
+
+# --- top-level commentTargets (re-emitted from the decision for doRespondComment) --
+check("non-respond decision -> empty top-level commentTargets",
+      ok_env["commentTargets"], [])
+check("err envelope -> empty top-level commentTargets",
+      err_env["commentTargets"], [])
+_tgts = [{"commentId": 7, "author": "rev", "body": "fix?", "threadType": "inline",
+          "threadId": "PRT_1", "lastReplyAuthor": "rev"}]
+_rc_dec = {"action": "respond_comment", "phase": "design",
+           "commentTargets": _tgts, "reason": "y"}
+rc_env = build_envelope("/wt/RUS-1", _rc_dec, _ex, ok=True)
+check("respond_comment decision surfaces top-level commentTargets",
+      rc_env["commentTargets"], _tgts)
+check("comment_targets_of None -> []", comment_targets_of(None), [])
+check("comment_targets_of decision w/o key -> []",
+      comment_targets_of({"action": "wait"}), [])
+check("comment_targets_of non-list value -> []",
+      comment_targets_of({"commentTargets": "oops"}), [])
+check("comment_targets_of passes a list through",
+      comment_targets_of({"commentTargets": _tgts}), _tgts)
 
 # --- read_ticket_content (token-free staging file -> envelope) ---------------
 check("read_ticket_content empty path -> ''", read_ticket_content(""), "")

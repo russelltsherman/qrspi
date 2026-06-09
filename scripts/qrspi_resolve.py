@@ -174,6 +174,23 @@ def read_ticket_content(path):
         return ""
 
 
+def comment_targets_of(decision):
+    """The per-phase comment-target list to surface at the TOP LEVEL of the envelope.
+
+    The gather (qrspi_pr_state.build_state) already self-resolves the authenticated
+    bot login and attaches `commentTargets` to every phase/slice, and the resolver
+    folds the active phase's targets into `decision["commentTargets"]` when it emits
+    `respond_comment`. We re-emit exactly those targets as a top-level `commentTargets`
+    field because the `decision` dict's key set is fixed and the consumer
+    (qrspi-batch doRespondComment) iterates `r.commentTargets` directly. Pure: a
+    None/empty decision (e.g. the ok:false error envelope) yields []. Only the
+    respond_comment decision carries a non-empty list."""
+    if not isinstance(decision, dict):
+        return []
+    targets = decision.get("commentTargets")
+    return targets if isinstance(targets, list) else []
+
+
 def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
                    reviewers="", team_reviewers="", ticket_content=""):
     """Assemble the JSON envelope the qrspi-batch resolveTicket() step consumes.
@@ -182,6 +199,11 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
     `reviewers`/`team_reviewers` are comma-joined strings ready to drop straight
     behind `gt submit --reviewers`/`--team-reviewers` (empty string => omit the
     flag), so the JS finalize prompts never carry a hard-coded username.
+
+    `commentTargets` is re-emitted at the TOP LEVEL (mirroring the active phase's
+    targets the resolver folded into `decision`) so the respond_comment consumer
+    iterates `r.commentTargets` without reaching into `decision`. It is [] for every
+    non-respond_comment decision (additive; unknown to old consumers, which ignore it).
 
     `ticket_content` (the Linear title+body the caller staged) is embedded here so
     the script — not the worker model — owns the COMPLETE envelope. The worker only
@@ -194,6 +216,7 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
         "worktreeDir": worktree_dir,
         "existing": existing,
         "decision": decision,
+        "commentTargets": comment_targets_of(decision),
         "reviewers": reviewers,
         "teamReviewers": team_reviewers,
         "ticketContent": ticket_content,

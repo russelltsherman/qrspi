@@ -39,12 +39,17 @@ export const meta = {
 // artifacts/code in place, amends the phase commit keeping its subject, and re-requests
 // review via `gt submit --rerequest-review`. Re-requesting flips the PR's reviewDecision
 // back to REVIEW_REQUIRED, so the next pass resolves to `wait` instead of re-firing —
-// that decision flip is the loop-safe termination signal, because review THREADS cannot
-// be resolved here (GitHub thread mutations 403 on this cross-owned repo — see the
-// gh-cross-account note), so threads are left for the reviewer and a thread-only PR (no
-// change request) resolves to `wait`, never revise. Not-yet-approved `wait` tickets are
-// skipped. Automatic downstream `reset`/discard IS performed (decision 10), then the
-// ticket stops at the reset-to phase for its own (now autonomous) CHANGES_REQUESTED revise.
+// that decision flip is the loop-safe termination signal, because review THREADS cannot be
+// auto-RESOLVED here (only the reviewer resolves a thread), so threads are left for the
+// reviewer. `respond_comment` (RUS-54) is ALSO autonomous: a phase PR carrying unaddressed
+// reviewer COMMENTS (no formal change request) gets a per-comment peer-reviewer reply via
+// scripts/qrspi_comment_reply.py — gh comment writes succeed with the bot's classic PAT (the
+// old cross-account write block is gone, see the gh-cross-account note); idempotency is
+// structural (an observed bot reply removes the comment from the gather's unaddressed set).
+// A PR whose ONLY outstanding signal is unresolved threads — no change request, no unaddressed
+// comment — resolves to `wait`. Not-yet-approved `wait` tickets are skipped. Automatic
+// downstream `reset`/discard IS performed (decision 10), then the ticket stops at the reset-to
+// phase for its own (now autonomous) CHANGES_REQUESTED revise.
 // ---------------------------------------------------------------------------
 
 const SKILL = '.claude/skills/qrspi-work/SKILL.md'
@@ -99,10 +104,13 @@ const TICKETS_SCHEMA = {
 //   { ok:boolean, error?:string, repoRoot, worktreeDir, ticketContent,
 //     existing{ questions,research,design,structure,plan,worktree : boolean },
 //     reviewers, teamReviewers,                 // comma-joined CSV, "" => omit flag
-//     decision{ action, phase, nextPhase, resetToPhase, discardPhases[], reason } }
-// action ∈ entry_blocked|run_design|advance|submit|wait|revise|reset|land.
+//     commentTargets[],                         // unaddressed reviewer comments (respond_comment)
+//     decision{ action, phase, nextPhase, resetToPhase, discardPhases[],
+//               commentTargets[], reason } }
+// action ∈ entry_blocked|run_design|advance|submit|wait|revise|respond_comment|reset|land.
 const RESOLVE_ACTIONS = new Set(
-  ['entry_blocked', 'run_design', 'advance', 'submit', 'wait', 'revise', 'reset', 'land'])
+  ['entry_blocked', 'run_design', 'advance', 'submit', 'wait', 'revise',
+   'respond_comment', 'reset', 'land'])
 
 // Extract the outermost {...} from free text by brace-depth scan (string-aware, so
 // braces inside JSON string values don't fool it). Returns the JSON substring or null.
@@ -216,6 +224,21 @@ const SLICE_COMMIT_SCHEMA = {
     error: { type: 'string' },
     branch: { type: 'string' },
     notesForNext: { type: 'string' },
+  },
+}
+
+// One peer-reviewer worker's result for a single reviewer comment (respond_comment).
+// `applied` is true only when the worker chose APPLY and the amend+publish succeeded; a
+// pure ANSWER/DECLINE reply is ok:true with applied:false (no commit was amended).
+const COMMENT_REPLY_SCHEMA = {
+  type: 'object',
+  required: ['ok', 'summary'],
+  properties: {
+    ok: { type: 'boolean' },
+    applied: { type: 'boolean' },
+    error: { type: 'string' },
+    prUrl: { type: 'string' },
+    summary: { type: 'string' },
   },
 }
 
@@ -567,7 +590,7 @@ REPO_ROOT = ${wd}`,
 
   phase('Finalize')
   const fin = await agent(
-    `You are the implementation finalize worker for ${t.id}, in ${wd}. Follow the SKILL "advance → implementation" submit steps. PR bodies are authored at Graphite CREATION via the commit message — there is NO \`gh pr edit\` step (the gh PAT cannot write PRs on this repo; it returns 403). Do:
+    `You are the implementation finalize worker for ${t.id}, in ${wd}. Follow the SKILL "advance → implementation" submit steps. PR bodies are authored at Graphite CREATION via the commit message — there is NO \`gh pr edit\` step (\`gt submit\` has no body flag and seeds the body from the commit message at creation only; this is a gt/commit-message constraint, not a permission wall). Do:
 1. Amend pr-summary.md into the last slice commit as the durable artifact (git add .qrspi/${t.id}/pr-summary.md && gt modify --no-interactive).
 2. Splice pr-summary.md into the SLICE-1 commit MESSAGE (so the slice-1 PR body is the full summary at creation), BEFORE submitting, by running EXACTLY this one self-locating command verbatim — no path edits, no alternatives:
      python3 ${r.repoRoot}/scripts/qrspi_pr_body.py --ticket ${t.id} --slice 1
@@ -587,7 +610,7 @@ async function doSubmit(t, r) {
   phase('Finalize')
 
   const fin = await agent(
-    `You are the submit worker for ${t.id} (active phase: ${r.decision.phase}), in ${r.worktreeDir}. Follow the "action: submit" steps of ${SKILL}: the phase branch exists but its PR was not opened. Verify the phase's artifacts are present+non-empty (if any are missing AND cannot be produced, return ok:false — never fabricate). This path CREATES the PR, and PR bodies are authored at Graphite creation via the commit message (there is NO gh pr edit — the gh PAT 403s on PR writes). If the active phase is IMPLEMENTATION, FIRST splice pr-summary.md into the slice-1 commit message by running EXACTLY, verbatim: \`python3 ${r.repoRoot}/scripts/qrspi_pr_body.py --ticket ${t.id} --slice 1\` (if it prints ok:false, return ok:false — HARD STOP). Then submit the PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)} --no-edit --no-interactive\` (add --stack for implementation)${reviewerFlags(r) ? ' — submit the reviewer flag EXACTLY as written, it surfaces the PR in the reviewer\'s Graphite queue' : ''} and BEST-EFFORT project the matching Linear review status. Do NOT run gh pr edit.
+    `You are the submit worker for ${t.id} (active phase: ${r.decision.phase}), in ${r.worktreeDir}. Follow the "action: submit" steps of ${SKILL}: the phase branch exists but its PR was not opened. Verify the phase's artifacts are present+non-empty (if any are missing AND cannot be produced, return ok:false — never fabricate). This path CREATES the PR, and PR bodies are authored at Graphite creation via the commit message (there is NO gh pr edit — \`gt submit\` has no body flag and seeds the body at creation only; a gt/commit-message constraint, not a permission wall). If the active phase is IMPLEMENTATION, FIRST splice pr-summary.md into the slice-1 commit message by running EXACTLY, verbatim: \`python3 ${r.repoRoot}/scripts/qrspi_pr_body.py --ticket ${t.id} --slice 1\` (if it prints ok:false, return ok:false — HARD STOP). Then submit the PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)} --no-edit --no-interactive\` (add --stack for implementation)${reviewerFlags(r) ? ' — submit the reviewer flag EXACTLY as written, it surfaces the PR in the reviewer\'s Graphite queue' : ''} and BEST-EFFORT project the matching Linear review status. Do NOT run gh pr edit.
 Return: ok, prUrl, newStatus, summary.`,
     { label: `submit:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
@@ -627,15 +650,16 @@ Return: ok, newStatus, summary (name what was discarded).`,
 //   - `gt submit --publish --no-edit --rerequest-review` (+ `--stack` for implementation).
 // Re-requesting review (Graphite's write-capable App credential) flips reviewDecision back
 // to REVIEW_REQUIRED, which is what lets the next batch pass return `wait` instead of looping.
-// It NEVER attempts to resolve or reply to review threads: every authenticated gh PR-write
-// mutation 403s on this cross-owned repo (see the gh-cross-account note), so thread
-// resolution is left to the reviewer, exactly as for the rare thread-only `wait` PR.
+// It NEVER attempts to RESOLVE review threads (only the reviewer can mark a thread resolved),
+// so thread resolution is left to the reviewer, exactly as for the rare thread-only `wait` PR.
+// Replying to a reviewer's COMMENT is the separate autonomous `respond_comment` action, not
+// part of revise.
 async function doRevise(t, r) {
   phase('Finalize')
   const d = r.decision
   const fin = await agent(
     `You are the REVISE worker for ${t.id} (frontier phase: ${d.phase}), in ${r.worktreeDir}. A formal CHANGES_REQUESTED landed on the ${d.phase} PR. Address it AUTONOMOUSLY, following the "action: revise" steps of ${SKILL}, with these REQUIRED adaptations:
-- DO NOT attempt to resolve or reply to review threads, and DO NOT run any \`gh pr\`/GraphQL mutation: every authenticated gh PR write 403s on this repo. Reading feedback via \`gh pr view\`/\`gh api graphql\` queries is fine. Thread resolution is the reviewer's job — leave threads as-is.
+- DO NOT attempt to RESOLVE review threads (only the reviewer can mark a thread resolved). Reading feedback via \`gh pr view\`/\`gh api graphql\` queries is fine. Thread resolution is the reviewer's job — leave threads as-is. (Replying to a reviewer's comment is the separate \`respond_comment\` action, not part of revise.)
 - Stay WITHIN the ${d.phase} phase only — never edit a downstream phase's artifacts (that is \`reset\`, not revise).
 Steps:
 1. Identify the branch(es) to fix. For design/plan: \`gt checkout ${t.id}/${d.phase} --no-interactive\`. For implementation: query the ticket's slice PRs (\`gh pr list --head ${t.id}/slice-... \` or graphql) and address EVERY slice whose PR is CHANGES_REQUESTED, lowest slice number first (changes restack upward).
@@ -650,6 +674,96 @@ Return: ok, prUrl, newStatus, summary (name what you changed and confirm review 
     { label: `revise:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
   return finResult(t, fin, `revise:${d.phase}`)
+}
+
+// ===========================================================================
+// ACTION: respond_comment  (a phase PR carries >=1 unaddressed reviewer comment —
+// reply to each in place as a peer reviewer; amend the phase commit only on applied change)
+// ===========================================================================
+// AUTONOMOUS (RUS-54). The resolver emits `respond_comment` when a phase PR carries
+// unaddressed reviewer comments (r.commentTargets — the active phase's targets the
+// resolver folded into the decision and qrspi_resolve.py re-emitted at the top level).
+// A formal CHANGES_REQUESTED always outranks this (the resolver's reset/revise check runs
+// first), and it fires even on an APPROVED PR. We iterate the targets (comment-keyed
+// multiplicity — analogous to doRevise's per-branch loop) and spawn one peer-reviewer
+// worker PER comment. Each worker engages the comment honestly (AC2–AC4):
+//   - ANSWER faithfully from the actual artifacts/code/PR state (honesty-bound — never
+//     fabricate a fact or a fix), OR
+//   - APPLY a sound suggested change, amend the phase commit in place via the same
+//     self-locating qrspi_revise_amend.py mechanism revise uses, and say so, OR
+//   - DECLINE with a concrete rationale.
+// The rationale/answer lands ONLY in the in-thread reply (RQ5 — no artifact/impl-log
+// duplication). The reply itself is posted by the tested, self-locating
+// scripts/qrspi_comment_reply.py (inline → threaded review-comment reply; toplevel → a
+// fresh PR comment), whose write SUCCEEDS on this repo with the bot's classic PAT (the old
+// cross-account 403 is history — see the gh-cross-account note). Idempotency is structural:
+// once a bot reply is observed in the thread (or a newer bot top-level comment exists), the
+// gather's unaddressed_reviewer_comments no longer returns that target, so a second pass does
+// NOT re-respond — we rely on that, never on local state.
+async function doRespondComment(t, r) {
+  phase('Finalize')
+  const d = r.decision
+  const targets = Array.isArray(r.commentTargets) ? r.commentTargets : []
+  if (targets.length === 0) {
+    log(`  ${t.id}: respond_comment but no commentTargets in envelope — nothing to answer`)
+    return skip(t, d, 'respond_comment with empty commentTargets; nothing to do.')
+  }
+  log(`  ${t.id}: responding to ${targets.length} reviewer comment(s) on the ${d.phase} PR`)
+
+  const answered = []
+  const failures = []
+  // One peer-reviewer worker per comment (comment-keyed multiplicity). Sequential:
+  // tickets share one .git index, and an apply+amend on the phase branch must not race.
+  for (let i = 0; i < targets.length; i++) {
+    const ct = targets[i]
+    // Token-free staging path for THIS comment's reply body (no "qrspi" token — the weak
+    // local worker reproduces it intact; the comment-reply script reads it via --body-file
+    // so the worker never quotes arbitrary markdown on a command line).
+    const bodyFile = `/tmp/phase-stage/${t.id}/comment-reply-${i}.md`
+    const fin = await agent(
+      `You are the PEER-REVIEWER worker for ${t.id} (phase: ${d.phase}), in ${r.worktreeDir}. A reviewer left a comment on the ${d.phase} PR and the bot has NOT yet replied to it. Engage it as an honest peer reviewer — you may ANSWER it, APPLY a sound suggested change, or DECLINE it with a concrete rationale. You are HONESTY-BOUND: never fabricate a fact, a fix, or agreement; answer only from the actual artifacts/code/PR state.
+
+The comment you are addressing:
+- commentId: ${ct.commentId}
+- author: ${ct.author}
+- threadType: ${ct.threadType}    (inline = a review-thread line comment; toplevel = an issue-style PR comment)
+- body:
+"""
+${ct.body == null ? '' : ct.body}
+"""
+
+Steps (do EXACTLY these; no extra git/gh mutations beyond the two self-locating scripts named below):
+1. Resolve the ${d.phase} PR number for this ticket with a READ-only query, e.g.:
+     gh pr list --head ${d.phase === 'implementation' ? `'${t.id}/slice-*'` : `${t.id}/${d.phase}`} --state open --json number,headRefName --jq '.[0].number'
+   (For implementation, pick the slice PR the comment belongs to.) Reading PR/thread state via gh is fine.
+2. Decide your response to the comment, choosing exactly ONE:
+   (a) ANSWER — the comment is a question or concern you can address from the real state. Write a faithful answer.
+   (b) APPLY — the comment requests a concrete, sound change WITHIN the ${d.phase} phase only (never edit a downstream phase — that is reset/revise, not this). Make the edit in ${r.worktreeDir}, then stage+amend the phase commit IN PLACE by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives):
+         python3 ${r.repoRoot}/scripts/qrspi_revise_amend.py --ticket ${t.id} --branch ${d.phase === 'implementation' ? '<the affected slice branch, e.g. ' + t.id + '/slice-<N>>' : `${t.id}/${d.phase}`}
+       It checks out the branch, stages your edits (excluding caches), amends with \`gt modify\` keeping the EXACT subject+trailers, and VERIFIES the amend captured a real change (it FAILS if nothing was staged or the tree is left dirty), printing JSON { ok, branch, oldOid, newOid, dirty, error? }. If it prints ok:false, do NOT hand-run git/gt to work around it — fall back to ANSWER or DECLINE and say so honestly. After a successful amend, re-publish the (re)stacked branch so the PR reflects the change: \`gt submit --publish --no-edit${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`${reviewerFlags(r) ? ' ' + reviewerFlags(r).trim() : ''}.
+   (c) DECLINE — the suggestion is wrong, out of scope, or unsound. Give a concrete, respectful rationale grounded in the actual state.
+3. Write your in-thread reply text — your answer/what-you-applied/your-decline-rationale, and NOTHING duplicated into artifacts or the impl-log (the reply is the only place the rationale lives). Use the Write tool to write it verbatim to this token-free file:
+     ${bodyFile}
+4. Post the reply by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives), choosing --reply-mode = the comment's threadType (${ct.threadType}):
+     python3 ${r.repoRoot}/scripts/qrspi_comment_reply.py --ticket ${t.id} --pr <PR_NUMBER> --comment-id ${ct.commentId} --reply-mode ${ct.threadType} --body-file ${bodyFile}
+   It self-locates owner/repo and prints a ReplyEnvelope JSON { ok, replyId, inReplyToId, error? }. Read ok off its STDOUT (do NOT infer success from exit code alone). If it prints ok:false, return ok:false with the verbatim error — do NOT retry or improvise an alternative mutation (a genuine write failure here means respond_comment cannot be relied on; report it honestly so the wait sink stays correct).
+Return: ok (true only if the reply posted), applied (true ONLY if you chose APPLY and the amend+publish succeeded), prUrl (the PR url if known, else ""), summary (1-2 sentences naming the comment and how you engaged it).`,
+      { label: `respond-comment:${t.id}#${i}`, phase: 'Finalize', schema: COMMENT_REPLY_SCHEMA }
+    )
+    if (!fin || !fin.ok) {
+      log(`  ${t.id}: comment ${ct.commentId} reply FAILED — ${fin?.error ?? 'no result'}`)
+      failures.push({ commentId: ct.commentId, error: fin?.error ?? 'unknown' })
+      continue
+    }
+    log(`  ${t.id}: comment ${ct.commentId} → ${fin.applied ? 'applied+replied' : 'replied'} (${String(fin.summary ?? '').slice(0, 60)})`)
+    answered.push({ commentId: ct.commentId, applied: !!fin.applied, summary: fin.summary })
+  }
+
+  const prUrl = undefined
+  const summary = `Responded to ${answered.length}/${targets.length} reviewer comment(s) on the ${d.phase} PR` +
+    `${answered.some(a => a.applied) ? ` (${answered.filter(a => a.applied).length} applied as changes)` : ''}` +
+    `${failures.length ? `; ${failures.length} failed` : ''}.`
+  return { ticketId: t.id, action: 'respond_comment', summary, prUrl }
 }
 
 // ===========================================================================
@@ -880,6 +994,7 @@ for (let i = 0; i < tickets.length; i++) {
       case 'submit': res = await doSubmit(t, r); break
       case 'reset': res = await doReset(t, r); break
       case 'revise': res = await doRevise(t, r); break
+      case 'respond_comment': res = await doRespondComment(t, r); break
       case 'land': res = await doLand(t, r); break
       case 'wait':         // not-yet-approved (or thread-only PR awaiting reviewer): nothing to do
       case 'entry_blocked':
