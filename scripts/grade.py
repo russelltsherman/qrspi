@@ -10,10 +10,17 @@ import argparse
 import json
 import os
 import re
+import shlex
 import statistics
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+
+# Subprocess timeout for script-type assertions, in seconds. Matches
+# run_eval.py's 120 s, expressed in the unit subprocess.run(timeout=) expects.
+SCRIPT_TIMEOUT_SEC: int = 120
 
 
 # ── Programmatic Check Registry ──
@@ -658,18 +665,126 @@ def run_llm_judge(assertion: dict, result: dict, case: dict) -> dict:
     }
 
 
+def _run_script(argv: list, cwd: str, timeout: int) -> subprocess.CompletedProcess:
+    """Thin subprocess seam — runs ``argv`` and returns the CompletedProcess.
+
+    Captures stdout/stderr as text (decoding errors replaced, never raised).
+    Raises ``subprocess.TimeoutExpired`` past ``timeout`` and ``OSError`` if the
+    executable cannot be launched. Left untested per repo precedent (the live
+    subprocess boundary is verified by the manual fixture run, not unit tests).
+    """
+    return subprocess.run(
+        argv,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def _extract_json(stdout: str) -> Optional[dict]:
+    """Locate and parse the first JSON object embedded in mixed prose+JSON stdout.
+
+    Finds the first ``{`` and attempts ``json.loads`` from there. Returns the
+    parsed object, or ``None`` when there is no ``{`` or the tail is unparseable.
+    """
+    if not stdout:
+        return None
+    start = stdout.find("{")
+    if start == -1:
+        return None
+    try:
+        parsed = json.loads(stdout[start:])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def interpret_script_result(
+    check: str, weight: float, returncode: int, stdout: str, stderr: str
+) -> dict:
+    """Build the five-key result dict from a script's exit code and streams.
+
+    ``passed`` is a real ``bool`` from ``returncode == 0``. When stdout carries a
+    parseable JSON object it is folded into ``evidence`` (notably any
+    ``out_of_scope`` detail). On a non-zero exit without parseable JSON, evidence
+    carries the raw stderr plus the exit code so a failure is never silent.
+    """
+    passed = returncode == 0
+    parsed = _extract_json(stdout)
+
+    if parsed is not None:
+        evidence = f"exit {returncode}; {json.dumps(parsed, sort_keys=True)}"
+    elif passed:
+        evidence = f"exit {returncode}; no JSON in stdout"
+    else:
+        detail = stderr.strip() or stdout.strip() or "(no output)"
+        evidence = f"exit {returncode}; {detail}"
+
+    return {
+        "check": check,
+        "type": "script",
+        "passed": passed,
+        "evidence": evidence,
+        "weight": weight,
+    }
+
+
 def run_script_check(assertion: dict, result: dict) -> dict:
     """Run a script-based assertion.
 
-    Executes the script and interprets its exit code and stdout.
+    Tokenizes the ``check`` string into argv, executes it under a guard that
+    folds timeouts and launch/exec failures to ``passed=False``, and delegates
+    exit-code/stdout interpretation to ``interpret_script_result``.
     """
-    return {
-        "check": assertion["check"],
-        "type": "script",
-        "passed": None,
-        "evidence": "Script checks not yet integrated",
-        "weight": assertion.get("weight", 1.0),
-    }
+    check = assertion["check"]
+    weight = assertion.get("weight", 1.0)
+    argv = shlex.split(check)
+
+    if not argv:
+        return {
+            "check": check,
+            "type": "script",
+            "passed": False,
+            "evidence": "Empty script check command",
+            "weight": weight,
+        }
+
+    # cwd is the assumed repo root — eval scripts (e.g. check_scope.py) resolve
+    # fixture/output paths relative to it. We do not self-locate or add a CLI
+    # flag; this matches the placeholder harness's repo-root invocation model.
+    cwd = os.getcwd()
+    try:
+        proc = _run_script(argv, cwd=cwd, timeout=SCRIPT_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        return {
+            "check": check,
+            "type": "script",
+            "passed": False,
+            "evidence": f"Script timed out after {SCRIPT_TIMEOUT_SEC}s",
+            "weight": weight,
+        }
+    except OSError as e:
+        return {
+            "check": check,
+            "type": "script",
+            "passed": False,
+            "evidence": f"Script could not be launched: {e}",
+            "weight": weight,
+        }
+    except Exception as e:  # defensive: never crash the grader on one assertion
+        return {
+            "check": check,
+            "type": "script",
+            "passed": False,
+            "evidence": f"Script error: {e}",
+            "weight": weight,
+        }
+
+    return interpret_script_result(
+        check, weight, proc.returncode, proc.stdout, proc.stderr
+    )
 
 
 # ── Scoring ──
