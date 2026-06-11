@@ -27,6 +27,7 @@ class ExecutionResult:
     tool_calls: list = field(default_factory=list)
     transcript: list = field(default_factory=list)
     error: Optional[str] = None
+    executed: bool = False
 
 
 @dataclass
@@ -90,22 +91,82 @@ def build_messages(case: dict) -> list:
     return messages
 
 
+def call_model(
+    system: str,
+    messages: list,
+    model: str,
+    max_tokens: int,
+    timeout_s: float,
+) -> dict:
+    """Single mockable seam wrapping the Anthropic Messages API.
+
+    Returns the loose ``ModelReply`` shape::
+
+        {
+            "output": str,
+            "tokens": {"input": int, "output": int},
+            "raw_transcript_turn": dict,
+        }
+
+    ``anthropic`` is imported locally so module import / test collection never
+    pulls in the SDK; tests stub this function to run fully offline. The API key
+    is read from the SDK's standard environment variable (``ANTHROPIC_API_KEY``)
+    and ``timeout_s`` is applied as the per-request timeout.
+    """
+    import anthropic  # local import: keeps the SDK out of module import
+
+    client = anthropic.Anthropic(timeout=timeout_s)
+    response = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        messages=messages,
+    )
+
+    # Concatenate text blocks from the response content.
+    output_parts = []
+    for block in getattr(response, "content", []) or []:
+        text = getattr(block, "text", None)
+        if text is not None:
+            output_parts.append(text)
+    output = "".join(output_parts)
+
+    # Normalize SDK usage into the existing {input, output} token shape.
+    usage = getattr(response, "usage", None)
+    tokens = {
+        "input": getattr(usage, "input_tokens", 0) if usage else 0,
+        "output": getattr(usage, "output_tokens", 0) if usage else 0,
+    }
+
+    # Assistant turn for the transcript, expressed as plain dicts.
+    raw_transcript_turn = {"role": "assistant", "content": output}
+
+    return {
+        "output": output,
+        "tokens": tokens,
+        "raw_transcript_turn": raw_transcript_turn,
+    }
+
+
 def execute_single(
     skill_text: str,
     case: dict,
     trial_id: int,
     timeout_ms: int,
+    model: str,
+    max_tokens: int,
 ) -> ExecutionResult:
     """Execute a single trial of a single test case.
 
-    In a real implementation, this would:
-    1. Spin up an isolated container/sandbox
-    2. Initialize the agent with the skill as system prompt
-    3. Send the messages and capture the full response
-    4. Collect output files from the sandbox
+    Builds the message sequence via ``build_messages`` and invokes the model
+    through the ``call_model`` seam (the system prompt is the skill text). On a
+    successful return it populates ``output``, ``tokens`` (normalized to the
+    ``{input, output}`` shape), ``transcript`` (input messages + the assistant
+    turn), and sets ``executed = True``. Any exception — including a request
+    timeout — is captured into ``result.error`` with ``executed`` left ``False``.
 
-    This stub captures the structure for integration with
-    the actual agent runtime.
+    ``files`` and ``tool_calls`` stay empty: the SDK seam does not surface
+    sandbox files or a tool trace.
     """
     start = time.time()
     result = ExecutionResult(
@@ -113,31 +174,25 @@ def execute_single(
         trial_id=trial_id,
     )
 
+    messages = build_messages(case)
     try:
-        # ── Placeholder for agent execution ──
-        # Replace this block with actual agent invocation:
-        #
-        #   response = agent.run(
-        #       system_prompt=skill_text,
-        #       messages=build_messages(case),
-        #       tools=<tool_set>,
-        #       sandbox=IsolatedContainer(),
-        #   )
-        #   result.output = response.final_output
-        #   result.files = sandbox.list_outputs()
-        #   result.tokens = response.usage
-        #   result.tool_calls = response.tool_trace
-        #   result.transcript = response.full_transcript
-        #
-        messages = build_messages(case)
-        result.output = ""
+        reply = call_model(
+            system=skill_text,
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            timeout_s=timeout_ms / 1000,
+        )
+        result.output = reply["output"]
+        result.tokens = reply["tokens"]
         result.files = []
-        result.tokens = {"input": 0, "output": 0}
         result.tool_calls = []
-        result.transcript = messages
+        result.transcript = messages + [reply["raw_transcript_turn"]]
+        result.executed = True
 
     except Exception as e:
         result.error = str(e)
+        result.executed = False
 
     result.duration_ms = (time.time() - start) * 1000
     return result
@@ -147,6 +202,24 @@ def run_suite(config: EvalConfig) -> dict:
     """Run the full eval suite and write results."""
     suite = load_suite(config.suite_path)
     skill_text = load_skill(config.skill_path)
+
+    # Model id + max_tokens come from suite.json `defaults`. Both are required
+    # to make a real model call; a missing key is a hard error with a clear
+    # message rather than a silent fallback (the questions suite, for example,
+    # declares max_tokens but no model — that must surface, not be papered over).
+    defaults = suite.get("defaults", {})
+    if "model" not in defaults:
+        raise ValueError(
+            "Suite `defaults.model` is required to execute the model call; "
+            f"none found in {config.suite_path}"
+        )
+    if "max_tokens" not in defaults:
+        raise ValueError(
+            "Suite `defaults.max_tokens` is required to execute the model call; "
+            f"none found in {config.suite_path}"
+        )
+    model = defaults["model"]
+    max_tokens = defaults["max_tokens"]
 
     # Create output directory
     os.makedirs(config.output_dir, exist_ok=True)
@@ -173,6 +246,8 @@ def run_suite(config: EvalConfig) -> dict:
                     case,
                     trial,
                     config.timeout_ms,
+                    model,
+                    max_tokens,
                 )
                 futures[future] = (case["id"], trial)
 
@@ -216,7 +291,18 @@ def run_suite(config: EvalConfig) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="Run QRSPI eval suite")
-    parser.add_argument("--skill", required=True, help="Path to skill/agent prompt file")
+    # --skill is the primary name; --agent is an alias resolving to the same
+    # dest (args.skill), so everything downstream is unchanged. Exactly one of
+    # the two must be supplied.
+    skill_group = parser.add_mutually_exclusive_group(required=True)
+    skill_group.add_argument(
+        "--skill", dest="skill", help="Path to skill/agent prompt file"
+    )
+    skill_group.add_argument(
+        "--agent",
+        dest="skill",
+        help="Alias for --skill (path to skill/agent prompt file)",
+    )
     parser.add_argument("--suite", required=True, help="Path to eval suite JSON")
     parser.add_argument("--output", required=True, help="Output directory for results")
     parser.add_argument("--trials", type=int, default=3, help="Trials per case (default: 3)")
