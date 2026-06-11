@@ -21,8 +21,10 @@ re-deriving it. Any infrastructure error is reported ONCE as `ok:false` with the
 verbatim message — never retried — so a weak model cannot thrash on it.
 
 The caller still supplies the two Linear facts a script cannot read
-(`--assigned`, `--linear-status`) and is responsible for the ticket title/body
-(`ticketContent`) it already fetched via MCP. Everything else is handled here.
+(`--assigned`, `--linear-status`) and stages the ticket title/body it fetched via
+MCP to a token-free file; we emit that file's PATH (`ticketContentPath`), not its
+body, so the design phase reads it file->file and the fragile text never round-trips
+through the worker's stdout echo. Everything else is handled here.
 
 Output: a single JSON envelope on stdout:
     { ok, repoRoot, worktreeDir, existing{...booleans}, decision{...}, error? }
@@ -159,21 +161,6 @@ def pick_tip(branches, ticket):
     return None
 
 
-def read_ticket_content(path):
-    """Read the ticket title+body the caller staged to a token-free path (see
-    --ticket-content-file). A missing/empty path or an unreadable file yields ""
-    so the envelope is still well-formed — the design phase simply gets no inline
-    ticket text. Filesystem read only; kept tiny so envelope assembly stays
-    deterministic and the weak worker never hand-assembles JSON."""
-    if not path:
-        return ""
-    try:
-        with open(path, encoding="utf-8") as fh:
-            return fh.read()
-    except OSError:
-        return ""
-
-
 def comment_targets_of(decision):
     """The per-phase comment-target list to surface at the TOP LEVEL of the envelope.
 
@@ -192,7 +179,7 @@ def comment_targets_of(decision):
 
 
 def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
-                   reviewers="", team_reviewers="", ticket_content=""):
+                   reviewers="", team_reviewers="", ticket_content_path=""):
     """Assemble the JSON envelope the qrspi-batch resolveTicket() step consumes.
     Pure; `repoRoot` is always the module-level REPO_ROOT this script derived.
 
@@ -205,11 +192,13 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
     iterates `r.commentTargets` without reaching into `decision`. It is [] for every
     non-respond_comment decision (additive; unknown to old consumers, which ignore it).
 
-    `ticket_content` (the Linear title+body the caller staged) is embedded here so
-    the script — not the worker model — owns the COMPLETE envelope. The worker only
-    writes the ticket text to a token-free file and echoes this stdout back; it
-    never splices fields into JSON (the StructuredOutput path the weak model could
-    not populate)."""
+    `ticket_content_path` is the token-free file the caller staged the Linear
+    title+body to. We emit the PATH, never the body: the design-phase agents Read
+    that file directly (file->file), so the fragile ticket text — which routinely
+    carries Linear `<issue ...>RUS-N</issue>` mention tags — never travels through
+    the weak resolve worker's verbatim stdout echo, where a model HTML-escapes
+    `>`->`&gt;` and corrupts the JSON the orchestrator must parse (RUS-69). The
+    envelope thus stays angle-bracket-free for ANY ticket and any content."""
     env = {
         "ok": ok,
         "repoRoot": REPO_ROOT,
@@ -219,7 +208,7 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
         "commentTargets": comment_targets_of(decision),
         "reviewers": reviewers,
         "teamReviewers": team_reviewers,
-        "ticketContent": ticket_content,
+        "ticketContentPath": ticket_content_path,
     }
     if error is not None:
         env["error"] = error
@@ -334,8 +323,9 @@ def main():
                         help="Current Linear status name (from Linear, supplied by caller)")
     parser.add_argument("--ticket-content-file", default="",
                         help="Path to a token-free file holding the ticket title+body the "
-                             "caller staged; its contents are embedded as ticketContent so "
-                             "the worker never hand-assembles the envelope")
+                             "caller staged; this PATH is emitted as ticketContentPath (the "
+                             "body is NOT embedded) so the design phase reads it file->file "
+                             "and the fragile text never round-trips through the worker echo")
     parser.add_argument("--trunk", default="main", help="Trunk branch (default: main)")
     parser.add_argument("--blocked-open", action="store_true",
                         help="At least one open Linear blocker was detected (from Linear, supplied by caller)")
@@ -344,7 +334,7 @@ def main():
                              "From Linear, supplied by caller.")
     args = parser.parse_args()
 
-    ticket_content = read_ticket_content(args.ticket_content_file)
+    ticket_content_path = args.ticket_content_file
     blocked_by = [tok.strip() for raw in args.blocked_by for tok in raw.split(",") if tok.strip()]
 
     # Any infrastructure failure -> ONE ok:false envelope with the verbatim error.
@@ -364,13 +354,13 @@ def main():
         reviewers, team_reviewers = load_reviewers()
         env = build_envelope(worktree, decision, existing, ok=True,
                              reviewers=reviewers, team_reviewers=team_reviewers,
-                             ticket_content=ticket_content)
+                             ticket_content_path=ticket_content_path)
     except Exception as exc:  # noqa: BLE001 - any failure is reported, not retried
         worktree = os.path.join(REPO_ROOT, ".worktrees", args.ticket)
         env = build_envelope(worktree, None,
                              {name: False for name in ARTIFACTS},
                              ok=False, error="%s: %s" % (type(exc).__name__, exc),
-                             ticket_content=ticket_content)
+                             ticket_content_path=ticket_content_path)
 
     json.dump(env, sys.stdout, indent=2)
     print()

@@ -101,7 +101,7 @@ const TICKETS_SCHEMA = {
 // agent instead returns qrspi_resolve.py's JSON stdout as plain text, and we parse +
 // validate it here with parseResolveEnvelope(). The envelope shape produced by the
 // script (its single source of truth) is:
-//   { ok:boolean, error?:string, repoRoot, worktreeDir, ticketContent,
+//   { ok:boolean, error?:string, repoRoot, worktreeDir, ticketContentPath,
 //     existing{ questions,research,design,structure,plan,worktree : boolean },
 //     reviewers, teamReviewers,                 // comma-joined CSV, "" => omit flag
 //     commentTargets[],                         // unaddressed reviewer comments (respond_comment)
@@ -329,7 +329,10 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel) {
 async function resolveTicket(t) {
   phase('Resolve')
   // Token-free staging path (no "qrspi" token) the worker writes the ticket text to,
-  // so qrspi_resolve.py — not the model — folds it into the envelope as ticketContent.
+  // so qrspi_resolve.py emits this PATH (ticketContentPath) — never the body — and the
+  // design agents Read it file->file. The fragile ticket text (Linear <issue> mention
+  // tags etc.) thus never round-trips through the worker's stdout echo, where a model
+  // HTML-escapes `>`->`&gt;` and corrupts the JSON the orchestrator parses (RUS-69).
   const ticketFile = `/tmp/phase-stage/${t.id}/ticket.md`
   // NO schema: the worker returns the script's JSON stdout as plain text; we parse it
   // with parseResolveEnvelope() (Option A — the StructuredOutput tool path stalled the
@@ -364,7 +367,7 @@ Do EXACTLY these steps — no exploration, no path guessing, no extra commentary
      ${ticketFile}
 
 3. Run this ONE command verbatim from your cwd (worktree setup + OWNER/REPO + the tested
-   PR-state gather + decision + artifact detection + ticketContent embedding, all in a single
+   PR-state gather + decision + artifact detection + ticketContentPath emission, all in a single
    deterministic step — do NOT hand-derive any of it, do NOT substitute paths):
 
      python3 scripts/qrspi_resolve.py --ticket ${t.id} --linear-status "<status>" --ticket-content-file ${ticketFile}
@@ -440,8 +443,7 @@ async function doDesign(t, r) {
 
   if (!await runPhase('questions', 'qrspi-questions',
     `TICKET_ID = ${t.id}
-TICKET_CONTENT =
-${r.ticketContent}
+TICKET_CONTENT_PATH = ${r.ticketContentPath}
 
 OUTPUT_PATH = ${stg(t.id, 'questions')}
 TEMPLATE_PATH = ${tpl(wd, 'questions.md')}`, r.existing, t.id, 'Design')) return failTicket(t)
@@ -457,8 +459,7 @@ Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidde
 
   if (!await runPhase('design', 'qrspi-design',
     `TICKET_ID = ${t.id}
-TICKET_CONTENT =
-${r.ticketContent}
+TICKET_CONTENT_PATH = ${r.ticketContentPath}
 
 QUESTIONS_PATH = ${art(wd, t.id, 'questions.md')}
 RESEARCH_PATH = ${art(wd, t.id, 'research.md')}

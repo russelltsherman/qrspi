@@ -18,7 +18,6 @@ from qrspi_resolve import (
     pick_tip,
     build_envelope,
     comment_targets_of,
-    read_ticket_content,
     select_source,
     references_me,
     resolve_reviewers,
@@ -112,15 +111,23 @@ rev_env = build_envelope("/wt/RUS-1", _dec, _ex, ok=True,
 check("envelope carries reviewers", rev_env["reviewers"], "alice,bob")
 check("envelope carries teamReviewers", rev_env["teamReviewers"], "org/team")
 
-# --- ticketContent embedding (Option A: script owns the whole envelope) ------
-check("envelope default ticketContent empty", ok_env["ticketContent"], "")
-tc_env = build_envelope("/wt/RUS-1", _dec, _ex, ok=True,
-                        ticket_content="# Title\n\nBody with qrspi token intact.")
-check("envelope carries ticketContent",
-      tc_env["ticketContent"], "# Title\n\nBody with qrspi token intact.")
-check("err envelope still carries ticketContent",
+# --- ticketContentPath handoff (decouple: the script emits the PATH, never the body, so
+# the fragile ticket text — e.g. Linear <issue> mention tags — is read file->file by the
+# design agents and never echoed through the weak resolve worker, which HTML-escaped
+# `>`->`&gt;` and broke JSON.parse; see RUS-69) ----------------------------------------
+check("envelope default ticketContentPath empty", ok_env["ticketContentPath"], "")
+check("envelope no longer carries body-embedding ticketContent field",
+      "ticketContent" in ok_env, False)
+tcp_env = build_envelope("/wt/RUS-1", _dec, _ex, ok=True,
+                         ticket_content_path="/tmp/phase-stage/RUS-1/ticket.md")
+check("envelope carries ticketContentPath",
+      tcp_env["ticketContentPath"], "/tmp/phase-stage/RUS-1/ticket.md")
+check("ticketContentPath envelope carries no ticketContent field",
+      "ticketContent" in tcp_env, False)
+check("err envelope still carries ticketContentPath",
       build_envelope("/wt/RUS-1", None, _ex, ok=False, error="boom",
-                     ticket_content="kept")["ticketContent"], "kept")
+                     ticket_content_path="/tmp/phase-stage/RUS-1/ticket.md")["ticketContentPath"],
+      "/tmp/phase-stage/RUS-1/ticket.md")
 
 # --- top-level commentTargets (re-emitted from the decision for doRespondComment) --
 check("non-respond decision -> empty top-level commentTargets",
@@ -141,17 +148,6 @@ check("comment_targets_of non-list value -> []",
       comment_targets_of({"commentTargets": "oops"}), [])
 check("comment_targets_of passes a list through",
       comment_targets_of({"commentTargets": _tgts}), _tgts)
-
-# --- read_ticket_content (token-free staging file -> envelope) ---------------
-check("read_ticket_content empty path -> ''", read_ticket_content(""), "")
-check("read_ticket_content missing file -> ''",
-      read_ticket_content("/nonexistent/path/ticket.md"), "")
-with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as _tf:
-    _tf.write("# RUS-1\n\nThe full ticket body.")
-    _tc_path = _tf.name
-check("read_ticket_content reads file verbatim",
-      read_ticket_content(_tc_path), "# RUS-1\n\nThe full ticket body.")
-os.unlink(_tc_path)
 
 # --- select_source (config > default; no env override) ----------------------
 check("config used (list)",
