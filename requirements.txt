@@ -1,0 +1,4 @@
+# Runtime dependencies for the QRSPI eval grader (scripts/grade.py).
+# The LLM judge calls the Anthropic API via the official SDK; it is imported
+# lazily so the unit tests run without it installed.
+anthropic

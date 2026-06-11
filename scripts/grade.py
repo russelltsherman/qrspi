@@ -776,6 +776,64 @@ def parse_judge_response(text: str) -> tuple[int, str]:
     return score, rationale
 
 
+ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"
+
+# Root ``.env`` (gitignored) consulted as a fallback when the env var is unset.
+# Module-level so tests can monkeypatch it to a temp path. The repo root is the
+# parent of ``scripts/``.
+DOTENV_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+
+
+def parse_dotenv(path: str) -> dict:
+    """Parse a simple ``KEY=VALUE`` ``.env`` file (stdlib only).
+
+    Ignores blank lines and ``#`` comments, strips an optional ``export``
+    prefix, and trims one layer of matching surrounding quotes from the value.
+    Returns an empty dict if the file is absent or unreadable.
+    """
+    env = {}
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        return env
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if key:
+            env[key] = value
+    return env
+
+
+def load_api_key() -> str:
+    """Return the Anthropic API key: ``os.environ`` first, then root ``.env``.
+
+    Resolution order: ``ANTHROPIC_API_KEY`` in ``os.environ`` takes precedence
+    (the ``.env`` file is never read when it is set); otherwise the gitignored
+    root ``.env`` is parsed for the same key. Raises ``RuntimeError`` if neither
+    source supplies it so a missing key fails loudly rather than silently
+    constructing an unauthenticated client.
+    """
+    env_value = os.environ.get(ANTHROPIC_API_KEY_ENV)
+    if env_value:
+        return env_value
+    dotenv = parse_dotenv(DOTENV_PATH)
+    dotenv_value = dotenv.get(ANTHROPIC_API_KEY_ENV)
+    if dotenv_value:
+        return dotenv_value
+    raise RuntimeError(
+        f"{ANTHROPIC_API_KEY_ENV} not found in environment or {DOTENV_PATH}"
+    )
+
+
 def make_judge_client(api_key: Optional[str] = None):
     """Build the default judge client callable.
 
@@ -835,7 +893,8 @@ def run_llm_judge(assertion: dict, result: dict, case: dict, judge_client=None) 
     - failure  → passed = False, score = None, evidence describes the failure
 
     ``judge_client`` is injectable for testing; when omitted, the default
-    Anthropic-backed client is built lazily (no SDK import at module load).
+    Anthropic-backed client is built lazily via ``make_judge_client(load_api_key())``
+    (no SDK import at module load; the key resolves from env then root ``.env``).
     Empty output is graded normally (the judge scores it low), not short-circuited.
 
     A successful grade is cached under ``cache_key(output, criteria)``: a cache
@@ -860,7 +919,7 @@ def run_llm_judge(assertion: dict, result: dict, case: dict, judge_client=None) 
         }
 
     if judge_client is None:
-        judge_client = make_judge_client()
+        judge_client = make_judge_client(load_api_key())
 
     prompt = build_judge_prompt(criteria, output)
 
