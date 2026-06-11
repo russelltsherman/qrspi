@@ -439,12 +439,22 @@ subsequent invocation.
 Every PR in the stack is approved + clean. Land the whole stack bottom-up and finalize.
 
 1. Confirm the stack is current and approved (the resolver already gated this), then land
-   from the bottom up:
+   **every slice** from the bottom up. A single `gt merge` lands only the branch you are on
+   plus its downstack — it does NOT walk upward — so on an N>1 stack you must check out and
+   merge each slice explicitly in ascending order, or slices 2..N are left OPEN (the RUS-70
+   half-landed-stack bug). Read the ascending slice branch list from the resolver envelope's
+   root-level `slices` field (e.g. `["<id>/slice-1", "<id>/slice-2", ...]`); refresh the
+   remotes once, then loop:
    ```bash
-   gt checkout <ticket-id>/slice-1 --no-interactive   # or <id>/design if no slices/plan-only feature
-   gt submit --publish --stack --no-edit --no-interactive   # ensure remotes current
-   gt merge --no-interactive                           # merges bottom-up (NOT --confirm: it forces a prompt that --no-interactive cannot satisfy)
+   gt submit --publish --stack --no-edit --no-interactive   # ensure remotes current, once
+   # For k = 1..N in ASCENDING order, over each branch in the envelope `slices`:
+   gt checkout <id>/slice-<k> --no-interactive
+   gt merge --no-interactive   # lands this slice (NOT --confirm: it forces a prompt --no-interactive cannot satisfy)
+   # ...repeat for every slice, smallest k first, through the tip slice-<N>.
    ```
+   If the feature has **no slices** (a plan-only feature with an empty `slices` list), fall
+   back to a single `gt checkout <id>/design --no-interactive` + `gt merge --no-interactive`
+   after the same `gt submit` refresh.
 2. Reap the worktree, local branches, and remote refs with the deterministic, tested
    cleanup script — **do NOT** hand-run `gt sync --force` or `git worktree remove --force`
    here. The script self-locates `REPO_ROOT` from its own path, so run it from the **main
