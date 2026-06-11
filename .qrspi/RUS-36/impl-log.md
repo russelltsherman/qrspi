@@ -31,3 +31,34 @@
 - Slice 5 (`worktree_session1.md`) and other downstream fixtures are NOT yet present; case_011 currently renders only its two Slice-1 inputs, as expected.
 
 ---
+
+## Session 2 — Slice 2: `websocket` + `multi_tenancy` chains
+
+**Timestamp:** 2026-06-11T00:00:00Z
+**Tasks completed:** T12, T13, T14, T15, T16, T17, T18
+**Tasks failed:** none
+**Tests:**
+
+- `cd evals && test -s <each of 4 fixtures>` → 4 present/non-empty, 0 missing (`questions_websocket.md`, `research_websocket.md`, `questions_multi_tenancy.md`, `research_multi_tenancy_sparse.md`)
+- Structural checks (grader-regex, run from cwd=`evals/`): both questions fixtures → 13 `- QN:` lines each (8≤n≤15), 13 `**Target:**` each (≥Q), 6 `## ` sections each; both research fixtures → 13 `## QN:` headers with 13 `**Answer:**` / 13 `**Evidence:**` each
+- Chain-consistency: `ORD-892` present in both `questions_websocket`/`research_websocket`; `PLAT-1205` present in both `questions_multi_tenancy`/`research_multi_tenancy_sparse`
+- Sparse-for-right-reason: `research_websocket.md` = 14 `file:line` citations / 4 honest NOT FOUND; `research_multi_tenancy_sparse.md` = **0** `file:line` citations / **11** NOT FOUND (genuinely thin)
+- `build_messages()` from cwd=`evals/` for case_004 / case_006 / case_014 (+ case_002) → all four new fixtures resolve and their content renders in the user message
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none
+
+**Notes for next session:**
+
+- Slice 2 fixtures are **input context** for their consuming cases (case_004 questions→research, case_006 design new-pattern, case_014 design sparse/fabrication, case_002 ticket→questions), NOT graded outputs — the agent produces a fresh output from them. They only need to be well-formed and shape-consistent; grade.py validators run against the agent's `output`, not these files.
+- `websocket` is the canonical **NEW PATTERN** chain: `research_websocket.md` deliberately establishes that NO real-time transport (WebSocket/SSE/long-poll), connection registry, or connection metrics exist today (Q3/Q6/Q11/Q13 = NOT FOUND), and that an `order.status_changed` event is already emitted but only audit-logged — this is what case_006 expects the design agent to flag as a new pattern with polling as a viable alternative.
+- `multi_tenancy` sparse trait: `research_multi_tenancy_sparse.md` answers all 13 QN with NOT FOUND / "unknown" and ZERO `file:line` citations (Dependencies/Implicit contracts all `unknown`); the leading blockquote explicitly labels it INCOMPLETE/SPARSE and warns against fabrication. This is the case_014 fabrication trap — keep it citation-free if ever edited.
+- `questions_multi_tenancy.md` is the backfilled HONEST upstream (RQ2) anchoring the sparse research to a real PLAT-1205 question set; the sparse research's `## QN:` headers are verbatim copies of those question lines, so the chain reads coherently even though the answers are empty.
+- All four Slice-2 fixtures follow the exact Slice-1 canonical shapes (see Session 1 notes) — same regexes, same `## QN:` / `**Answer:**` / `**Evidence:**` / fenced-snippet structure. No new shape was introduced.
+
+---
