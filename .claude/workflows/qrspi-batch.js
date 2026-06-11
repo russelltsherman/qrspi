@@ -181,6 +181,21 @@ function parseCleanupEnvelope(text) {
   return env
 }
 
+// Parse the LandVerdict JSON the qrspi_land_verify.py worker emits:
+//   { status: "landed" | "incomplete", openBranches: string[] }
+// A missing/unparseable/unknown verdict is treated as NOT landed (incomplete) so the
+// Done gate fails closed — never project Done on an ambiguous land result.
+function parseLandVerdict(text) {
+  const raw = extractJsonObject(text)
+  if (!raw) return { status: 'incomplete', openBranches: [], error: 'land-verify: no JSON verdict in worker output' }
+  let v
+  try { v = JSON.parse(raw) } catch (e) { return { status: 'incomplete', openBranches: [], error: `land-verify: unparseable verdict (${e.message})` } }
+  if (v.status !== 'landed' && v.status !== 'incomplete') {
+    return { status: 'incomplete', openBranches: [], error: 'land-verify: verdict missing/unknown status' }
+  }
+  return { status: v.status, openBranches: Array.isArray(v.openBranches) ? v.openBranches : [] }
+}
+
 const WORKER_SCHEMA = {
   type: 'object',
   required: ['ok', 'summary'],
@@ -821,6 +836,28 @@ It computes the cleanup verdict and (unless --dry-run) reaps the ticket's worktr
 }
 
 // ===========================================================================
+// LAND VERIFY — independent Done gate (RUS-70). After the land worker reports a
+// successful merge, do NOT trust its self-report: run the deterministic, self-locating
+// qrspi_land_verify.py, which re-gathers each slice branch's MERGED state and returns a
+// LandVerdict { status, openBranches }. Only `landed` (every slice MERGED) clears the
+// Done projection; `incomplete` names the OPEN slice branches (the RUS-70 half-landed
+// tip) and is deferred to the next batch pass rather than retried in-pass. Runs from the
+// MAIN repo root, like the verifier's siblings (it self-locates REPO_ROOT from __file__).
+// ===========================================================================
+async function runLandVerify(ticketId, phaseLabel) {
+  const out = await agent(
+    `You are the LAND-VERIFY worker for QRSPI ticket ${ticketId}. Your cwd is the MAIN repo root (the script self-locates REPO_ROOT from its own path).
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives, no other git/gt/gh mutations:
+
+  python3 scripts/qrspi_land_verify.py ${ticketId}
+
+It gathers each slice branch's MERGED state and prints a LandVerdict JSON { status: "landed" | "incomplete", openBranches: [...] } (exit 0 on landed, non-zero on incomplete). Output that JSON as your FINAL message, exactly and verbatim — NO surrounding prose, NO code fences, NO edits. Do NOT call any structured-output tool. If it exits non-zero, still output the verbatim JSON it printed (do NOT retry or improvise).`,
+    { label: `land-verify:${ticketId}`, phase: phaseLabel }
+  )
+  return parseLandVerdict(out)
+}
+
+// ===========================================================================
 // ACTION: land  (all PRs approved+clean — merge the stack bottom-up, finalize)
 // ===========================================================================
 async function doLand(t, r) {
@@ -838,6 +875,22 @@ Return: ok, prUrl, newStatus, summary.`,
   //    the stack truly merged). The script itself re-verifies full-merge state, so a
   //    transient land result that lost its merge verdict still can't cause a bad reap.
   if (!fin || !fin.ok) return res
+  // 2a. Done GATE (RUS-70): the land worker self-reports ok on a single `gt merge`, which
+  //     on an N>1 stack lands only the bottom slice + downstack and leaves the tip slices
+  //     OPEN. Independently re-verify EVERY slice reached MERGED before projecting Done.
+  //     `incomplete` ⇒ stop with ok:false, name the OPEN slices, and defer to the next
+  //     batch pass (no in-pass retry, no cleanup — the half-landed stack is left intact).
+  const verdict = await runLandVerify(t.id, 'Finalize')
+  if (verdict.status !== 'landed') {
+    log(`  ${t.id}: land INCOMPLETE — slice(s) [${verdict.openBranches.join(', ')}] still OPEN${verdict.error ? ` (${verdict.error})` : ''}; not Done, deferring to next pass (no cleanup)`)
+    res.action = 'land'
+    res.ok = false
+    res.landed = false
+    res.openBranches = verdict.openBranches
+    res.summary = `land incomplete: slice(s) [${verdict.openBranches.join(', ')}] still OPEN — deferred to next pass`
+    return res
+  }
+  res.landed = true
   const cl = await runCleanup(t.id, /* dryRun */ false, 'Finalize')
   if (!cl.ok) {
     log(`  ${t.id}: cleanup failed after land — ${cl.error ?? 'unknown'} (worktree left for a later reconciliation pass)`)

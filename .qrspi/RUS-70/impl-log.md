@@ -49,3 +49,32 @@
 - New pure helper `slice_branches(branches, ticket) -> list[str]` in `qrspi_resolve.py`: maps `slice_numbers(branches)` to ascending branch names `["<ticket>/slice-1", ...]`, `[]` when no slice branches. This is the function Slice 3's land loop iterates via the envelope `slices` field.
 - In `main()`, the live wiring computes `branches = _existing_branches(args.ticket)` once, then passes `tip=pick_tip(branches, args.ticket)` and `slices=slice_branches(branches, args.ticket)` to `build_envelope()`. `tip` reuses the existing `pick_tip()` (slice-maxN > plan > design fallback; `None` for a branchless ticket). The error-path envelope keeps the defaults (`tip=None`, `slices=[]`).
 - Envelope `slices` is `["<id>/slice-1", "<id>/slice-2", ...]` (full branch names, ascending), NOT bare ints — Slice 3's `gt checkout` loop can use each element directly.
+
+---
+
+## Session 3 — Slice 3: Bottom-up land loop + Done gate wiring
+
+**Timestamp:** 2026-06-11T21:05:00Z
+**Tasks completed:** T16, T17, T18
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/qrspi_land_verify_test.py` → 4 passed, 0 failed (Slice 1 still green)
+- `python3 scripts/qrspi_resolve_test.py` → 74 passed, 0 failed (Slice 2 still green)
+- `python3 scripts/qrspi_resolve_state_test.py` → 39 passed, 0 failed (Slice 2 still green)
+- `node --check .claude/workflows/qrspi-batch.js` → JS-SYNTAX-OK (batch workflow parses after the `doLand` Done-gate wiring)
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- T18 live N>1 end-to-end land (AC3) is NOT run from this implementation worktree. It requires a real multi-slice stack with approved PRs and runs destructive `gt merge` against the remote — git/gt mutations are forbidden to the slice agent (the orchestrator drives live lands). This is a deferred manual/orchestrator verification, not skipped logic: the deterministic verifier (Slice 1) and its three-case test suite plus the Done-gate wiring give the unit-level coverage; the live merge is the only thing left and must be observed during a real batch land pass.
+
+**Notes for next session:**
+
+- `.claude/skills/qrspi-work/SKILL.md` `## action: land` step 1: the single hard-coded `gt checkout <id>/slice-1` + one `gt merge` was replaced with an explicit ascending per-slice loop over the resolver envelope's root-level `slices` field (`gt submit --publish --stack ...` refresh ONCE, then for each branch: `gt checkout <id>/slice-<k> --no-interactive` then `gt merge --no-interactive`). The misleading "merges bottom-up" comment is corrected to state a single `gt merge` lands only the current branch + downstack (not upward), which is the RUS-70 root cause. The `<id>/design` single-merge fallback for slice-less (plan-only, empty `slices`) features is preserved.
+- `.claude/workflows/qrspi-batch.js` `doLand`: after `fin.ok`, a new Done GATE runs the verifier before any cleanup/Done projection. New `runLandVerify(ticketId, phaseLabel)` worker (modeled on `runCleanup`) runs `python3 scripts/qrspi_land_verify.py <ticketId>` from the MAIN repo root and parses its JSON via new `parseLandVerdict(text)` helper. `landed` ⇒ sets `res.landed=true`, proceeds to `runCleanup` + Done as before. `incomplete` ⇒ logs a DISTINCT `land INCOMPLETE — slice(s) [...] still OPEN ... deferring to next pass (no cleanup)` message, sets `res.ok=false`/`res.landed=false`/`res.openBranches`, and returns BEFORE `runCleanup` — so a half-landed stack never reaches the generic cleanup `skip` log and is deferred to the next batch pass (no in-pass retry, RQ2).
+- `parseLandVerdict` fails CLOSED: a missing/unparseable/unknown-status verdict is normalized to `{status:'incomplete'}` so the Done gate never projects Done on an ambiguous land result.
+- No Python source files were modified in this slice — only the SKILL.md prose and the batch JS orchestration. The verifier (`qrspi_land_verify.py`) and resolver envelope (`qrspi_resolve.py`) from Slices 1/2 are consumed unchanged.
