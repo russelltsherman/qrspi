@@ -17,6 +17,8 @@ output.
 import json
 import os
 import re
+import shutil
+import tempfile
 import unittest
 
 import grade
@@ -432,7 +434,21 @@ def _judge_response(text, input_tokens=10, output_tokens=5):
 
 class LlmJudgeTest(unittest.TestCase):
     """Covers the injectable-judge contract: build/parse helpers, retry, and
-    the run_llm_judge error mapping. All stubbed — no network, no anthropic."""
+    the run_llm_judge error mapping. All stubbed — no network, no anthropic.
+
+    Cache-path isolation: every test in this class redirects
+    ``grade.JUDGE_CACHE_PATH`` to a fresh temp dir so judge grading never reads
+    or writes the repo's ``results/.cache/`` and tests stay independent.
+    """
+
+    def setUp(self):
+        self._cache_dir = tempfile.mkdtemp(prefix="grade-cache-")
+        self._orig_cache_path = grade.JUDGE_CACHE_PATH
+        grade.JUDGE_CACHE_PATH = os.path.join(self._cache_dir, "llm_judge.json")
+
+    def tearDown(self):
+        grade.JUDGE_CACHE_PATH = self._orig_cache_path
+        shutil.rmtree(self._cache_dir, ignore_errors=True)
 
     def test_build_prompt_includes_criteria_and_output(self):
         prompt = grade.build_judge_prompt("must cite sources", "the agent output")
@@ -547,6 +563,62 @@ class LlmJudgeTest(unittest.TestCase):
         import sys
 
         self.assertNotIn("anthropic", sys.modules, "grade must not import anthropic eagerly")
+
+    # ── Slice 2: cache hit/miss ──
+
+    def test_cache_key_separates_output_and_criteria(self):
+        """A NUL separator means an output/criteria split can't collide."""
+        self.assertNotEqual(
+            grade.cache_key("ab", "c"), grade.cache_key("a", "bc")
+        )
+        self.assertEqual(grade.cache_key("x", "y"), grade.cache_key("x", "y"))
+
+    def test_cache_read_miss_when_file_absent(self):
+        self.assertIsNone(grade.cache_read("nope"))
+
+    def test_cache_write_then_read_roundtrip(self):
+        entry = {"score": 4, "passed": True, "rationale": "ok"}
+        grade.cache_write("k1", entry)
+        self.assertEqual(grade.cache_read("k1"), entry)
+        # File is JSON, indent=2, full-dict keyed by cache key.
+        with open(grade.JUDGE_CACHE_PATH) as f:
+            data = json.load(f)
+        self.assertEqual(data, {"k1": entry})
+
+    def test_miss_then_hit_invokes_stub_exactly_once(self):
+        """Two identical run_llm_judge calls hit the counting stub once.
+
+        First call: cache miss → stub invoked → result cached.
+        Second identical call: cache hit → stub NOT invoked. The stub is
+        configured with a single response, so a second invocation would raise
+        AssertionError; reaching count == 1 proves the cache short-circuit.
+        """
+        stub = StubJudge([_judge_response("SCORE: 5\nRATIONALE: excellent")])
+        assertion = {"criteria": "is good", "weight": 2.0}
+        result = _result("the agent output")
+
+        first = grade.run_llm_judge(assertion, result, {}, judge_client=stub)
+        self.assertEqual(stub.calls, 1, "first call must invoke the judge (miss)")
+
+        second = grade.run_llm_judge(assertion, result, {}, judge_client=stub)
+        self.assertEqual(stub.calls, 1, "second identical call must hit cache, not the judge")
+
+        # Both graded results agree on the load-bearing fields.
+        for field in ("passed", "score", "evidence", "weight"):
+            self.assertEqual(first[field], second[field], f"{field} mismatch hit vs miss")
+        self.assertIs(second["passed"], True)
+        self.assertEqual(second["score"], 5)
+        self.assertEqual(second["evidence"], "excellent")
+
+    def test_failures_are_not_cached(self):
+        """An out-of-range (failure) grade must not populate the cache."""
+        stub = StubJudge([_judge_response("SCORE: 9\nRATIONALE: nonsense")])
+        ar = grade.run_llm_judge(
+            {"criteria": "is good"}, _result("x"), {}, judge_client=stub
+        )
+        self.assertIs(ar["passed"], False)
+        self.assertFalse(os.path.exists(grade.JUDGE_CACHE_PATH),
+                         "failed grades must not be written to the cache")
 
 
 if __name__ == "__main__":

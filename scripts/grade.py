@@ -7,6 +7,7 @@ and across the suite.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -651,6 +652,67 @@ JUDGE_MAX_TOKENS = 1024
 JUDGE_MAX_ATTEMPTS = 3
 JUDGE_BACKOFF_BASE = 1.0  # seconds; doubled each retry
 
+# Judge-result cache file. A module-level constant so tests can monkeypatch it
+# to a temp path (cache-path isolation). Identical (output, criteria) pairs hit
+# this cache and skip the judge call entirely.
+JUDGE_CACHE_PATH = "results/.cache/llm_judge.json"
+
+
+def cache_key(output: str, criteria: str) -> str:
+    """Derive a stable cache key from the agent output and the grading criterion.
+
+    ``sha256(output + 0x00 + criteria)`` — a NUL byte separates the two fields
+    so distinct (output, criteria) splits can never collide by concatenation.
+    """
+    h = hashlib.sha256()
+    h.update(output.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(criteria.encode("utf-8"))
+    return h.hexdigest()
+
+
+def cache_read(key: str) -> Optional[dict]:
+    """Return the cached judge entry for ``key``, or ``None`` on any miss.
+
+    A miss is: the cache file is absent, unreadable as JSON, or has no entry
+    under ``key``. Reads ``JUDGE_CACHE_PATH`` (current module value, so a test
+    monkeypatch is honored).
+    """
+    path = JUDGE_CACHE_PATH
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data.get(key)
+
+
+def cache_write(key: str, entry: dict) -> None:
+    """Store ``entry`` under ``key`` in the judge cache (full-file overwrite).
+
+    Read-modify-write: load the existing cache (empty if absent/corrupt), set
+    ``key``, and rewrite the whole file as JSON (``indent=2``). Creates the
+    parent directory (``results/.cache/``) on demand.
+    """
+    path = JUDGE_CACHE_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data = loaded
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    data[key] = entry
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
 
 def build_judge_prompt(criteria: str, output: str) -> str:
     """Build the grading prompt sent to the judge model.
@@ -749,10 +811,27 @@ def run_llm_judge(assertion: dict, result: dict, case: dict, judge_client=None) 
     ``judge_client`` is injectable for testing; when omitted, the default
     Anthropic-backed client is built lazily (no SDK import at module load).
     Empty output is graded normally (the judge scores it low), not short-circuited.
+
+    A successful grade is cached under ``cache_key(output, criteria)``: a cache
+    hit returns the stored ``(score, passed, rationale)`` without calling the
+    client at all; a miss grades normally and writes the result before returning.
+    Failures (call exhaustion, unparseable, out-of-range) are NOT cached.
     """
     weight = assertion.get("weight", 1.0)
     criteria = assertion["criteria"]
     output = result.get("output", "") if isinstance(result, dict) else ""
+
+    key = cache_key(output, criteria)
+    cached = cache_read(key)
+    if cached is not None:
+        return {
+            "check": criteria,
+            "type": "llm_judge",
+            "passed": cached["passed"],
+            "score": cached["score"],
+            "evidence": cached["rationale"],
+            "weight": weight,
+        }
 
     if judge_client is None:
         judge_client = make_judge_client()
@@ -793,10 +872,13 @@ def run_llm_judge(assertion: dict, result: dict, case: dict, judge_client=None) 
             "weight": weight,
         }
 
+    passed = score >= 4
+    cache_write(key, {"score": score, "passed": passed, "rationale": rationale})
+
     return {
         "check": criteria,
         "type": "llm_judge",
-        "passed": score >= 4,
+        "passed": passed,
         "score": score,
         "evidence": rationale,
         "weight": weight,
