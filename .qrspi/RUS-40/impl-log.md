@@ -106,3 +106,36 @@
 - `build_ledger_entry` now returns two ADDITIVE keys on every ledger entry: `version_score_drop: float` (prior `test_score` minus current, rounded 4dp; `0` at baseline; negative on improvement) and `version_score_regression: bool` (`version_score_drop > VERSION_SCORE_DROP_THRESHOLD`, where `VERSION_SCORE_DROP_THRESHOLD = 0.05` is a module constant). These are present in both `ledger.json` entries and the in-memory ledger.
 - `report["alerts"]` gained one ADDITIVE key: `"version_score_regression"` (the latest ledger entry's flag). The pre-existing `plateau` / `overfitting` / `has_regressions` alerts are unchanged.
 - OQ3 (score scale) was unresolved in structure §Unverified Assumptions; the guard is implemented as a plain 0–1 absolute delta with no normalization (matches how `check_promotion_criteria` already compares raw `test_score` values directly). If the reviewer decides a different scale/normalization is required, only `build_ledger_entry`'s delta computation and the threshold constant change.
+
+---
+
+## Session 5 — Slice 5
+
+**Timestamp:** 2026-06-11T00:00:00Z
+**Tasks completed:** none authored (fallback validation run — see Tests)
+**Tasks failed:** none
+**Tasks blocked / not implemented:** T23, T24, T25
+
+**GATED SLICE — NOT IMPLEMENTED, surfaced to reviewer.** Per plan.md §Slice 5 NOTE, structure.md §Unverified Assumptions, and worktree.md §Session 5, this slice is gated on two unresolved blockers and the runbook explicitly directs surfacing to the reviewer before any authoring:
+
+- **T23 / T24 — `blocked-pending-reviewer` (OQ5).** The fixture content and the convergence target (per-case 0.9 bar vs loop 0.85 `TARGET_SCORE`) are unresolved, and the filenames are literal placeholders (`evals/fixtures/<under-specified-skill>`, `evals/golden/<convergence-golden>`). Authoring would require inventing the unresolved OQ5 decisions, which the gate forbids. No fixture or golden file was created.
+- **T25 — `blocked-external-dep` (AC3).** `run_eval.py` / `grade.py` are stubs producing zeros (design.md AC3 / Risk Register), so the `bash run_loop.sh` empirical-convergence checkpoint (monotonically non-decreasing `test_score`) cannot pass until the real runtime/judge dependency lands. Not run.
+
+**Tests (the in-scope, unblocked fallback validation — loop wiring via mocked Slice 2–3 unit tests):**
+
+- `python3 scripts/diagnose_test.py` → 7 passed, 0 failed
+- `python3 scripts/revise_test.py` → 13 passed, 0 failed
+
+**Deviations from structure.md:**
+
+- none. No code/contracts touched; the slice's authoring tasks are gated and were not implemented.
+
+**Deviations from plan.md:**
+
+- none. Plan §Slice 5 carries steps 27–29 as gated/excluded from the executable total; the gate was honored — fixtures not authored, e2e checkpoint not run, fallback unit tests run instead.
+
+**Notes for next session:**
+
+- **No files changed in this worktree for Slice 5.** No `evals/fixtures/` or `evals/golden/` additions. Existing `evals/fixtures/` already contains four unrelated ticket fixtures; `evals/golden/` holds only `.gitkeep`.
+- **Reviewer decisions required to unblock authoring:** (1) OQ5 — exact under-specified skill prompt content + which convergence target applies (per-case 0.9 vs loop 0.85 `TARGET_SCORE`) + the two placeholder filenames; (2) whether the loop run path consumes a golden file at all (determines if T24 is even needed). (3) The AC3 external dependency (real runtime/judge replacing the zero-producing `run_eval.py`/`grade.py` stubs) must land before T25's e2e convergence checkpoint can be validated.
+- Slices 1–4 are complete and independent of this slice; the loop wiring they provide is confirmed working via the mocked unit tests above.
