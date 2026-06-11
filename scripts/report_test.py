@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
-"""Unit tests for report.py — stdlib only, run with python3.
+"""Stdlib-only unit tests for report.py — run with python3.
 
-    python3 scripts/report_test.py
+    python3 scripts/report_test.py        # or: cd scripts && python3 report_test.py
 
-Slice 4 scope (plan §4.24/§4.26, structure §Slice 4 Verification): the version-level
-`test_score`-drop guard added to `build_ledger_entry`. We assert over synthetic version
-sequences that:
-  (a) a `> 0.05` test_score drop from the prior version surfaces an alert in BOTH the
-      in-memory report (`report["alerts"]["version_score_regression"]`) AND the durable
-      `ledger.json` entry (`entry["version_score_regression"]`);
-  (b) a `<= 0.05` change produces no such alert in either place.
+Two complementary feature areas are covered:
 
-This complements (does not replace) the existing per-case 0.2 guard in
-`detect_regressions` (AC4, ref Q15).
+* RUS-40 Slice 4 (plan §4.24/§4.26): the version-level `test_score`-drop guard
+  added to `build_ledger_entry`. We assert over synthetic version sequences that:
+    (a) a `> 0.05` test_score drop from the prior version surfaces an alert in BOTH
+        the in-memory report (`report["alerts"]["version_score_regression"]`) AND the
+        durable `ledger.json` entry (`entry["version_score_regression"]`);
+    (b) a `<= 0.05` change produces no such alert in either place.
+  This complements (does not replace) the existing per-case 0.2 guard in
+  `detect_regressions` (AC4, ref Q15).
+
+* RUS-41 Slice 1: the version enumerator (`load_version_results`) excludes the
+  `results/all/` subtree so it cannot be mis-read as a version corrupting the ledger,
+  while a normal `results/v1/` is still counted.
 """
 
 import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import report
 
@@ -40,6 +45,22 @@ def _write_version(results_dir, name, test_score, train_score=None, gap=0.0):
     }
     with open(os.path.join(vdir, "grades.json"), "w") as f:
         json.dump(grades, f)
+
+
+def _write_grades(version_dir: Path) -> None:
+    """Create a minimal valid grades.json inside version_dir."""
+    version_dir.mkdir(parents=True, exist_ok=True)
+    with open(version_dir / "grades.json", "w") as f:
+        json.dump(
+            {
+                "timestamp": "2026-06-11T00:00:00Z",
+                "train_score": 1.0,
+                "test_score": 1.0,
+                "train_test_gap": 0.0,
+                "cases": [],
+            },
+            f,
+        )
 
 
 # --- pure build_ledger_entry tests ----------------------------------------
@@ -125,6 +146,50 @@ class ReportAndLedgerAlertTest(unittest.TestCase):
             with open(os.path.join(d, "ledger.json")) as f:
                 ledger = json.load(f)
             self.assertFalse(ledger[-1]["version_score_regression"])
+
+
+# --- version enumerator (results/all/ exclusion) tests ---------------------
+
+class LoadVersionResultsTest(unittest.TestCase):
+    def test_all_subdir_excluded_v1_still_enumerated(self):
+        """results/all/ is skipped; a normal results/v1/ is still a version."""
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp)
+            _write_grades(results / "v1")
+            _write_grades(results / "all")
+
+            versions = report.load_version_results(str(results))
+            names = {v["version"] for v in versions}
+
+            self.assertIn("v1", names, "results/v1/ must still be enumerated")
+            self.assertNotIn(
+                "all", names, "results/all/ must NOT be enumerated as a version"
+            )
+
+    def test_only_all_yields_no_versions(self):
+        """A results/ tree whose only graded subdir is all/ yields nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp)
+            _write_grades(results / "all")
+
+            versions = report.load_version_results(str(results))
+
+            self.assertEqual(
+                versions, [], "results/all/ alone must produce no versions"
+            )
+
+    def test_multiple_versions_still_enumerated(self):
+        """Normal version dirs are unaffected by the all/ exclusion."""
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp)
+            _write_grades(results / "v1")
+            _write_grades(results / "v2")
+            _write_grades(results / "all")
+
+            versions = report.load_version_results(str(results))
+            names = {v["version"] for v in versions}
+
+            self.assertEqual({"v1", "v2"}, names)
 
 
 if __name__ == "__main__":
