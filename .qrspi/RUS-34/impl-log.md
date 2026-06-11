@@ -30,3 +30,37 @@
 - `files`/`tool_calls` remain empty by design (SDK seam, option b).
 
 ---
+
+## Session 2 — Slice 2 (Live end-to-end acceptance run, AC4)
+
+**Timestamp:** 2026-06-11T12:15:05Z
+**Tasks completed:** none
+**Tasks failed:** T14, T15, T16, T17, T18 — BLOCKED (prerequisites unmet; HARD STOP)
+**Tests:**
+
+- T14 (confirm API key present) → FAIL: `ANTHROPIC_API_KEY` is **not set** in the environment.
+- T15/T17 (live `--skill` / `--agent` run) → NOT RUN: blocked. (a) `anthropic` SDK is **not installed** (`ModuleNotFoundError: No module named 'anthropic'`); the `anthropic==0.49.0` pin in `scripts/requirements.txt` is therefore still unconfirmed against an installed version. (b) No API key. (c) `evals/suite.json` `defaults` has `trials_per_case=3`, `timeout_ms=120000`, `max_tokens=128000` but **no `model` key** — `run_suite` hard-errors with a clear `ValueError` until a `model` is added (exactly the blocker flagged in Slice 1's notes).
+- T16/T18 (inspect real `results.json`) → NOT RUN: unreachable without a completed live run.
+
+**Deviations from structure.md:**
+
+- none (no code changes attempted; structure declares Slice 2 "Files touched: none")
+
+**Deviations from plan.md:**
+
+- none — but the slice could not be executed. Slice 2 is, by design, a **live** acceptance run that "requires a real API key and incurs the ~$20 acceptance cost" (structure.md Slice 2 Goal; plan steps 14–18). Its verification signal (`results[*].executed == True`; real, non-stub `output`/`tokens`/`transcript`) cannot be satisfied by stubbing — stubbing would defeat the slice's purpose.
+
+**Blocking prerequisites (none resolvable within this slice's scope):**
+
+1. `ANTHROPIC_API_KEY` must be present in the environment. It is not, and supplying a key is outside this agent's scope.
+2. `anthropic==0.49.0` must be installed (`pip install -r scripts/requirements.txt`). It is not installed; installing it and confirming the pin is a setup step, not a Slice 2 code task.
+3. `evals/suite.json` `defaults` must gain a valid `"model": "<model id>"` key, or `run_suite` hard-errors. Adding it is a file change, which this slice (Files touched: none) forbids.
+
+**Outcome:** STOP — reported to orchestrator. No files modified. Network egress to `api.anthropic.com:443` is reachable from the sandbox, so once a key is present, the SDK is installed, and a `model` is added to the suite defaults, the documented `--skill`/`--agent` invocations can be run to produce a real `results.json`.
+
+**Notes for next session:**
+
+- This was the final planned slice (Slice 2 of 2). It is **incomplete/blocked**, not done. Re-running it requires the three prerequisites above resolved by a human/operator (real API key, installed SDK, a `model` added to `evals/suite.json` defaults) — none of which an isolated implement-phase slice agent can or should perform.
+- Slice 1's runtime is verified offline (Session 1: `scripts/run_eval_test.py` 6 passed). The remaining gap is purely the live AC4 confirmation.
+
+---
