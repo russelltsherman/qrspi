@@ -402,5 +402,152 @@ class ScriptModuleConstantsTest(unittest.TestCase):
         self.assertEqual(grade.SCRIPT_TIMEOUT_SEC, 120)
 
 
+class StubJudge:
+    """Deterministic judge_client stub: records calls, returns canned responses.
+
+    ``responses`` is a list of dicts (the judge_client return contract) and/or
+    Exception instances. Each call pops the next; an Exception is raised to
+    simulate a transient call failure (exercising call_with_retry).
+    """
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def __call__(self, prompt):
+        self.calls += 1
+        item = self._responses.pop(0) if self._responses else self._responses_default()
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    @staticmethod
+    def _responses_default():
+        raise AssertionError("StubJudge called more times than configured")
+
+
+def _judge_response(text, input_tokens=10, output_tokens=5):
+    return {"text": text, "input_tokens": input_tokens, "output_tokens": output_tokens}
+
+
+class LlmJudgeTest(unittest.TestCase):
+    """Covers the injectable-judge contract: build/parse helpers, retry, and
+    the run_llm_judge error mapping. All stubbed — no network, no anthropic."""
+
+    def test_build_prompt_includes_criteria_and_output(self):
+        prompt = grade.build_judge_prompt("must cite sources", "the agent output")
+        self.assertIn("must cite sources", prompt)
+        self.assertIn("the agent output", prompt)
+        self.assertIn("SCORE:", prompt)
+
+    def test_parse_extracts_score_and_rationale(self):
+        score, rationale = grade.parse_judge_response("SCORE: 4\nRATIONALE: good enough")
+        self.assertEqual(score, 4)
+        self.assertEqual(rationale, "good enough")
+
+    def test_parse_raises_when_no_score(self):
+        with self.assertRaises(ValueError):
+            grade.parse_judge_response("I think this is pretty good, no marker here")
+
+    def test_happy_path_score_5_passes(self):
+        stub = StubJudge([_judge_response("SCORE: 5\nRATIONALE: excellent")])
+        ar = grade.run_llm_judge(
+            {"criteria": "is good", "weight": 2.0},
+            _result("some output"),
+            {},
+            judge_client=stub,
+        )
+        self.assertEqual(stub.calls, 1)
+        self.assertIs(ar["passed"], True)
+        self.assertEqual(ar["score"], 5)
+        self.assertEqual(ar["evidence"], "excellent")
+        self.assertEqual(ar["weight"], 2.0)
+        self.assertEqual(ar["type"], "llm_judge")
+
+    def test_score_below_threshold_fails_but_scored(self):
+        stub = StubJudge([_judge_response("SCORE: 2\nRATIONALE: weak")])
+        ar = grade.run_llm_judge(
+            {"criteria": "is good"}, _result("x"), {}, judge_client=stub
+        )
+        self.assertIs(ar["passed"], False)
+        self.assertEqual(ar["score"], 2)
+
+    def test_out_of_range_maps_to_failure(self):
+        stub = StubJudge([_judge_response("SCORE: 9\nRATIONALE: nonsense")])
+        ar = grade.run_llm_judge(
+            {"criteria": "is good"}, _result("x"), {}, judge_client=stub
+        )
+        self.assertEqual(stub.calls, 1, "out-of-range must not retry")
+        self.assertIs(ar["passed"], False)
+        self.assertIsNone(ar["score"])
+        self.assertIn("out of range", ar["evidence"])
+
+    def test_unparseable_maps_to_failure_no_retry(self):
+        stub = StubJudge([_judge_response("no score marker at all")])
+        ar = grade.run_llm_judge(
+            {"criteria": "is good"}, _result("x"), {}, judge_client=stub
+        )
+        self.assertEqual(stub.calls, 1, "parse failure must not retry")
+        self.assertIs(ar["passed"], False)
+        self.assertIsNone(ar["score"])
+        self.assertIn("Unparseable", ar["evidence"])
+
+    def test_retry_exhaustion_calls_three_times(self):
+        stub = StubJudge(
+            [RuntimeError("boom"), RuntimeError("boom"), RuntimeError("boom")]
+        )
+        slept = []
+        orig_sleep = grade.time.sleep
+        grade.time.sleep = slept.append  # don't actually sleep
+        try:
+            ar = grade.run_llm_judge(
+                {"criteria": "is good"}, _result("x"), {}, judge_client=stub
+            )
+        finally:
+            grade.time.sleep = orig_sleep
+        self.assertEqual(stub.calls, 3, "must retry up to 3 attempts then give up")
+        self.assertEqual(slept, [1.0, 2.0], "exponential backoff between the 3 attempts")
+        self.assertIs(ar["passed"], False)
+        self.assertIsNone(ar["score"])
+        self.assertIn("failed after", ar["evidence"])
+
+    def test_retry_recovers_before_exhaustion(self):
+        stub = StubJudge(
+            [RuntimeError("transient"), _judge_response("SCORE: 4\nRATIONALE: ok")]
+        )
+        orig_sleep = grade.time.sleep
+        grade.time.sleep = lambda _s: None  # don't actually sleep
+        try:
+            ar = grade.run_llm_judge(
+                {"criteria": "is good"}, _result("x"), {}, judge_client=stub
+            )
+        finally:
+            grade.time.sleep = orig_sleep
+        self.assertEqual(stub.calls, 2)
+        self.assertIs(ar["passed"], True)
+        self.assertEqual(ar["score"], 4)
+
+    def test_empty_output_is_graded_not_short_circuited(self):
+        stub = StubJudge([_judge_response("SCORE: 1\nRATIONALE: nothing here")])
+        ar = grade.run_llm_judge(
+            {"criteria": "is good"}, _result(""), {}, judge_client=stub
+        )
+        self.assertEqual(stub.calls, 1, "empty output must still reach the judge")
+        self.assertIs(ar["passed"], False)
+        self.assertEqual(ar["score"], 1)
+
+    def test_call_with_retry_no_sleep_on_success(self):
+        stub = StubJudge([_judge_response("SCORE: 3\nRATIONALE: meh")])
+        out = grade.call_with_retry(stub, "prompt")
+        self.assertEqual(stub.calls, 1)
+        self.assertEqual(out["text"], "SCORE: 3\nRATIONALE: meh")
+
+    def test_no_anthropic_import_at_module_load(self):
+        """Importing grade must not require anthropic (lazy import contract)."""
+        import sys
+
+        self.assertNotIn("anthropic", sys.modules, "grade must not import anthropic eagerly")
+
+
 if __name__ == "__main__":
     unittest.main()

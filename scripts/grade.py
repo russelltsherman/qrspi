@@ -13,6 +13,7 @@ import re
 import shlex
 import statistics
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -643,25 +644,162 @@ def run_programmatic_check(assertion: dict, result: dict) -> dict:
     }
 
 
-def run_llm_judge(assertion: dict, result: dict, case: dict) -> dict:
-    """Run an LLM judge assertion.
+# ── LLM Judge ──
 
-    In a real implementation, this calls a grading model:
+JUDGE_MODEL = "claude-sonnet-4-6"
+JUDGE_MAX_TOKENS = 1024
+JUDGE_MAX_ATTEMPTS = 3
+JUDGE_BACKOFF_BASE = 1.0  # seconds; doubled each retry
 
-        response = judge_model.complete(
-            system="You are grading an AI agent's output...",
-            messages=[{"role": "user", "content": grading_prompt}],
-        )
 
-    This stub returns a placeholder for integration.
+def build_judge_prompt(criteria: str, output: str) -> str:
+    """Build the grading prompt sent to the judge model.
+
+    The prompt mandates a machine-parseable response: a ``SCORE: N`` line
+    (N an integer 1-5) followed by a free-text rationale. ``parse_judge_response``
+    relies on that contract.
     """
+    return (
+        "You are grading an AI agent's output against a quality criterion.\n"
+        "Score how well the output satisfies the criterion on a 1-5 integer scale:\n"
+        "  1 = does not satisfy the criterion at all\n"
+        "  5 = fully satisfies the criterion\n\n"
+        f"CRITERION:\n{criteria}\n\n"
+        f"AGENT OUTPUT:\n{output}\n\n"
+        "Respond in exactly this format:\n"
+        "SCORE: <integer 1-5>\n"
+        "RATIONALE: <one or two sentences explaining the score>\n"
+    )
+
+
+def parse_judge_response(text: str) -> tuple[int, str]:
+    """Parse a judge response into ``(score, rationale)``.
+
+    Looks for a ``SCORE: N`` marker (case-insensitive, anywhere in the text).
+    Raises ``ValueError`` if no score marker is present so the caller can map
+    the failure deterministically. Range validation (1-5) is the caller's job.
+    """
+    match = re.search(r"SCORE:\s*(-?\d+)", text, re.IGNORECASE)
+    if not match:
+        raise ValueError("no SCORE marker found in judge response")
+    score = int(match.group(1))
+    rationale_match = re.search(r"RATIONALE:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
+    rationale = rationale_match.group(1).strip() if rationale_match else text.strip()
+    return score, rationale
+
+
+def make_judge_client(api_key: Optional[str] = None):
+    """Build the default judge client callable.
+
+    Lazily imports ``anthropic`` so importing ``grade`` (and running the unit
+    tests) never requires the SDK or a network. Returns a callable of the
+    contract ``call_with_retry`` expects: ``(prompt: str) -> dict`` with keys
+    ``text``, ``input_tokens``, ``output_tokens``.
+    """
+    import anthropic  # lazy — only when a real judge call is made
+
+    client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+
+    def judge_client(prompt: str) -> dict:
+        response = client.messages.create(
+            model=JUDGE_MODEL,
+            max_tokens=JUDGE_MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(b.text for b in response.content if getattr(b, "type", None) == "text")
+        return {
+            "text": text,
+            "input_tokens": response.usage.input_tokens,
+            "output_tokens": response.usage.output_tokens,
+        }
+
+    return judge_client
+
+
+def call_with_retry(judge_client, prompt: str) -> dict:
+    """Call ``judge_client(prompt)`` with bounded exponential-backoff retries.
+
+    Retries only transient call failures (the client raising), up to
+    ``JUDGE_MAX_ATTEMPTS`` attempts. Parse/range failures are NOT retried —
+    they are the caller's concern, deterministic, and re-running the same
+    prompt won't fix them. Re-raises the last exception after exhausting
+    attempts.
+    """
+    last_exc = None
+    for attempt in range(JUDGE_MAX_ATTEMPTS):
+        try:
+            return judge_client(prompt)
+        except Exception as exc:  # transient call error — retry
+            last_exc = exc
+            if attempt < JUDGE_MAX_ATTEMPTS - 1:
+                time.sleep(JUDGE_BACKOFF_BASE * (2 ** attempt))
+    raise last_exc
+
+
+def run_llm_judge(assertion: dict, result: dict, case: dict, judge_client=None) -> dict:
+    """Run an LLM judge assertion and return a real graded result.
+
+    Builds a prompt from ``assertion["criteria"]`` and the agent's
+    ``result["output"]``, calls the judge via ``call_with_retry``, parses and
+    validates the score (must be an integer in [1, 5]), and maps the outcome:
+
+    - success  → passed = (score >= 4), score set, evidence = rationale
+    - failure  → passed = False, score = None, evidence describes the failure
+
+    ``judge_client`` is injectable for testing; when omitted, the default
+    Anthropic-backed client is built lazily (no SDK import at module load).
+    Empty output is graded normally (the judge scores it low), not short-circuited.
+    """
+    weight = assertion.get("weight", 1.0)
+    criteria = assertion["criteria"]
+    output = result.get("output", "") if isinstance(result, dict) else ""
+
+    if judge_client is None:
+        judge_client = make_judge_client()
+
+    prompt = build_judge_prompt(criteria, output)
+
+    try:
+        response = call_with_retry(judge_client, prompt)
+    except Exception as exc:
+        return {
+            "check": criteria,
+            "type": "llm_judge",
+            "passed": False,
+            "score": None,
+            "evidence": f"Judge call failed after {JUDGE_MAX_ATTEMPTS} attempts: {exc}",
+            "weight": weight,
+        }
+
+    try:
+        score, rationale = parse_judge_response(response["text"])
+    except ValueError as exc:
+        return {
+            "check": criteria,
+            "type": "llm_judge",
+            "passed": False,
+            "score": None,
+            "evidence": f"Unparseable judge response: {exc}",
+            "weight": weight,
+        }
+
+    if not (1 <= score <= 5):
+        return {
+            "check": criteria,
+            "type": "llm_judge",
+            "passed": False,
+            "score": None,
+            "evidence": f"Judge score {score} out of range [1, 5]",
+            "weight": weight,
+        }
+
     return {
-        "check": assertion["criteria"],
+        "check": criteria,
         "type": "llm_judge",
-        "passed": None,  # null until real judge is integrated
-        "score": None,    # 1-5 scale from judge
-        "evidence": "LLM judge not yet integrated — requires model API",
-        "weight": assertion.get("weight", 1.0),
+        "passed": score >= 4,
+        "score": score,
+        "evidence": rationale,
+        "weight": weight,
     }
 
 
