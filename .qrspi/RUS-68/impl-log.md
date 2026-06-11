@@ -59,3 +59,35 @@
 
 - Slice 1 producer + tests complete and green. The additive `failedRemotes` envelope field and the `ok:true`-on-partial-failure semantics are the only contract surface Slice 2 (`qrspi-batch.js` consumer) needs.
 - The fixture suite skip-guards via `_git_available()` — prints `SKIP` and runs only the pure tests when `git` is absent.
+
+---
+
+## Session 3 — Slice 2
+
+**Timestamp:** 2026-06-11T21:10:00Z
+**Tasks completed:** T22, T23, T24
+**Tasks failed:** none
+**Tests:**
+
+- `node --check .claude/workflows/qrspi-batch.js` → SYNTAX OK
+- Standalone end-to-end envelope harness (4 required cases + 2 defensive cases) → 15 passed, 0 failed. Harness copied the verbatim `extractJsonObject`/`parseCleanupEnvelope`/`cleanupFailedRemotes` functions and the distilled land/processed-exclusion logic, asserted: (1) non-empty `failedRemotes`+`ok:true` → log surfaces stranded refs, `reconcileRetry` set, NOT halted, ticket left OUT of `processed` (eligible for Reconcile retry); (2) empty `failedRemotes` → no retry, added to `processed` (unchanged); (3) `ok:false` → halts, no retry; (4) envelope LACKING `failedRemotes` → parses with no error, no retry. (Harness lived in /tmp, removed after running — eval harness is a project placeholder, so logic verified directly per convention.)
+
+**Deviations from structure.md:**
+
+- none. Implemented the consumer in `.claude/workflows/qrspi-batch.js` only.
+
+**Deviations from plan.md:**
+
+- Resolved structure §Unverified-Assumption-3 (no pre-existing explicit "Reconcile retry scheduler"). The retry mechanism IS the existing opt-in Reconcile pass (`runReconciliation`), which re-enumerates `.worktrees/` candidates and excludes the run's `processed` set. "Schedule a Reconcile retry" is therefore implemented as: a land whose cleanup returns `ok:true` + non-empty `failedRemotes` sets `res.reconcileRetry = true`, and the main loop skips `processed.add(t.id)` for such a ticket — so this run's Reconcile pass (when enabled) re-attempts the prune, and the still-present origin refs keep it in the backlog for a later run's pass regardless. No new scheduler/queue was invented (that would be out-of-slice scope and would duplicate the existing reconcile path).
+
+**Verification (T24 checkpoint — all boxes met):**
+
+- Non-empty `failedRemotes` (ok:true): the Finalize/Reconcile log lines append `STRANDED remotes [...]`, and the land result sets `reconcileRetry`, leaving the ticket OUT of `processed` so the Reconcile pass re-attempts it — NOT halted.
+- Empty `failedRemotes`: no `reconcileRetry`, ticket added to `processed`, existing behavior unchanged.
+- `ok:false`: still the sole hard-stop — logged "cleanup failed", no retry (HARD-STOP preserved).
+- Envelope lacking `failedRemotes` (back-compat): `parseCleanupEnvelope` does not validate/require the field; `cleanupFailedRemotes` returns `[]` (also coerces non-array junk) — parses without error, no retry.
+
+**Notes for next session:**
+
+- Slice 2 (final slice) complete. Both files implemented and verified; stack ready for `/qrspi-pr`.
+- New consumer surface in `qrspi-batch.js`: helper `cleanupFailedRemotes(cl)` (reads `cl.failedRemotes` defensively → `[]`); land/reconcile log lines surface `STRANDED remotes [...]`; land result carries `failedRemotes` + a `reconcileRetry` boolean; the main loop's `processed.add` is now conditional on `!res.reconcileRetry`.
