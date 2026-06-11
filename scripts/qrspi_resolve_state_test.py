@@ -176,7 +176,7 @@ case("implementation changes requested (top) -> revise in place, no discard",
      state(phases={"design": _phase(decision="APPROVED"),
                    "plan": _phase(decision="APPROVED"),
                    "implementation": _impl([_slice(1, decision="CHANGES_REQUESTED")])}),
-     {"action": "revise", "phase": "implementation"})
+     {"action": "revise", "phase": "implementation", "changeRequested": True})
 
 # A formal change request OUTRANKS the threads->wait routing: a frontier PR that is
 # CHANGES_REQUESTED *and* carries unresolved threads is still an autonomous revise (the
@@ -190,7 +190,7 @@ case("impl CHANGES_REQUESTED with unresolved threads (top) -> revise (CR outrank
 
 case("design CHANGES_REQUESTED with unresolved threads (top) -> revise (CR outranks threads)",
      state(phases={"design": _phase(decision="CHANGES_REQUESTED", threads=2)}),
-     {"action": "revise", "phase": "design"})
+     {"action": "revise", "phase": "design", "changeRequested": True})
 
 case("design AND plan changes requested -> reset to lowest (design)",
      state(phases={"design": _phase(decision="CHANGES_REQUESTED"),
@@ -201,7 +201,7 @@ case("design AND plan changes requested -> reset to lowest (design)",
 
 case("design changes requested, only design exists -> revise (nothing above)",
      state(phases={"design": _phase(decision="CHANGES_REQUESTED")}),
-     {"action": "revise", "phase": "design"})
+     {"action": "revise", "phase": "design", "changeRequested": True})
 
 
 # --- entry-gate blocker gate (RUS-50: respect Linear blockedBy at the entry gate) ---
@@ -232,55 +232,80 @@ case("in-flight (design branch) + blocked -> unchanged (advance), blocker gate i
      {"action": "advance", "phase": "design", "nextPhase": "plan"})
 
 
-# --- respond_comment precedence (RUS-54, AC1) -------------------------------
-# T13 — commentTargets AND CHANGES_REQUESTED -> reset/revise wins (CR outranks).
-case("commentTargets + CHANGES_REQUESTED (top) -> revise, NOT respond_comment (CR outranks)",
-     state(phases={"design": _phase(decision="CHANGES_REQUESTED", comments=[_ct()])}),
-     {"action": "revise", "phase": "design"})
+# --- unified feedback handling (revise subsumes the former respond_comment) --
+# A frontier change request and/or unaddressed reviewer comments BOTH resolve to one
+# `revise` action. `changeRequested` says whether a formal change request is present
+# (the worker re-requests review only then); `commentTargets` carries the comments to
+# evaluate per-intent (answer/apply/decline).
 
+# T13 — commentTargets AND CHANGES_REQUESTED on the frontier -> one revise carrying BOTH
+# (this is the unification: the comments are no longer deferred to a separate later run).
+case("commentTargets + CHANGES_REQUESTED (top) -> revise carries changeRequested + targets",
+     state(phases={"design": _phase(decision="CHANGES_REQUESTED", comments=[_ct(7)])}),
+     {"action": "revise", "phase": "design", "changeRequested": True,
+      "commentTargets": [_ct(7)]})
+
+# A non-frontier CHANGES_REQUESTED still resets (CR outranks; discard downstream).
 case("commentTargets on design + CHANGES_REQUESTED on design with plan above -> reset (CR outranks)",
      state(phases={"design": _phase(decision="CHANGES_REQUESTED", comments=[_ct()]),
                    "plan": _phase(decision="APPROVED")}),
      {"action": "reset", "resetToPhase": "design", "discardPhases": ["plan"]})
 
-# T14 — commentTargets + not-APPROVED / unresolved threads -> respond_comment (outranks wait).
-case("commentTargets + under review (no CR) -> respond_comment (outranks wait)",
+# Frontier CR with NO comments -> revise, changeRequested True, empty targets.
+case("CHANGES_REQUESTED (top), no comments -> revise changeRequested, empty targets",
+     state(phases={"design": _phase(decision="CHANGES_REQUESTED")}),
+     {"action": "revise", "phase": "design", "changeRequested": True,
+      "commentTargets": []})
+
+# T14 — comments with NO formal change request -> revise, changeRequested False
+# (reply-only; the worker does NOT re-request review). Outranks the wait sink.
+case("commentTargets + under review (no CR) -> revise changeRequested False (outranks wait)",
      state(phases={"design": _phase(decision="REVIEW_REQUIRED", comments=[_ct()])}),
-     {"action": "respond_comment", "phase": "design"})
+     {"action": "revise", "phase": "design", "changeRequested": False})
 
-case("commentTargets + unresolved threads (no CR) -> respond_comment (outranks wait)",
+case("commentTargets + unresolved threads (no CR) -> revise changeRequested False (outranks wait)",
      state(phases={"design": _phase(decision="APPROVED", threads=2, comments=[_ct()])}),
-     {"action": "respond_comment", "phase": "design"})
+     {"action": "revise", "phase": "design", "changeRequested": False})
 
-# T15 — commentTargets AND APPROVED -> respond_comment (fires when APPROVED).
-case("commentTargets + APPROVED (no threads) -> respond_comment (fires when APPROVED)",
+# T15 — comments AND APPROVED -> revise (fires when APPROVED), changeRequested False.
+case("commentTargets + APPROVED (no threads) -> revise changeRequested False (fires when APPROVED)",
      state(phases={"design": _phase(decision="APPROVED", comments=[_ct()])}),
-     {"action": "respond_comment", "phase": "design"})
+     {"action": "revise", "phase": "design", "changeRequested": False})
 
-# respond_comment carries the phase's comment targets in the decision payload.
-case("respond_comment decision carries commentTargets payload",
+# The decision carries the phase's comment targets in its payload.
+case("revise decision carries commentTargets payload",
      state(phases={"design": _phase(decision="APPROVED", comments=[_ct(42)])}),
-     {"action": "respond_comment", "phase": "design", "commentTargets": [_ct(42)]})
+     {"action": "revise", "phase": "design", "changeRequested": False,
+      "commentTargets": [_ct(42)]})
 
-# respond_comment fires on the implementation stack too (aggregated across slices).
-case("commentTargets on a slice PR -> respond_comment for implementation",
+# Fires on the implementation stack too (targets aggregated across slices).
+case("commentTargets on a slice PR -> revise for implementation",
      state(phases={"design": _phase(decision="APPROVED"),
                    "plan": _phase(decision="APPROVED"),
                    "implementation": _impl([_slice(1, decision="APPROVED", comments=[_ct()])])}),
-     {"action": "respond_comment", "phase": "implementation"})
+     {"action": "revise", "phase": "implementation", "changeRequested": False})
 
-# Lowest phase carrying comments wins (precedence by phase order).
-case("commentTargets on both design and plan -> respond_comment for design (lowest)",
+# Lowest phase carrying feedback wins (precedence by phase order). Here both phases have
+# comments and neither has a CR -> revise on design (lowest), changeRequested False.
+case("commentTargets on both design and plan -> revise for design (lowest)",
      state(phases={"design": _phase(decision="APPROVED", comments=[_ct(1)]),
                    "plan": _phase(decision="APPROVED", comments=[_ct(2)])}),
-     {"action": "respond_comment", "phase": "design"})
+     {"action": "revise", "phase": "design", "changeRequested": False})
 
-# T16 — no unaddressed comments (empty commentTargets) -> does NOT fire respond_comment.
-case("no commentTargets, approved+clean -> advance, NOT respond_comment",
+# Lowest-first across kinds: comments on a lower phase + a frontier CR on a higher phase
+# -> the lower phase's comments are addressed first (changeRequested False); the frontier
+# CR is handled on a subsequent pass. Amends propagate upward, so order is safe.
+case("comments on design + frontier CR on plan -> revise design first (lowest, no re-request)",
+     state(phases={"design": _phase(decision="APPROVED", comments=[_ct(1)]),
+                   "plan": _phase(decision="CHANGES_REQUESTED")}),
+     {"action": "revise", "phase": "design", "changeRequested": False})
+
+# T16 — no feedback at all (empty commentTargets, no CR) -> normal advance/land.
+case("no commentTargets, approved+clean -> advance, NOT revise",
      state(phases={"design": _phase(decision="APPROVED", comments=[])}),
      {"action": "advance", "phase": "design", "nextPhase": "plan"})
 
-case("no commentTargets, approved slices -> land, NOT respond_comment",
+case("no commentTargets, approved slices -> land, NOT revise",
      state(phases={"design": _phase(decision="APPROVED"),
                    "plan": _phase(decision="APPROVED"),
                    "implementation": _impl([_slice(1, decision="APPROVED"),

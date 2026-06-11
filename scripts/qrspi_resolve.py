@@ -167,11 +167,11 @@ def comment_targets_of(decision):
     The gather (qrspi_pr_state.build_state) already self-resolves the authenticated
     bot login and attaches `commentTargets` to every phase/slice, and the resolver
     folds the active phase's targets into `decision["commentTargets"]` when it emits
-    `respond_comment`. We re-emit exactly those targets as a top-level `commentTargets`
-    field because the `decision` dict's key set is fixed and the consumer
-    (qrspi-batch doRespondComment) iterates `r.commentTargets` directly. Pure: a
-    None/empty decision (e.g. the ok:false error envelope) yields []. Only the
-    respond_comment decision carries a non-empty list."""
+    the unified `revise` action (which subsumes the former respond_comment). We re-emit
+    exactly those targets as a top-level `commentTargets` field because the `decision`
+    dict's key set is fixed and the consumer (qrspi-batch doRevise) iterates
+    `r.commentTargets` directly. Pure: a None/empty decision (e.g. the ok:false error
+    envelope) yields []. Only a `revise` decision carries a non-empty list."""
     if not isinstance(decision, dict):
         return []
     targets = decision.get("commentTargets")
@@ -188,9 +188,9 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
     flag), so the JS finalize prompts never carry a hard-coded username.
 
     `commentTargets` is re-emitted at the TOP LEVEL (mirroring the active phase's
-    targets the resolver folded into `decision`) so the respond_comment consumer
+    targets the resolver folded into `decision`) so the unified `revise` consumer
     iterates `r.commentTargets` without reaching into `decision`. It is [] for every
-    non-respond_comment decision (additive; unknown to old consumers, which ignore it).
+    non-`revise` decision (additive; unknown to old consumers, which ignore it).
 
     `ticket_content_path` is the token-free file the caller staged the Linear
     title+body to. We emit the PATH, never the body: the design-phase agents Read

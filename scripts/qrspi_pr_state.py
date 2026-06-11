@@ -76,8 +76,9 @@ def unaddressed_reviewer_comments(pr_node, bot_login):
     Comment ids come from .databaseId and authors from author.login (API fields,
     never a JSON-blob regex). Any comment authored by bot_login is filtered out.
 
-    Inline rule: a reviewer comment in a reviewThreads thread is unaddressed iff no
-    LATER comment in that same thread's comment chain is authored by bot_login.
+    Inline rule: comments in a RESOLVED thread are never unaddressed — the reviewer
+    marked it done (RUS-69). In an unresolved thread, a reviewer comment is unaddressed
+    iff no LATER comment in that same thread's comment chain is authored by bot_login.
     threadType="inline", threadId=the thread id, lastReplyAuthor=the last comment's
     author login.
 
@@ -90,6 +91,12 @@ def unaddressed_reviewer_comments(pr_node, bot_login):
     # --- inline (review-thread) comments ----------------------------------
     threads = ((pr_node or {}).get("reviewThreads") or {}).get("nodes", []) or []
     for thread in threads:
+        # A resolved thread is addressed by definition — the reviewer marked it done,
+        # so its comments are never reply targets regardless of who (if anyone) replied
+        # in-thread. Skipping here stops the batch from replying into already-resolved
+        # threads (RUS-69). Top-level comments below are not thread-resolvable.
+        if thread.get("isResolved"):
+            continue
         thread_id = thread.get("id")
         comments = (thread.get("comments") or {}).get("nodes", []) or []
         ordered = sorted(comments, key=lambda c: c.get("createdAt") or "")

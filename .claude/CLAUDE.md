@@ -45,16 +45,19 @@ Selected (assigned)
   unresolved review threads) builds the next phase on top.
 - **Reset** is automatic: a formal `CHANGES_REQUESTED` on an upstream phase PR discards every
   downstream phase (PRs closed, branches deleted, stale artifacts removed) and returns the
-  ticket to that phase. **Revise** is also automatic: a formal `CHANGES_REQUESTED` on a
-  *frontier* phase PR (nothing downstream to discard) is addressed in place — the worker edits
-  the phase's own artifacts/code, amends the phase commit, and re-requests review (which clears
-  the change request, the loop-safe termination signal). **Respond-comment** is also automatic
-  (RUS-54): a phase PR carrying unaddressed reviewer **comments** (no formal change request) is
-  handled in place — a peer-reviewer worker answers / applies+amends / declines-with-rationale
-  per comment and posts the rationale as an in-thread reply via `scripts/qrspi_comment_reply.py`
-  (gh comment writes succeed with the bot's classic PAT — the old cross-account write block is
-  gone). Review *threads* still cannot be auto-**resolved** (only the reviewer resolves a thread),
-  so a PR whose only outstanding signal is unresolved threads with neither a change request nor an
+  ticket to that phase. **Revise** is also automatic and is the **unified feedback action** (it
+  subsumes the former *respond-comment*, RUS-54): a *frontier* phase PR carrying a formal
+  `CHANGES_REQUESTED` **and/or** unaddressed reviewer **comments** is addressed in place, in one
+  pass. The worker (1) engages **each comment per-intent** — answers / applies+amends / declines
+  with rationale — and posts an in-thread reply via `scripts/qrspi_comment_reply.py`, then (2)
+  **only when a formal change request is present** also addresses the review summary, amends the
+  phase commit, and re-requests review (which clears the change request — the loop-safe
+  termination signal). A comment-only PR (no formal change request, even when APPROVED) is
+  answered in place **without** re-requesting review (gh comment writes succeed with the bot's
+  classic PAT — the old cross-account write block is gone). Review *threads* still cannot be
+  auto-**resolved** (only the reviewer resolves a thread), and a thread the reviewer already
+  resolved is excluded from the comment set (the gather drops resolved threads, RUS-69), so a PR
+  whose only outstanding signal is unresolved threads with neither a change request nor an
   unaddressed reviewer comment is left for the reviewer and resolves to `wait`.
 - **`*Approved` Linear states were dropped** — approval lives in the PR. Reporting statuses:
   `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.

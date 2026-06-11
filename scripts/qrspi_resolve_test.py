@@ -136,10 +136,10 @@ check("err envelope -> empty top-level commentTargets",
       err_env["commentTargets"], [])
 _tgts = [{"commentId": 7, "author": "rev", "body": "fix?", "threadType": "inline",
           "threadId": "PRT_1", "lastReplyAuthor": "rev"}]
-_rc_dec = {"action": "respond_comment", "phase": "design",
+_rc_dec = {"action": "revise", "phase": "design", "changeRequested": False,
            "commentTargets": _tgts, "reason": "y"}
 rc_env = build_envelope("/wt/RUS-1", _rc_dec, _ex, ok=True)
-check("respond_comment decision surfaces top-level commentTargets",
+check("revise decision surfaces top-level commentTargets",
       rc_env["commentTargets"], _tgts)
 check("comment_targets_of None -> []", comment_targets_of(None), [])
 check("comment_targets_of decision w/o key -> []",

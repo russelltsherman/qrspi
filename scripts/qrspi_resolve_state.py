@@ -31,18 +31,22 @@ Decision actions:
                     mutations 403 on this cross-owned repo — see the gh-cross-account note),
                     so a thread-only PR is left for the reviewer to resolve rather than
                     looping an autonomous revise that can never satisfy the thread gate.
-    respond_comment a phase PR carries >=1 unaddressed reviewer comment (commentTargets)
-                    -> reply to the comment(s) in place (AUTONOMOUS). Fires even when the
-                    PR is APPROVED; a formal CHANGES_REQUESTED still outranks it (the
-                    reset/revise check runs first). Slotted ahead of the wait/APPROVED
-                    sinks so an approved-but-commented PR is answered, not waited on.
-    revise          frontier phase PR carries a formal CHANGES_REQUESTED -> address the
-                    feedback in place and re-request review (AUTONOMOUS). Driven by the
-                    CHANGES_REQUESTED decision, NOT by thread count: the revise worker
-                    re-requests review, which flips reviewDecision back to REVIEW_REQUIRED,
-                    so the next pass returns `wait` instead of re-firing. That decision flip
-                    is the only loop-safe termination signal we have (threads can't be
-                    auto-resolved). Thread resolution is left to the reviewer.
+    revise          a frontier phase PR carries a formal CHANGES_REQUESTED AND/OR >=1
+                    unaddressed reviewer comment (commentTargets) -> address the feedback
+                    in place (AUTONOMOUS). This is the UNIFIED feedback action (revise +
+                    the former respond_comment): the worker evaluates each comment's intent
+                    and reacts per comment (answer / apply+amend / decline), replying
+                    in-thread, and — only when a formal change request is present
+                    (changeRequested True) — also addresses the review summary and
+                    re-requests review. Re-requesting flips reviewDecision back to
+                    REVIEW_REQUIRED, so the next pass returns `wait` instead of re-firing;
+                    that decision flip is the only loop-safe termination signal we have
+                    (threads can't be auto-resolved). A comment-only PR (no formal change
+                    request, even when APPROVED) is answered in place without re-requesting,
+                    and is slotted ahead of the wait/APPROVED sinks so an approved-but-
+                    commented PR is answered, not waited on. Thread resolution is always
+                    left to the reviewer. changeRequested can be True only on the frontier
+                    (a non-frontier CHANGES_REQUESTED routes to `reset`, below).
     advance         active phase READY and not the top phase -> build the next phase;
                     OR implementation exists but is unfinished -> build the rest
     land            implementation stack fully READY -> land the whole stack
@@ -56,15 +60,17 @@ import sys
 
 PHASES = ["design", "plan", "implementation"]
 
-# The legal action vocabulary the resolver may emit. respond_comment is the
-# RUS-54 addition (reply to unaddressed reviewer comments in place).
+# The legal action vocabulary the resolver may emit. `revise` is the UNIFIED
+# feedback action: it subsumes the former `respond_comment` (RUS-54) so a phase PR
+# carrying a formal CHANGES_REQUESTED and/or unaddressed reviewer comments is handled
+# by one action that evaluates each comment's intent and re-requests review only when
+# a formal change request is present.
 ACTIONS = (
     "entry_blocked",
     "run_design",
     "submit",
     "wait",
     "revise",
-    "respond_comment",
     "advance",
     "land",
     "reset",
@@ -126,6 +132,7 @@ def resolve(state):
             "resetToPhase": kw.get("resetToPhase"),
             "discardPhases": kw.get("discardPhases", []),
             "commentTargets": kw.get("commentTargets", []),
+            "changeRequested": kw.get("changeRequested", False),
             "reason": kw.get("reason", ""),
         }
         return out
@@ -147,7 +154,10 @@ def resolve(state):
         return decision("entry_blocked",
                         reason="No design branch and ticket is not assigned+Selected; nothing begins.")
 
-    # 2. Reset check — lowest existing phase carrying CHANGES_REQUESTED wins.
+    # 2. Reset check — a CHANGES_REQUESTED on a NON-frontier phase discards everything
+    # downstream and returns there. Only the lowest CHANGES_REQUESTED phase matters; if it
+    # has nothing downstream it IS the frontier and falls through to the unified feedback
+    # handler below (addressed in place rather than reset).
     cr = [p for p in existing if phase_changes_requested(phases, p)]
     if cr:
         k = min(cr, key=_order)
@@ -156,25 +166,34 @@ def resolve(state):
             return decision("reset", resetToPhase=k, discardPhases=above,
                             reason="Changes requested on %s; discard downstream (%s) and return to %s."
                                    % (k, ", ".join(above), k))
-        # k is the highest existing phase: nothing downstream to discard, so address the
-        # change request in place. This is the AUTONOMOUS revise trigger — the revise worker
-        # edits the phase's own artifacts/code and re-requests review (which clears the
-        # CHANGES_REQUESTED), never touching threads (it can't) or downstream phases.
-        return decision("revise", phase=k,
-                        reason="Changes requested on %s (top phase); address in place and "
-                               "re-request review." % k)
+        # else: a frontier change request — addressed in place by the unified handler below.
 
-    # 2b. Respond-to-comment check — runs strictly AFTER reset/revise (so a formal
-    # CHANGES_REQUESTED always outranks it) and AHEAD of the wait/APPROVED sinks (so an
-    # approved-but-commented PR is answered, not waited on). The lowest existing phase
-    # carrying >=1 unaddressed reviewer comment wins. Fires even when the PR is APPROVED
-    # (ref: AC1, Decision precedence, Risk Register row 4).
-    commented = [p for p in existing if phase_comment_targets(phases, p)]
-    if commented:
-        c = min(commented, key=_order)
-        return decision("respond_comment", phase=c,
-                        commentTargets=phase_comment_targets(phases, c),
-                        reason="%s PR has unaddressed reviewer comment(s); reply in place." % c)
+    # 2b. Unified feedback handler (revise + the former respond_comment, merged). The
+    # lowest existing phase carrying a frontier CHANGES_REQUESTED OR >=1 unaddressed
+    # reviewer comment is addressed IN PLACE by the revise worker: it evaluates each
+    # comment's intent (answer / apply+amend / decline) and replies in-thread, and — only
+    # when a formal change request is present (changeRequested) — also addresses the review
+    # summary and re-requests review (which clears the CHANGES_REQUESTED). A non-frontier CR
+    # never reaches here (it reset above), so changeRequested is True only on the frontier.
+    # Runs AHEAD of the wait/APPROVED sinks so an approved-but-commented PR is answered, not
+    # waited on, and fires even when the PR is APPROVED (ref: AC1; RUS-54; unify decision).
+    feedback = [p for p in existing
+                if phase_changes_requested(phases, p) or phase_comment_targets(phases, p)]
+    if feedback:
+        f = min(feedback, key=_order)
+        cr_present = phase_changes_requested(phases, f)
+        targets = phase_comment_targets(phases, f)
+        if cr_present and targets:
+            what = "a change request and unaddressed reviewer comment(s)"
+        elif cr_present:
+            what = "a change request"
+        else:
+            what = "unaddressed reviewer comment(s)"
+        return decision("revise", phase=f,
+                        commentTargets=targets,
+                        changeRequested=cr_present,
+                        reason="%s PR has %s; address in place%s." % (
+                            f, what, " and re-request review" if cr_present else ""))
 
     # 3. Active phase = highest existing phase.
     active = max(existing, key=_order)

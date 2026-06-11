@@ -41,10 +41,12 @@ export const meta = {
 // back to REVIEW_REQUIRED, so the next pass resolves to `wait` instead of re-firing —
 // that decision flip is the loop-safe termination signal, because review THREADS cannot be
 // auto-RESOLVED here (only the reviewer resolves a thread), so threads are left for the
-// reviewer. `respond_comment` (RUS-54) is ALSO autonomous: a phase PR carrying unaddressed
-// reviewer COMMENTS (no formal change request) gets a per-comment peer-reviewer reply via
-// scripts/qrspi_comment_reply.py — gh comment writes succeed with the bot's classic PAT (the
-// old cross-account write block is gone, see the gh-cross-account note); idempotency is
+// reviewer. `revise` is the UNIFIED feedback action (it subsumes the former respond_comment,
+// RUS-54): a phase PR carrying a formal change request AND/OR unaddressed reviewer COMMENTS is
+// handled in one pass — each comment is engaged per-intent (answer/apply/decline) and replied
+// to via scripts/qrspi_comment_reply.py, and review is re-requested only when a formal change
+// request is present. gh comment writes succeed with the bot's classic PAT (the old
+// cross-account write block is gone, see the gh-cross-account note); idempotency is
 // structural (an observed bot reply removes the comment from the gather's unaddressed set).
 // A PR whose ONLY outstanding signal is unresolved threads — no change request, no unaddressed
 // comment — resolves to `wait`. Not-yet-approved `wait` tickets are skipped. Automatic
@@ -104,13 +106,13 @@ const TICKETS_SCHEMA = {
 //   { ok:boolean, error?:string, repoRoot, worktreeDir, ticketContentPath,
 //     existing{ questions,research,design,structure,plan,worktree : boolean },
 //     reviewers, teamReviewers,                 // comma-joined CSV, "" => omit flag
-//     commentTargets[],                         // unaddressed reviewer comments (respond_comment)
+//     commentTargets[],                         // unaddressed reviewer comments (revise)
 //     decision{ action, phase, nextPhase, resetToPhase, discardPhases[],
-//               commentTargets[], reason } }
-// action ∈ entry_blocked|run_design|advance|submit|wait|revise|respond_comment|reset|land.
+//               commentTargets[], changeRequested, reason } }
+// action ∈ entry_blocked|run_design|advance|submit|wait|revise|reset|land.
 const RESOLVE_ACTIONS = new Set(
   ['entry_blocked', 'run_design', 'advance', 'submit', 'wait', 'revise',
-   'respond_comment', 'reset', 'land'])
+   'reset', 'land'])
 
 // Extract the outermost {...} from free text by brace-depth scan (string-aware, so
 // braces inside JSON string values don't fool it). Returns the JSON substring or null.
@@ -227,7 +229,7 @@ const SLICE_COMMIT_SCHEMA = {
   },
 }
 
-// One peer-reviewer worker's result for a single reviewer comment (respond_comment).
+// One peer-reviewer worker's result for a single reviewer comment (respondToComments).
 // `applied` is true only when the worker chose APPLY and the amend+publish succeeded; a
 // pure ANSWER/DECLINE reply is ok:true with applied:false (no commit was amended).
 const COMMENT_REPLY_SCHEMA = {
@@ -638,60 +640,98 @@ Return: ok, newStatus, summary (name what was discarded).`,
 }
 
 // ===========================================================================
-// ACTION: revise  (a formal CHANGES_REQUESTED on a frontier phase PR — address the
-// feedback in place, amend the phase commit, and re-request review)
+// ACTION: revise  (UNIFIED feedback handler — subsumes the former respond_comment)
 // ===========================================================================
-// AUTONOMOUS (per the user's decision). The resolver only emits `revise` when the frontier
-// phase PR carries a formal CHANGES_REQUESTED (NOT for thread-only PRs — those route to
-// `wait`, since their threads can't be cleared here). The worker:
-//   - reads the change-request feedback (a READ via gh graphql/pr view — works fine),
-//   - addresses it WITHIN the phase only (the cascade is bounded to the phase's own
-//     artifacts; a design-level change that invalidates plan/impl is `reset`, not revise),
-//   - amends the phase commit IN PLACE keeping its exact subject, then
-//   - `gt submit --publish --no-edit --rerequest-review` (+ `--stack` for implementation).
-// Re-requesting review (Graphite's write-capable App credential) flips reviewDecision back
-// to REVIEW_REQUIRED, which is what lets the next batch pass return `wait` instead of looping.
-// It NEVER attempts to RESOLVE review threads (only the reviewer can mark a thread resolved),
-// so thread resolution is left to the reviewer, exactly as for the rare thread-only `wait` PR.
-// Replying to a reviewer's COMMENT is the separate autonomous `respond_comment` action, not
-// part of revise.
+// AUTONOMOUS. The resolver emits `revise` when a frontier phase PR carries a formal
+// CHANGES_REQUESTED AND/OR >=1 unaddressed reviewer comment. The decision carries:
+//   - r.commentTargets    the unaddressed reviewer comments to evaluate per-intent
+//   - r.decision.changeRequested  whether a formal change request is present
+// The worker runs in two coherent steps within ONE pass (this is the unification — comment
+// handling no longer slips to a separate later run):
+//   1. PER-COMMENT INTENT ENGINE — for each commentTarget, an honest peer-reviewer worker
+//      ANSWERs / APPLYs (edit + amend in place) / DECLINEs, and posts an in-thread reply.
+//   2. FORMAL CHANGE REQUEST (only when changeRequested) — a worker addresses any remaining
+//      change-request feedback (e.g. the review SUMMARY body, which is not a reply-able
+//      thread comment), amends if there is anything left to change, then ALWAYS re-requests
+//      review. Re-requesting flips reviewDecision back to REVIEW_REQUIRED — the loop-safe
+//      termination signal that lets the next pass return `wait` instead of re-firing.
+// A comment-only PR (no formal change request, even when APPROVED) runs step 1 only and does
+// NOT re-request review — replies are the whole job; the approved PR is left undisturbed.
+// Thread RESOLUTION is always left to the reviewer (only they can mark a thread resolved); a
+// thread the reviewer already resolved is excluded upstream (the gather drops resolved
+// threads from commentTargets), so the worker never replies into an already-resolved thread.
 async function doRevise(t, r) {
   phase('Finalize')
   const d = r.decision
+  const targets = Array.isArray(r.commentTargets) ? r.commentTargets : []
+  const changeRequested = !!(d && d.changeRequested)
+
+  if (!changeRequested && targets.length === 0) {
+    // The resolver only emits revise with a change request and/or comment targets, so this
+    // is a defensive guard, not an expected path.
+    return skip(t, d, 'revise with neither a change request nor comment targets; nothing to do.')
+  }
+
+  // --- Step 1: per-comment intent engine (answer / apply+amend / decline + in-thread reply).
+  let answered = []
+  let failures = []
+  if (targets.length) {
+    log(`  ${t.id}: evaluating ${targets.length} reviewer comment(s) on the ${d.phase} PR`)
+    const res = await respondToComments(t, r, d, targets)
+    answered = res.answered
+    failures = res.failures
+  }
+  const commentSummary = targets.length
+    ? `evaluated ${answered.length}/${targets.length} reviewer comment(s)`
+      + `${answered.some(a => a.applied) ? ` (${answered.filter(a => a.applied).length} applied as changes)` : ''}`
+      + `${failures.length ? `, ${failures.length} failed` : ''}`
+    : ''
+
+  // --- Step 2a: comment-only path (no formal change request) — replies are the whole job.
+  // Do NOT re-request review: the PR may be APPROVED, and we must not disturb it.
+  if (!changeRequested) {
+    const summary = `Responded to ${answered.length}/${targets.length} reviewer comment(s) on the ${d.phase} PR`
+      + `${answered.some(a => a.applied) ? ` (${answered.filter(a => a.applied).length} applied as changes)` : ''}`
+      + `${failures.length ? `; ${failures.length} failed` : ''}.`
+    return { ticketId: t.id, action: 'revise', summary, prUrl: undefined }
+  }
+
+  // --- Step 2b: formal change request — address the review summary / remaining feedback,
+  // amend only if there is something left to change, then ALWAYS re-request review.
   const fin = await agent(
-    `You are the REVISE worker for ${t.id} (frontier phase: ${d.phase}), in ${r.worktreeDir}. A formal CHANGES_REQUESTED landed on the ${d.phase} PR. Address it AUTONOMOUSLY, following the "action: revise" steps of ${SKILL}, with these REQUIRED adaptations:
-- DO NOT attempt to RESOLVE review threads (only the reviewer can mark a thread resolved). Reading feedback via \`gh pr view\`/\`gh api graphql\` queries is fine. Thread resolution is the reviewer's job — leave threads as-is. (Replying to a reviewer's comment is the separate \`respond_comment\` action, not part of revise.)
+    `You are the REVISE worker for ${t.id} (frontier phase: ${d.phase}), in ${r.worktreeDir}. A formal CHANGES_REQUESTED landed on the ${d.phase} PR. ${targets.length ? `The reviewer's INLINE/TOP-LEVEL comments have ALREADY been engaged and replied to in a prior step — do NOT re-reply to them; focus on the review SUMMARY body and any change-request feedback not tied to a specific comment.` : ''} Address it AUTONOMOUSLY, following the "action: revise" steps of ${SKILL}, with these REQUIRED adaptations:
+- DO NOT attempt to RESOLVE review threads (only the reviewer can mark a thread resolved). Reading feedback via \`gh pr view\`/\`gh api graphql\` queries is fine. Thread resolution is the reviewer's job — leave threads as-is.
 - Stay WITHIN the ${d.phase} phase only — never edit a downstream phase's artifacts (that is \`reset\`, not revise).
 Steps:
 1. Identify the branch(es) to fix. For design/plan: \`gt checkout ${t.id}/${d.phase} --no-interactive\`. For implementation: query the ticket's slice PRs (\`gh pr list --head ${t.id}/slice-... \` or graphql) and address EVERY slice whose PR is CHANGES_REQUESTED, lowest slice number first (changes restack upward).
-2. Read the change request: the CHANGES_REQUESTED review body AND any unresolved thread comments (READ-only queries per the SKILL).
-3. Address the feedback by editing the phase's artifacts/code in ${r.worktreeDir}.
-4. Stage your edits AND amend the phase commit IN PLACE by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives) — for design/plan run it once; for implementation run it once per CHANGES_REQUESTED slice branch, lowest slice number first:
+2. Read the change request: the CHANGES_REQUESTED review SUMMARY body AND any unresolved thread comments not already addressed (READ-only queries per the SKILL).
+3. If there is remaining feedback to act on, address it by editing the phase's artifacts/code in ${r.worktreeDir}. If the prior per-comment step already applied every needed change and NOTHING further remains, do NOT invent an edit — skip straight to step 5 (re-request review).
+4. When you made edits, stage them AND amend the phase commit IN PLACE by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives) — for design/plan run it once; for implementation run it once per CHANGES_REQUESTED slice branch, lowest slice number first:
    \`python3 ${r.repoRoot}/scripts/qrspi_revise_amend.py --ticket ${t.id} --branch <BRANCH>\` where <BRANCH> = \`${t.id}/${d.phase}\` for design/plan, or \`${t.id}/slice-<N>\` for an implementation slice.
-   The script checks out the branch, stages every edit you made (excluding caches), amends the commit with \`gt modify\` keeping its EXACT subject+trailers (it does NOT rename the subject), and VERIFIES the amend captured your changes — it FAILS if nothing was staged (you made no real edit, or left edits unstaged — the original revise bug) or if the working tree is left dirty. It prints JSON { ok, branch, oldOid, newOid, dirty, error? }. If ANY invocation prints ok:false, return ok:false — HARD STOP; do NOT hand-run \`gt modify\`/\`git add\`/\`git commit\`/\`git reset\` to work around it. Never run a bare \`gt modify --no-interactive\` here: without staging it amends an empty index and silently drops your edits.
-5. Re-request review so the stale CHANGES_REQUESTED is cleared: \`gt submit --publish --no-edit --rerequest-review${reviewerFlags(r)}${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`. Do NOT run \`gh pr edit\`.
-6. BEST-EFFORT keep Linear in the current review status (a failed Linear write is a WARN, still return ok:true if the changes were pushed and review re-requested).
-Return: ok, prUrl, newStatus, summary (name what you changed and confirm review was re-requested; if you could not address the feedback, return ok:false with the verbatim reason — never fabricate a fix).`,
+   The script checks out the branch, stages every edit you made (excluding caches), amends the commit with \`gt modify\` keeping its EXACT subject+trailers (it does NOT rename the subject), and VERIFIES the amend captured your changes — it FAILS if nothing was staged or the tree is left dirty. It prints JSON { ok, branch, oldOid, newOid, dirty, error? }. If ANY invocation prints ok:false, return ok:false — HARD STOP; do NOT hand-run \`gt modify\`/\`git add\`/\`git commit\`/\`git reset\` to work around it. Never run a bare \`gt modify --no-interactive\` here: without staging it amends an empty index and silently drops your edits. (If step 3 determined nothing further needs changing, SKIP this step entirely — do not run the amend script with no staged edits.)
+5. Re-request review so the stale CHANGES_REQUESTED is cleared (ALWAYS do this, whether or not you amended in step 4): \`gt submit --publish --no-edit --rerequest-review${reviewerFlags(r)}${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`. Do NOT run \`gh pr edit\`.
+6. BEST-EFFORT keep Linear in the current review status (a failed Linear write is a WARN, still return ok:true if review was re-requested).
+Return: ok, prUrl, newStatus, summary (name what you changed — or state that the prior comment replies covered it and you only re-requested review — and confirm review was re-requested; if you could not address the feedback, return ok:false with the verbatim reason — never fabricate a fix).`,
     { label: `revise:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
-  return finResult(t, fin, `revise:${d.phase}`)
+  const out = finResult(t, fin, `revise:${d.phase}`)
+  if (out && commentSummary) {
+    out.summary = `${out.summary || ''} Also ${commentSummary}.`.trim()
+  }
+  return out
 }
 
-// ===========================================================================
-// ACTION: respond_comment  (a phase PR carries >=1 unaddressed reviewer comment —
-// reply to each in place as a peer reviewer; amend the phase commit only on applied change)
-// ===========================================================================
-// AUTONOMOUS (RUS-54). The resolver emits `respond_comment` when a phase PR carries
-// unaddressed reviewer comments (r.commentTargets — the active phase's targets the
-// resolver folded into the decision and qrspi_resolve.py re-emitted at the top level).
-// A formal CHANGES_REQUESTED always outranks this (the resolver's reset/revise check runs
-// first), and it fires even on an APPROVED PR. We iterate the targets (comment-keyed
-// multiplicity — analogous to doRevise's per-branch loop) and spawn one peer-reviewer
-// worker PER comment. Each worker engages the comment honestly (AC2–AC4):
+// ---------------------------------------------------------------------------
+// HELPER: respondToComments — the per-comment intent engine (RUS-54), invoked by the
+// unified doRevise for both the comment-only and change-request paths.
+// ---------------------------------------------------------------------------
+// Iterates the unaddressed reviewer comments (comment-keyed multiplicity) and spawns one
+// peer-reviewer worker PER comment. Each worker engages the comment honestly (AC2–AC4):
 //   - ANSWER faithfully from the actual artifacts/code/PR state (honesty-bound — never
 //     fabricate a fact or a fix), OR
 //   - APPLY a sound suggested change, amend the phase commit in place via the same
-//     self-locating qrspi_revise_amend.py mechanism revise uses, and say so, OR
+//     self-locating qrspi_revise_amend.py mechanism the change-request path uses, and say
+//     so, OR
 //   - DECLINE with a concrete rationale.
 // The rationale/answer lands ONLY in the in-thread reply (RQ5 — no artifact/impl-log
 // duplication). The reply itself is posted by the tested, self-locating
@@ -700,17 +740,8 @@ Return: ok, prUrl, newStatus, summary (name what you changed and confirm review 
 // cross-account 403 is history — see the gh-cross-account note). Idempotency is structural:
 // once a bot reply is observed in the thread (or a newer bot top-level comment exists), the
 // gather's unaddressed_reviewer_comments no longer returns that target, so a second pass does
-// NOT re-respond — we rely on that, never on local state.
-async function doRespondComment(t, r) {
-  phase('Finalize')
-  const d = r.decision
-  const targets = Array.isArray(r.commentTargets) ? r.commentTargets : []
-  if (targets.length === 0) {
-    log(`  ${t.id}: respond_comment but no commentTargets in envelope — nothing to answer`)
-    return skip(t, d, 'respond_comment with empty commentTargets; nothing to do.')
-  }
-  log(`  ${t.id}: responding to ${targets.length} reviewer comment(s) on the ${d.phase} PR`)
-
+// NOT re-respond — we rely on that, never on local state. Returns { answered, failures }.
+async function respondToComments(t, r, d, targets) {
   const answered = []
   const failures = []
   // One peer-reviewer worker per comment (comment-keyed multiplicity). Sequential:
@@ -747,7 +778,7 @@ Steps (do EXACTLY these; no extra git/gh mutations beyond the two self-locating 
      ${bodyFile}
 4. Post the reply by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives), choosing --reply-mode = the comment's threadType (${ct.threadType}):
      python3 ${r.repoRoot}/scripts/qrspi_comment_reply.py --ticket ${t.id} --pr <PR_NUMBER> --comment-id ${ct.commentId} --reply-mode ${ct.threadType} --body-file ${bodyFile}
-   It self-locates owner/repo and prints a ReplyEnvelope JSON { ok, replyId, inReplyToId, error? }. Read ok off its STDOUT (do NOT infer success from exit code alone). If it prints ok:false, return ok:false with the verbatim error — do NOT retry or improvise an alternative mutation (a genuine write failure here means respond_comment cannot be relied on; report it honestly so the wait sink stays correct).
+   It self-locates owner/repo and prints a ReplyEnvelope JSON { ok, replyId, inReplyToId, error? }. Read ok off its STDOUT (do NOT infer success from exit code alone). If it prints ok:false, return ok:false with the verbatim error — do NOT retry or improvise an alternative mutation (a genuine write failure here means the comment reply cannot be relied on; report it honestly so the wait sink stays correct).
 Return: ok (true only if the reply posted), applied (true ONLY if you chose APPLY and the amend+publish succeeded), prUrl (the PR url if known, else ""), summary (1-2 sentences naming the comment and how you engaged it).`,
       { label: `respond-comment:${t.id}#${i}`, phase: 'Finalize', schema: COMMENT_REPLY_SCHEMA }
     )
@@ -760,11 +791,7 @@ Return: ok (true only if the reply posted), applied (true ONLY if you chose APPL
     answered.push({ commentId: ct.commentId, applied: !!fin.applied, summary: fin.summary })
   }
 
-  const prUrl = undefined
-  const summary = `Responded to ${answered.length}/${targets.length} reviewer comment(s) on the ${d.phase} PR` +
-    `${answered.some(a => a.applied) ? ` (${answered.filter(a => a.applied).length} applied as changes)` : ''}` +
-    `${failures.length ? `; ${failures.length} failed` : ''}.`
-  return { ticketId: t.id, action: 'respond_comment', summary, prUrl }
+  return { answered, failures }
 }
 
 // ===========================================================================
@@ -995,7 +1022,6 @@ for (let i = 0; i < tickets.length; i++) {
       case 'submit': res = await doSubmit(t, r); break
       case 'reset': res = await doReset(t, r); break
       case 'revise': res = await doRevise(t, r); break
-      case 'respond_comment': res = await doRespondComment(t, r); break
       case 'land': res = await doLand(t, r); break
       case 'wait':         // not-yet-approved (or thread-only PR awaiting reviewer): nothing to do
       case 'entry_blocked':

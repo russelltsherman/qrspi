@@ -345,15 +345,16 @@ check("build_state default -> blockedBy []",
 BOT = "qrspi-bot"
 
 
-def _inline_thread(thread_id, *comments):
-    """A reviewThreads node. Each comment is (databaseId, login, createdAt[, body])."""
+def _inline_thread(thread_id, *comments, resolved=False):
+    """A reviewThreads node. Each comment is (databaseId, login, createdAt[, body]).
+    `resolved` sets isResolved (default False)."""
     nodes = []
     for c in comments:
         cid, login, created = c[0], c[1], c[2]
         body = c[3] if len(c) > 3 else "b%s" % cid
         nodes.append({"databaseId": cid, "body": body, "createdAt": created,
                       "author": {"login": login}})
-    return {"id": thread_id, "isResolved": False, "comments": {"nodes": nodes}}
+    return {"id": thread_id, "isResolved": resolved, "comments": {"nodes": nodes}}
 
 
 def _pr(threads=None, top=None):
@@ -431,6 +432,51 @@ _t12 = unaddressed_reviewer_comments(
         top=[_top(561, BOT, "2026-06-09T01:00:00Z")]),
     BOT)
 check("only bot-authored comments -> empty (filtered out)", _t12, [])
+
+# T13 — a RESOLVED inline thread is addressed by definition: the reviewer marked it
+# done, so its comments are never targets, regardless of who (if anyone) replied
+# in-thread (RUS-69 regression: the batch was replying into already-resolved threads).
+_t13_resolved_no_reply = unaddressed_reviewer_comments(
+    _pr(threads=[_inline_thread("THRDR",
+                                (570, "reviewer-r", "2026-06-09T01:00:00Z", "please fix"),
+                                resolved=True)]),
+    BOT)
+check("resolved inline thread, no bot reply -> not unaddressed (RUS-69)",
+      _t13_resolved_no_reply, [])
+
+# T13b — even a reviewer follow-up after a bot reply does not re-open a RESOLVED
+# thread (resolution overrides the later-reviewer-comment rule from T10b).
+_t13_resolved_followup = unaddressed_reviewer_comments(
+    _pr(threads=[_inline_thread("THRDR2",
+                                (571, "reviewer-r", "2026-06-09T01:00:00Z"),
+                                (572, BOT, "2026-06-09T02:00:00Z"),
+                                (573, "reviewer-r", "2026-06-09T03:00:00Z"),
+                                resolved=True)]),
+    BOT)
+check("resolved inline thread with later reviewer follow-up -> not unaddressed",
+      _t13_resolved_followup, [])
+
+# T13c — control: the SAME thread UNresolved still yields the target, so the guard
+# skips only resolved threads (no over-suppression).
+_t13_control_unresolved = unaddressed_reviewer_comments(
+    _pr(threads=[_inline_thread("THRDR3",
+                                (574, "reviewer-r", "2026-06-09T01:00:00Z"),
+                                resolved=False)]),
+    BOT)
+check("unresolved counterpart still unaddressed (guard skips only resolved)",
+      len(_t13_control_unresolved), 1)
+
+# T13d — top-level reviewer comments are NOT thread-resolvable, so they are
+# unaffected by the inline resolved-thread guard (a resolved inline thread on the
+# same PR must not suppress an open top-level comment).
+_t13_toplevel_unaffected = unaddressed_reviewer_comments(
+    _pr(threads=[_inline_thread("THRDR4",
+                                (575, "reviewer-r", "2026-06-09T01:00:00Z"),
+                                resolved=True)],
+        top=[_top(576, "reviewer-r", "2026-06-09T01:00:00Z")]),
+    BOT)
+check("resolved inline thread does not suppress open top-level comment",
+      [t["commentId"] for t in _t13_toplevel_unaffected], [576])
 
 
 def run():

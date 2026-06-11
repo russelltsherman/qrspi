@@ -39,14 +39,15 @@ trunk
 - A formal **CHANGES_REQUESTED** on an upstream phase PR **resets**: all downstream
   phases are discarded (PRs closed, branches deleted, stale artifacts removed) and the
   ticket returns to that phase for revision. Discard is **automatic**.
-- Addressing a formal **CHANGES_REQUESTED** on a frontier phase PR (revise) is
-  **autonomous**: the feedback is addressed in place, the phase commit is amended, and
-  review is re-requested (which clears the change request).
-- Addressing unaddressed reviewer **comments** on a phase PR (respond_comment) is also
-  **autonomous** (RUS-54): a peer-reviewer worker answers / applies+amends / declines each
-  comment with a concrete rationale and posts it as an in-thread reply via
-  `scripts/qrspi_comment_reply.py` (gh comment writes succeed with the bot's classic PAT —
-  the old cross-account write block is gone). A formal CHANGES_REQUESTED still outranks this.
+- Addressing feedback on a frontier phase PR (**revise**, the unified action) is
+  **autonomous**. It fires when the PR carries a formal **CHANGES_REQUESTED** and/or
+  unaddressed reviewer **comments** (RUS-54, subsumed). In one pass it (1) engages each comment
+  per-intent — answers / applies+amends / declines with a concrete rationale, posted as an
+  in-thread reply via `scripts/qrspi_comment_reply.py` (gh comment writes succeed with the bot's
+  classic PAT — the old cross-account write block is gone), then (2) **only when a formal change
+  request is present** addresses the review summary, amends the phase commit, and re-requests
+  review (which clears the change request). A comment-only PR (no change request, even when
+  APPROVED) is answered without re-requesting review.
   Review *threads* still cannot be auto-**resolved** (only the reviewer resolves a thread), so
   a PR whose sole outstanding signal is unresolved threads — with neither a change request nor
   an unaddressed reviewer comment — is left for the reviewer and routes to `wait`.
@@ -93,8 +94,7 @@ trunk
 | `advance` | → [Advance](#action-advance) (build `nextPhase`) |
 | `submit` | → [Submit](#action-submit) (finish/submit `phase`) |
 | `wait` | → [Wait](#action-wait) |
-| `revise` | → [Revise](#action-revise) (address feedback on `phase`) |
-| `respond_comment` | → [Respond Comment](#action-respond_comment) (reply to reviewer comment(s) on `phase`) |
+| `revise` | → [Revise](#action-revise) (unified: engage `commentTargets` per-intent + re-request review iff `changeRequested`, on `phase`) |
 | `reset` | → [Reset](#action-reset) (discard `discardPhases`, return to `resetToPhase`) |
 | `land` | → [Land](#action-land) |
 
@@ -304,7 +304,7 @@ hard-stop with the error — never fabricate.
 The active phase PR exists but cannot be advanced autonomously. Either it is **awaiting
 review** (not yet approved, no change request), or it carries **unresolved review threads
 but no formal change request and no unaddressed reviewer comment** (an unaddressed comment
-routes to [`respond_comment`](#action-respond_comment), which outranks `wait`). A thread cannot
+routes to [`revise`](#action-revise), which outranks `wait`). A thread cannot
 be auto-**resolved** — only the reviewer resolves a thread — so a thread-only PR is left for
 the reviewer rather than looped through revise (which could never clear the thread gate).
 Advancement waits on the human reviewer.
@@ -315,94 +315,89 @@ thread(s) left for the reviewer>`. Nothing to do until it is approved. Re-run
 
 ---
 
-## action: respond_comment
+## action: revise
 
-A phase PR carries **one or more unaddressed reviewer comments** (the resolver's
-`commentTargets` — a reviewer comment with no later bot reply in-thread). This is
-**autonomous** (RUS-54). It fires even when the PR is **APPROVED**; a formal
-**CHANGES_REQUESTED** always outranks it (handled by `reset`/`revise` first).
+**`revise` is the unified feedback action** (it subsumes the former `respond_comment`, RUS-54).
+The resolver emits it when the **frontier** phase PR carries a formal **CHANGES_REQUESTED**
+**and/or** one or more **unaddressed reviewer comments**. The decision payload carries:
+
+- `commentTargets` — the unaddressed reviewer comments to engage (a reviewer comment with no
+  later bot reply in-thread; threads the reviewer already **resolved** are excluded upstream —
+  RUS-69 — so you never reply into a resolved thread).
+- `changeRequested` — whether a formal change request is present. **Only when this is true** do
+  you re-request review at the end.
+
+This is **autonomous**, fires even when the PR is **APPROVED** (comment-only case), and stays
+**within this phase only** — the cascade is bounded to the phase's own artifacts (see
+`references/review-cascade.md`). A design-level change that invalidates plan/impl is handled by
+`reset`, not revise. A non-frontier `CHANGES_REQUESTED` routes to `reset` (never here).
+
+### Step 1 — engage every reviewer comment per-intent (always, if `commentTargets` non-empty)
 
 Engage **each** comment as an honest peer reviewer — you are **honesty-bound**, so never
-fabricate a fact, a fix, or agreement. For every target, choose exactly one:
+fabricate a fact, a fix, or agreement. For every target, evaluate its **intent** and choose
+exactly one reaction:
 
-1. **Answer** — address the question/concern faithfully from the **actual** artifacts, code,
-   and PR state.
-2. **Apply** — make a sound suggested change **within this phase only** (a downstream change is
-   `reset`/`revise`, not this), then amend the phase commit in place via
-   `scripts/qrspi_revise_amend.py --ticket <id> --branch <branch>` (same self-locating
-   verify-gated amend revise uses; it FAILS if nothing was staged), and re-publish the stack
-   (`gt submit --publish --no-edit [--stack] --no-interactive`).
-3. **Decline** — give a concrete, respectful rationale grounded in the real state.
+1. **Answer** — the comment is a question/concern; address it faithfully from the **actual**
+   artifacts, code, and PR state.
+2. **Apply** — the comment requests a sound, concrete change **within this phase only**; make
+   the edit, then amend the phase commit in place via
+   `scripts/qrspi_revise_amend.py --ticket <id> --branch <branch>` (self-locating, verify-gated;
+   it FAILS if nothing was staged), and re-publish (`gt submit --publish --no-edit [--stack]
+   --no-interactive`).
+3. **Decline** — the suggestion is wrong/out-of-scope/unsound; give a concrete, respectful
+   rationale grounded in the real state.
 
 Post the answer/applied-note/decline-rationale as the **in-thread reply** — that reply is the
 **only** place the rationale lives (do **not** duplicate it into artifacts or the impl-log).
-Post it with the tested, self-locating helper (it derives owner/repo; reply mode = the
-comment's `threadType`):
+Post it with the tested, self-locating helper (reply mode = the comment's `threadType`):
 
 ```bash
 python3 scripts/qrspi_comment_reply.py --ticket <ticket-id> --pr <number> \
   --comment-id <commentId> --reply-mode <inline|toplevel> --body-file <reply.md>
 ```
 
-It prints a `ReplyEnvelope` `{ ok, replyId, inReplyToId, error? }`. Read `ok` off **stdout**
-(do not infer success from exit code alone). gh comment writes **succeed** here with the bot's
+It prints a `ReplyEnvelope` `{ ok, replyId, inReplyToId, error? }`. Read `ok` off **stdout** (do
+not infer success from exit code alone). gh comment writes **succeed** here with the bot's
 classic PAT — the old cross-account write block is gone (see the gh-cross-account note); if a
 write ever fails, report it honestly and do **not** fall back to `gh pr edit`.
 
 **Idempotency is structural:** once the bot's reply is observed in the thread (or a newer bot
 top-level comment exists), the gather no longer reports that comment as unaddressed, so a later
-pass does not re-respond. Thread **resolution** is still the reviewer's job.
+pass does not re-respond. Thread **resolution** is always the reviewer's job.
 
----
+### Step 2 — formal change request (ONLY when `changeRequested` is true)
 
-## action: revise
+If there is **no** formal change request (comment-only PR), **stop after Step 1** — do **not**
+re-request review (the PR may be APPROVED; leave it undisturbed). Otherwise:
 
-The frontier phase PR carries a formal **CHANGES_REQUESTED**. This is now **autonomous**:
-address the feedback **within this phase only** — the cascade is bounded to the phase's own
-artifacts (see `references/review-cascade.md`). Do NOT touch downstream phases here; a
-design-level change that invalidates plan/impl is handled by `reset`, not revise.
-
-> The resolver emits `revise` **only** for a CHANGES_REQUESTED frontier PR, never for
-> threads alone — re-requesting review clears the change request (the loop-safe termination
-> signal), whereas threads cannot be cleared here, so a thread-only PR routes to `wait`.
-
-1. Ensure you're on the phase branch:
-   ```bash
-   gt checkout <ticket-id>/<phase> --no-interactive    # for implementation, the affected slice branch(es), lowest first
-   ```
-2. Read the change request — these are **read-only queries** (revise never mutates threads; see step 6):
+1. Ensure you're on the phase branch (`gt checkout <ticket-id>/<phase> --no-interactive`; for
+   implementation, the affected slice branch(es), lowest first).
+2. Read the change request — **read-only queries** (revise never mutates threads):
    ```bash
    gh pr view <number> --json reviews,comments --jq '.reviews[] | select(.state == "CHANGES_REQUESTED")'
-   gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved comments(first:20){nodes{path body}}}}}}}' \
-     -F o="$OWNER" -F r="$REPO" -F n=<number> --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved==false)'
    ```
-3. Address the feedback (edit artifacts/code, cascading within the phase from the earliest
-   affected artifact). For implementation, group comments by slice and start from the
-   lowest-numbered affected slice (changes restack upward).
-4. Amend the phase commit **in place, keeping its existing subject** (`<id> [QR]: Design — <ticket-title>`,
-   `<id> [SP]: Plan — <ticket-title>`, or `<id> [I] <N>/<total>: <goal>` for a slice). Single-commit-per-branch means
-   there is only the one phase commit — do NOT rename it to an "Address feedback" subject:
-   ```bash
-   git add <changed files>
-   gt modify --no-interactive -m "$(cat <<'EOF'
-   <the branch's existing commit subject, verbatim — e.g. `<id> [QR]: Design — <ticket-title>`, `<id> [SP]: Plan — <ticket-title>`, or `<id> [I] <N>/<total>: <goal>`>
-
-   Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-   EOF
-   )"
-   ```
-5. **Re-request review** so the stale `CHANGES_REQUESTED` is cleared (this is what lets the
-   next pass return `wait` rather than re-firing revise):
+   The inline/top-level comments were already engaged in Step 1 — focus here on the review
+   **summary body** and any change-request feedback not tied to a specific comment.
+3. If feedback remains to act on, edit the phase's artifacts/code (cascading within the phase
+   from the earliest affected artifact; for implementation, lowest-numbered affected slice
+   first). **If Step 1 already applied every needed change and nothing remains, do not invent an
+   edit** — skip to step 5.
+4. When you edited, amend the phase commit **in place, keeping its existing subject** via
+   `scripts/qrspi_revise_amend.py --ticket <id> --branch <branch>` (it stages, amends with
+   `gt modify` preserving the EXACT subject+trailers, and verify-gates the amend; never run a
+   bare `gt modify` — without staging it silently drops your edits). If step 3 found nothing to
+   change, **skip this step** (do not run the amend with no staged edits).
+5. **Re-request review** so the stale `CHANGES_REQUESTED` is cleared (ALWAYS, whether or not you
+   amended in step 4 — this is the loop-safe termination signal that lets the next pass return
+   `wait`):
    ```bash
    gt submit --publish --no-edit --rerequest-review --no-interactive  # --stack if implementation
    ```
-6. **Do NOT resolve review threads here.** Thread **resolution** is the reviewer's job (only
-   the reviewer can mark a thread resolved); leave threads as-is. revise's termination signal
-   is the re-request-review flip, not thread clearing: re-requesting review flips
-   `reviewDecision` back to `REVIEW_REQUIRED`, so the next pass returns `wait` instead of
-   re-firing revise; the reviewer must still re-review to approve. (Replying to a reviewer's
-   *comment* is a separate, autonomous action — [`respond_comment`](#action-respond_comment) —
-   not part of revise.) Print which artifacts/files changed.
+6. **Do NOT resolve review threads here.** Thread **resolution** is the reviewer's job; leave
+   threads as-is. Re-requesting review flips `reviewDecision` back to `REVIEW_REQUIRED`, so the
+   next pass returns `wait` instead of re-firing; the reviewer must still re-review to approve.
+   Print which artifacts/files changed.
 
 ---
 
@@ -636,8 +631,8 @@ seed the PR title (subject line) and body (the rest) **when it creates the PR**.
   the binding constraint, and it is independent of token capability.
 - `gt submit` creates and pushes the PR through Graphite's own GitHub-App credential. The
   `gh`-authenticated bot token (a **classic** PAT) can also write to this repo — PR *comment*
-  writes succeed (that is what `respond_comment` relies on; the old cross-account write block is
-  gone, see the gh-cross-account note) — so the reason we don't `gh pr edit` a body is purely the
+  writes succeed (that is what `revise`'s in-thread comment replies rely on; the old cross-account
+  write block is gone, see the gh-cross-account note) — so the reason we don't `gh pr edit` a body is purely the
   `gt`/commit-message authoring model above, **not** a permission wall.
 
 So: design/plan PRs carry their heredoc commit message as the body; implementation slice PRs
