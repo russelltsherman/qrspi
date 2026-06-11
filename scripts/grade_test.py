@@ -445,9 +445,11 @@ class LlmJudgeTest(unittest.TestCase):
         self._cache_dir = tempfile.mkdtemp(prefix="grade-cache-")
         self._orig_cache_path = grade.JUDGE_CACHE_PATH
         grade.JUDGE_CACHE_PATH = os.path.join(self._cache_dir, "llm_judge.json")
+        grade.reset_judge_tokens()  # isolate the per-run token accumulator
 
     def tearDown(self):
         grade.JUDGE_CACHE_PATH = self._orig_cache_path
+        grade.reset_judge_tokens()
         shutil.rmtree(self._cache_dir, ignore_errors=True)
 
     def test_build_prompt_includes_criteria_and_output(self):
@@ -619,6 +621,68 @@ class LlmJudgeTest(unittest.TestCase):
         self.assertIs(ar["passed"], False)
         self.assertFalse(os.path.exists(grade.JUDGE_CACHE_PATH),
                          "failed grades must not be written to the cache")
+
+    # ── Slice 3: per-run token accumulation + cost ──
+
+    def test_real_calls_accumulate_tokens_and_cost_formula(self):
+        """Known token counts sum into the accumulator; cost matches $3/$15 per MTok.
+
+        Two distinct (output, criteria) judge calls — both cache misses — with
+        known input/output tokens. The accumulator must sum each, and
+        ``judge_cost`` must price them at $3/MTok input + $15/MTok output.
+        """
+        stub = StubJudge([
+            _judge_response("SCORE: 5\nRATIONALE: a", input_tokens=1000, output_tokens=200),
+            _judge_response("SCORE: 4\nRATIONALE: b", input_tokens=3000, output_tokens=800),
+        ])
+        grade.run_llm_judge({"criteria": "c1"}, _result("out1"), {}, judge_client=stub)
+        grade.run_llm_judge({"criteria": "c2"}, _result("out2"), {}, judge_client=stub)
+
+        self.assertEqual(stub.calls, 2, "both distinct calls are cache misses")
+        self.assertEqual(grade.JUDGE_TOKENS["input"], 4000)
+        self.assertEqual(grade.JUDGE_TOKENS["output"], 1000)
+
+        # 4000 in * $3/MTok = $0.012 ; 1000 out * $15/MTok = $0.015 ; total $0.027
+        cost = grade.judge_cost(grade.JUDGE_TOKENS["input"], grade.JUDGE_TOKENS["output"])
+        self.assertAlmostEqual(cost, 4000 * 3 / 1e6 + 1000 * 15 / 1e6)
+        self.assertAlmostEqual(cost, 0.027)
+
+    def test_failed_call_does_not_accumulate_tokens(self):
+        """A call-exhaustion failure carries no usage and adds zero tokens."""
+        stub = StubJudge([RuntimeError("boom")] * grade.JUDGE_MAX_ATTEMPTS)
+        orig_sleep = grade.time.sleep
+        grade.time.sleep = lambda _s: None
+        try:
+            ar = grade.run_llm_judge(
+                {"criteria": "is good"}, _result("x"), {}, judge_client=stub
+            )
+        finally:
+            grade.time.sleep = orig_sleep
+        self.assertIs(ar["passed"], False)
+        self.assertEqual(grade.JUDGE_TOKENS["input"], 0)
+        self.assertEqual(grade.JUDGE_TOKENS["output"], 0)
+
+    def test_cache_hit_adds_zero_tokens(self):
+        """A cached (hit) call never touches the client and adds zero tokens.
+
+        First call (miss) accumulates its known tokens; an identical second call
+        is served from cache and must leave the accumulator unchanged.
+        """
+        stub = StubJudge([
+            _judge_response("SCORE: 5\nRATIONALE: ok", input_tokens=500, output_tokens=100),
+        ])
+        assertion = {"criteria": "is good"}
+        result = _result("the agent output")
+
+        grade.run_llm_judge(assertion, result, {}, judge_client=stub)
+        self.assertEqual(stub.calls, 1)
+        self.assertEqual(grade.JUDGE_TOKENS["input"], 500)
+        self.assertEqual(grade.JUDGE_TOKENS["output"], 100)
+
+        grade.run_llm_judge(assertion, result, {}, judge_client=stub)
+        self.assertEqual(stub.calls, 1, "second identical call is a cache hit")
+        self.assertEqual(grade.JUDGE_TOKENS["input"], 500, "cache hit must add zero input tokens")
+        self.assertEqual(grade.JUDGE_TOKENS["output"], 100, "cache hit must add zero output tokens")
 
 
 if __name__ == "__main__":

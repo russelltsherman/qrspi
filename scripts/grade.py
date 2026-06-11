@@ -657,6 +657,32 @@ JUDGE_BACKOFF_BASE = 1.0  # seconds; doubled each retry
 # this cache and skip the judge call entirely.
 JUDGE_CACHE_PATH = "results/.cache/llm_judge.json"
 
+# Judge pricing (USD per million tokens) and the per-run cost ceiling. These
+# drive the cost summary the main path prints after grading.
+JUDGE_INPUT_COST_PER_MTOK = 3.0
+JUDGE_OUTPUT_COST_PER_MTOK = 15.0
+JUDGE_COST_CEILING = 20.0  # dollars/run
+
+# Per-run token accumulator. Summed across every REAL judge call (cache misses
+# only); cache hits add nothing. The contract between run_llm_judge (producer)
+# and the main-path cost print (consumer). ``reset_judge_tokens`` re-inits it at
+# the start of the main path so each run accounts only its own calls.
+JUDGE_TOKENS = {"input": 0, "output": 0}
+
+
+def reset_judge_tokens() -> None:
+    """Zero the per-run judge token accumulator (called at main-path start)."""
+    JUDGE_TOKENS["input"] = 0
+    JUDGE_TOKENS["output"] = 0
+
+
+def judge_cost(input_tokens: int, output_tokens: int) -> float:
+    """Cost in USD for the given token counts at the judge's per-MTok rates."""
+    return (
+        input_tokens * JUDGE_INPUT_COST_PER_MTOK / 1_000_000
+        + output_tokens * JUDGE_OUTPUT_COST_PER_MTOK / 1_000_000
+    )
+
 
 def cache_key(output: str, criteria: str) -> str:
     """Derive a stable cache key from the agent output and the grading criterion.
@@ -849,6 +875,11 @@ def run_llm_judge(assertion: dict, result: dict, case: dict, judge_client=None) 
             "evidence": f"Judge call failed after {JUDGE_MAX_ATTEMPTS} attempts: {exc}",
             "weight": weight,
         }
+
+    # Real client call (this branch is reached only on a cache miss). Accumulate
+    # the run's token usage; cache hits returned above and add nothing.
+    JUDGE_TOKENS["input"] += response.get("input_tokens", 0)
+    JUDGE_TOKENS["output"] += response.get("output_tokens", 0)
 
     try:
         score, rationale = parse_judge_response(response["text"])
@@ -1047,6 +1078,7 @@ def score_suite(case_scores: list) -> dict:
 
 def grade_results(results_path: str, suite_path: str, output_dir: Optional[str] = None) -> dict:
     """Grade execution results against the eval suite."""
+    reset_judge_tokens()  # this run accounts only its own real judge calls
     with open(results_path) as f:
         results_data = json.load(f)
     with open(suite_path) as f:
@@ -1133,6 +1165,14 @@ def grade_results(results_path: str, suite_path: str, output_dir: Optional[str] 
     print(f"Train score: {train_scores['mean']:.4f} (+/- {train_scores['stddev']:.4f})")
     print(f"Test score:  {test_scores['mean']:.4f} (+/- {test_scores['stddev']:.4f})")
     print(f"Train-test gap: {output['train_test_gap']:.4f}")
+
+    cost = judge_cost(JUDGE_TOKENS["input"], JUDGE_TOKENS["output"])
+    print(
+        f"Judge cost: ${cost:.4f} "
+        f"({JUDGE_TOKENS['input']} in @ ${JUDGE_INPUT_COST_PER_MTOK:.0f}/MTok + "
+        f"{JUDGE_TOKENS['output']} out @ ${JUDGE_OUTPUT_COST_PER_MTOK:.0f}/MTok) "
+        f"vs ${JUDGE_COST_CEILING:.0f}/run ceiling"
+    )
     print(f"Grades written to {grades_path}")
 
     return output
