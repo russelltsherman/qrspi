@@ -82,3 +82,27 @@
 - Test mocking reuses the `_MockSeam` context manager (swaps `meta_agent.complete` directly), identical to `diagnose_test.py`. Tests run from repo root or `scripts/` (sibling import on `sys.path`).
 
 ---
+
+## Session 4 — Slice 4
+
+**Timestamp:** 2026-06-11T00:33:18Z
+**Tasks completed:** T20, T21, T22
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/report_test.py` → 7 passed, 0 failed (run from both repo root and `scripts/`)
+
+**Deviations from structure.md:**
+
+- none. `build_ledger_entry(...)` is extended to compute and surface a `> 0.05` version-level `test_score`-drop alert (structure §Contracts, §Modified Types: "add a version-level `test_score`-drop alert to `report["alerts"]` and `ledger.json`"). `detect_regressions` (the per-case 0.2 guard) is untouched and complemented, not replaced.
+
+**Deviations from plan.md:**
+
+- none on contract. Implementation choice: the prior-version `test_score` is supplied to `build_ledger_entry` via a new **optional, additive** `previous_grades: dict = None` parameter (defaults to `None` → baseline, no alert). Both existing call sites (`generate_report` loop and `update_ledger` loop) already compute `prev_grades`, so they now pass it through; every other `build_ledger_entry` call shape stays valid. The guard is `drop > 0.05` (strict `>`, mirroring the existing `drop > 0.2` per-case guard), so an exactly-0.05 drop does NOT alert.
+
+**Notes for next session:**
+
+- Slice 4 is independent of the meta-agent seam — no shared module with Slices 1–3, no dependency either way.
+- `build_ledger_entry` now returns two ADDITIVE keys on every ledger entry: `version_score_drop: float` (prior `test_score` minus current, rounded 4dp; `0` at baseline; negative on improvement) and `version_score_regression: bool` (`version_score_drop > VERSION_SCORE_DROP_THRESHOLD`, where `VERSION_SCORE_DROP_THRESHOLD = 0.05` is a module constant). These are present in both `ledger.json` entries and the in-memory ledger.
+- `report["alerts"]` gained one ADDITIVE key: `"version_score_regression"` (the latest ledger entry's flag). The pre-existing `plateau` / `overfitting` / `has_regressions` alerts are unchanged.
+- OQ3 (score scale) was unresolved in structure §Unverified Assumptions; the guard is implemented as a plain 0–1 absolute delta with no normalization (matches how `check_promotion_criteria` already compares raw `test_score` values directly). If the reviewer decides a different scale/normalization is required, only `build_ledger_entry`'s delta computation and the threshold constant change.
