@@ -153,3 +153,33 @@
 - Verification MUST run from `cd evals` (loader resolves `context.files` relative to process cwd). All Slice-5 checks were run from there and pass.
 
 ---
+
+## Session 6 — Slice 6: provenance README + full integrity sweep
+
+**Timestamp:** 2026-06-11T00:00:00Z
+**Tasks completed:** T34, T35, T36, T37, T38
+**Tasks failed:** none
+**Tests:** (all run from cwd=`evals/`)
+
+- `[1] loads-cleanly + no-orphans` (suite.json `context.files` sweep) → 21 refs, 0 MISSING/EMPTY
+- `[2] provenance-parsable` (README row parse) → 24 rows, 0 bad-provenance values (all in `{generated, hand-edited}`); every referenced fixture has a README row; every README row maps to a real file
+- `[3] 17 acceptance fixtures` (cross-check vs `docs/eval-system.md:80-89`) → 17/17 present, 0 absent, all 17 have a README row
+
+**Files changed:**
+
+- ✨ `evals/fixtures/README.md` — machine-readable provenance table (fixed-vocabulary columns `fixture`, `scenario`, `source_ticket`, `provenance` ∈ {`generated`, `hand-edited`}, `chain`); 24 rows = 20 produced this ticket + 4 pre-existing tickets for context; the `_broken_contract` set marked `hand-edited` per Decision 1, all curated chains `generated`; documents the cwd=`evals/` loading requirement
+
+**Deviations from structure.md:**
+
+- none. The `no-orphans()` contract reads "no fixture is produced that lacks a `suite.json` reference." Three backfilled-upstream files (`ticket_/questions_/research_billing_migration.md`) are present but not directly case-referenced — this is the **intended** RQ2 backfill (design Decision 1 + §Delta): they exist so the case-referenced leaf `design_billing_migration.md` is the reproducible output of a real same-stem chain, not orphans. The README explicitly records them as backfilled chain context. No undocumented orphan exists.
+
+**Deviations from plan.md:**
+
+- none. The plan's step-38 one-liner anticipated adjusting the JSON key path "after step 34"; suite.json's schema is `{cases: [{context: {files: [...]}}]}`, so the sweep uses `c.get('context',{}).get('files',[])` exactly as the plan's reference one-liner already had it — no adjustment needed.
+
+**Notes for next session:**
+
+- This is the final implementation slice. All 21 `suite.json` `context.files` references resolve and are non-empty from cwd=`evals/`; all 17 acceptance fixtures are present; `evals/fixtures/README.md` provides a machine-readable provenance row for all 24 fixtures (`provenance-parsable`). The ticket's content backfill is complete; remaining work is the PR-summary phase.
+- Source ticket IDs per chain (for the PR's AC mapping): rest_endpoint=DASH-417, websocket=ORD-892, multi_tenancy=PLAT-1205, billing_migration=PAY-733 (backfilled), broken_contract=GUARD-808 (synthetic/adversarial), acceptance_criteria_stress=RPT-2100.
+
+---
