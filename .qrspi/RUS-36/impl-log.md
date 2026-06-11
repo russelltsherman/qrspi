@@ -122,3 +122,34 @@
 - Shape is the honest Slice-1 structure/plan/worktree template shape (Session 1 notes) EXCEPT the one impossible Contracts line — by design. No grade.py shape regex applies here (case_012 has no programmatic shape checks against these inputs).
 
 ---
+
+## Session 5 — Slice 5: worktree session + impl-log fixtures
+
+**Timestamp:** 2026-06-11T00:00:00Z
+**Tasks completed:** T30, T31, T32, T33
+**Tasks failed:** none
+**Tests:**
+
+- `cd evals && test -s <each of 2 fixtures>` → 2 present/non-empty, 0 missing (`fixtures/worktree_session1.md`, `fixtures/impl_log_complete.md`)
+- Worktree template shape (from cwd=`evals/`): `# Work Tree —` H1, all five header fields (Plan basis/Generated/Status/Total sessions/Critical path), 3 `## Session ` sections, 3 `--- SESSION BOUNDARY ---`, 14 `| T#` task rows, 3 `**Verify Slice` checkpoints
+- Impl-log template shape: `# Implementation Log —` H1, 3 `## Session ` sections, and 3× each of the seven required fields (Timestamp, Tasks completed, Tasks failed, Tests, Deviations from structure.md, Deviations from plan.md, Notes for next session)
+- Chain-consistency: **DASH-417** present in both fixtures; all 4 Acceptance-Criteria sentences appear verbatim (4/4) in each, threaded from `ticket_rest_endpoint.md`
+- Scope file list: `worktree_session1.md` enumerates the Slice-1 in-scope files (`src/controllers/preferences.js`, `src/routes/users.js`, `test/routes/preferences.test.js`) that `scripts/check_scope.py --allowed fixtures/worktree_session1.md` parses for case_011
+- cwd render: real `build_messages()` from cwd=`evals/` for **case_011** (implement) and **case_013** (pr) → both new fixtures resolve and render; DASH-417, the implementation file names, and `p95 = 142ms` present, no MISSING/not-found markers
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none
+
+**Notes for next session:**
+
+- `worktree_session1.md` is **input context** for **case_011** (implement phase; context.files = `fixtures/worktree_session1.md` + `structure_rest_endpoint.md` + `plan_rest_endpoint_slice1.md`). case_011 grades the agent's *output* (`output_file_exists('impl-log.md')`, `impl_log_has_required_fields(...)` weight 1.5, `scripts/check_scope.py --allowed fixtures/worktree_session1.md` weight 2.5, llm_judge "no opportunistic refactoring" weight 3.0). The fixture only needs to be well-formed, template-shaped, and to clearly list the Slice-1 in-scope files so `check_scope.py` can derive the allowed set — it is NOT a graded output itself.
+- `impl_log_complete.md` is **input context** for **case_013** (pr phase; context.files = `fixtures/impl_log_complete.md` + `design_rest_endpoint.md` + `structure_rest_endpoint.md` + `git_diff_rest_endpoint.txt`). case_013 grades the agent's `pr-summary.md` (section checks for Acceptance Criteria Mapping / Changes by Slice / Testing Summary / Risks & Rollback / Deviations from Structure, + llm_judge "every AC mapped to an implementation file and a test"). So the impl-log was authored to make that mapping trivially recoverable: it covers all 3 rest_endpoint slices, lists per-slice **Files changed**, **Tests** with pass counts, and closes with a per-AC → file → test Summary table.
+- Both fixtures anchor to the **rest_endpoint** chain (DASH-417) established in Slice 1 and reuse that chain's slice structure verbatim (3 slices: happy-path read → 401/403/404 authorization → p95 latency scaffold). The 14 task IDs in the worktree session mirror the 18-step `plan_rest_endpoint.md` slices grouped into 3 sessions.
+- Verification MUST run from `cd evals` (loader resolves `context.files` relative to process cwd). All Slice-5 checks were run from there and pass.
+
+---
