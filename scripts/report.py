@@ -54,23 +54,44 @@ def detect_regressions(current: dict, previous: dict) -> list:
     return regressions
 
 
-def build_ledger_entry(version: dict, parent: str, regressions: list) -> dict:
-    """Build a ledger entry for the version history."""
+# Version-level test_score drop beyond this triggers a regression alert (AC4, ref Q15).
+VERSION_SCORE_DROP_THRESHOLD = 0.05
+
+
+def build_ledger_entry(
+    version: dict, parent: str, regressions: list, previous_grades: dict = None
+) -> dict:
+    """Build a ledger entry for the version history.
+
+    When ``previous_grades`` is supplied, computes the version-level ``test_score``
+    delta from the prior version and flags a ``version_score_regression`` when the
+    drop exceeds ``VERSION_SCORE_DROP_THRESHOLD`` (0.05). This complements the
+    per-case 0.2 guard in ``detect_regressions`` (AC4, ref Q15).
+    """
     grades = version["grades"]
     improvements = []
     if parent:
         # Identify cases that improved
         pass  # Would compare against parent
 
+    test_score = grades.get("test_score", 0)
+    version_score_drop = 0
+    version_score_regression = False
+    if previous_grades:
+        version_score_drop = round(previous_grades.get("test_score", 0) - test_score, 4)
+        version_score_regression = version_score_drop > VERSION_SCORE_DROP_THRESHOLD
+
     return {
         "version": version["version"],
         "timestamp": grades.get("timestamp", ""),
         "parent": parent,
         "train_score": grades.get("train_score", 0),
-        "test_score": grades.get("test_score", 0),
+        "test_score": test_score,
         "train_test_gap": grades.get("train_test_gap", 0),
         "regressions": regressions,
         "regression_count": len(regressions),
+        "version_score_drop": version_score_drop,
+        "version_score_regression": version_score_regression,
     }
 
 
@@ -107,7 +128,7 @@ def generate_report(results_dir: str, output_path: str) -> dict:
         parent = versions[i - 1]["version"] if i > 0 else None
         prev_grades = versions[i - 1]["grades"] if i > 0 else {}
         regressions = detect_regressions(version["grades"], prev_grades) if prev_grades else []
-        entry = build_ledger_entry(version, parent, regressions)
+        entry = build_ledger_entry(version, parent, regressions, prev_grades)
 
         if i > 0:
             prev_entry = ledger[-1]
@@ -146,6 +167,7 @@ def generate_report(results_dir: str, output_path: str) -> dict:
             "plateau": plateau,
             "overfitting": overfitting,
             "has_regressions": latest["regression_count"] > 0,
+            "version_score_regression": latest.get("version_score_regression", False),
         },
         "ledger": ledger,
     }
@@ -166,6 +188,11 @@ def generate_report(results_dir: str, output_path: str) -> dict:
         print("  ALERT: Score plateau detected — consider new eval cases or approach")
     if overfitting:
         print("  ALERT: Train-test gap increasing — possible overfitting")
+    if latest.get("version_score_regression"):
+        print(
+            f"  ALERT: test_score dropped {latest['version_score_drop']:.4f} "
+            f"from prior version (> {VERSION_SCORE_DROP_THRESHOLD})"
+        )
     print(f"Report written to {output_path}")
 
     return report
@@ -182,7 +209,7 @@ def update_ledger(results_dir: str):
         parent = versions[i - 1]["version"] if i > 0 else None
         prev_grades = versions[i - 1]["grades"] if i > 0 else {}
         regressions = detect_regressions(version["grades"], prev_grades) if prev_grades else []
-        entry = build_ledger_entry(version, parent, regressions)
+        entry = build_ledger_entry(version, parent, regressions, prev_grades)
         ledger.append(entry)
 
     with open(ledger_path, "w") as f:
