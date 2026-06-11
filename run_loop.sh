@@ -7,7 +7,7 @@ set -euo pipefail
 #   ./run_loop.sh <skill_path> <eval_suite> [max_iterations] [target_score]
 #
 # Example:
-#   ./run_loop.sh .qrspi/agents/01-questions.md evals/suite.json 5 0.85
+#   ./run_loop.sh .claude/agents/qrspi-questions.md evals/suite.json 5 0.85
 
 SKILL_PATH=${1:?Usage: run_loop.sh <skill_path> <eval_suite> [max_iter] [target_score]}
 EVAL_SUITE=${2:?Usage: run_loop.sh <skill_path> <eval_suite> [max_iter] [target_score]}
