@@ -19,6 +19,11 @@ def load_version_results(results_dir: str) -> list:
     for version_dir in sorted(results_path.iterdir()):
         if not version_dir.is_dir():
             continue
+        # The consolidated multi-agent report layout lives under results/all/
+        # (eval_all.py). It is NOT a version; excluding it here keeps it from
+        # being mis-enumerated as a version and corrupting the ledger (RUS-41).
+        if version_dir.name == "all":
+            continue
         grades_path = version_dir / "grades.json"
         if grades_path.exists():
             with open(grades_path) as f:
