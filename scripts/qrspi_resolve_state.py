@@ -107,6 +107,26 @@ def phase_changes_requested(phases, name):
     return _pr_changes_requested(phases.get(name, {}))
 
 
+def design_already_landed(state):
+    """True only when a real merge signal says the design phase has already landed
+    (its branch pruned), even though `branchExists` is False — so the entry gate must
+    NOT mistake a merged-and-pruned design for an un-started ticket.
+
+    Strictly additive: returns True ONLY on a genuine merge signal. The signal is the
+    per-phase `phases.design.merged` flag (populated by build_state when an absent
+    design head has a MERGED PR — Slice 2), or, if present, a stack-level
+    `started`/`merged` verdict. A genuinely un-started ticket (no merge signal) yields
+    False, so its entry-gate decision is unchanged (ref: design.md Decision 1 Option A,
+    AC2 constraint, Risk row 1)."""
+    phases = state.get("phases", {})
+    if phases.get("design", {}).get("merged"):
+        return True
+    stack = state.get("stack", {})
+    if isinstance(stack, dict) and stack.get("merged"):
+        return True
+    return bool(state.get("merged"))
+
+
 def phase_comment_targets(phases, name):
     """The unaddressed reviewer comments carried by phase `name`. For implementation,
     the comment targets across ALL slice PRs are aggregated (the stack is reviewed as
@@ -138,7 +158,16 @@ def resolve(state):
         return out
 
     # 1. Entry gate — nothing exists yet. Linear is read ONLY here.
-    if "design" not in existing:
+    #
+    # A design branch absent because the design PR already MERGED (branch pruned) is NOT
+    # an un-started ticket: the stack is mid-land with upper slice PRs still open. Consult
+    # the merge signal first and, when design has already landed, fall through to the
+    # active-phase/`land` logic below rather than declaring entry_blocked/run_design — the
+    # bug this slice fixes (ref: design.md Decision 1 Option A, §Delta; RUS-69). The
+    # fall-through is safe only while some other phase still exists (an open slice keeps
+    # `implementation` in `existing`); if the merge signal fired but `existing` is empty,
+    # there is no active phase to land, so the entry gate still applies.
+    if "design" not in existing and not (design_already_landed(state) and existing):
         if state.get("assigned") and state.get("linearStatus") == "Selected":
             # Even a satisfied entry gate is held when Linear reports an OPEN blocker
             # (blockedBy relation). Fold every open-blocker identifier into the reason so

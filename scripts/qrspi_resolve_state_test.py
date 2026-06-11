@@ -11,24 +11,26 @@ import sys
 from qrspi_resolve_state import resolve
 
 
-def _phase(branch=True, pr=True, decision="REVIEW_REQUIRED", threads=0, comments=None):
+def _phase(branch=True, pr=True, decision="REVIEW_REQUIRED", threads=0, comments=None,
+           merged=False):
     return {"branchExists": branch, "prExists": pr,
             "reviewDecision": decision, "unresolvedThreads": threads,
-            "commentTargets": comments or []}
+            "commentTargets": comments or [], "merged": merged}
 
 
-def _impl(slices, expected=None, pr_summary=True):
+def _impl(slices, expected=None, pr_summary=True, merged=False):
     """Build an implementation phase. Defaults model a COMPLETE phase (pr-summary.md
     committed, expectedSlices == committed) so pre-existing review/land/reset cases
     are unaffected. Pass expected=/pr_summary= to exercise the completeness gate."""
     return {"branchExists": bool(slices), "slices": slices,
             "expectedSlices": len(slices) if expected is None else expected,
-            "prSummaryCommitted": pr_summary}
+            "prSummaryCommitted": pr_summary, "merged": merged}
 
 
-def _slice(n, pr=True, decision="REVIEW_REQUIRED", threads=0, comments=None):
+def _slice(n, pr=True, decision="REVIEW_REQUIRED", threads=0, comments=None, merged=False):
     return {"n": n, "prExists": pr, "reviewDecision": decision,
-            "unresolvedThreads": threads, "commentTargets": comments or []}
+            "unresolvedThreads": threads, "commentTargets": comments or [],
+            "merged": merged}
 
 
 # A minimal CommentTarget for the resolver precedence cases (the resolver only
@@ -202,6 +204,26 @@ case("design AND plan changes requested -> reset to lowest (design)",
 case("design changes requested, only design exists -> revise (nothing above)",
      state(phases={"design": _phase(decision="CHANGES_REQUESTED")}),
      {"action": "revise", "phase": "design", "changeRequested": True})
+
+
+# --- merged-and-pruned design diverted from the entry gate (RUS-69) ----------
+# The bug: a stack whose design (and plan) PRs already MERGED — branches pruned, so
+# branchExists=False — while upper slice PRs stay open + APPROVED was mis-classified as
+# entry_blocked ("No design branch"). With a merge signal (merged=True on the pruned
+# phases) the resolver must instead reach the implementation `land` branch (AC3).
+case("design+plan merged-and-pruned, slices open+APPROVED -> land (not entry_blocked)",
+     state(phases={"design": _phase(branch=False, pr=False, decision=None, merged=True),
+                   "plan": _phase(branch=False, pr=False, decision=None, merged=True),
+                   "implementation": _impl([_slice(1, decision="APPROVED"),
+                                            _slice(2, decision="APPROVED")])}),
+     {"action": "land", "phase": "implementation"})
+
+# Regression / additivity constraint (AC3, Risk row 1): a genuinely un-started ticket —
+# not assigned/Selected, ZERO merged PRs, no live branches — still resolves to
+# entry_blocked. The merge-signal diversion must not leak into the un-started path.
+case("un-started: no merge signal, not assigned/Selected -> entry_blocked (unchanged)",
+     state(assigned=False, linear="Backlog", phases={}),
+     {"action": "entry_blocked"})
 
 
 # --- entry-gate blocker gate (RUS-50: respect Linear blockedBy at the entry gate) ---
