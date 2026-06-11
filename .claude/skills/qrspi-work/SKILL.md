@@ -449,6 +449,12 @@ Every PR in the stack is approved + clean. Land the whole stack bottom-up and fi
    gt submit --publish --stack --no-edit --no-interactive   # ensure remotes current, once
    # For k = 1..N in ASCENDING order, over each branch in the envelope `slices`:
    gt checkout <id>/slice-<k> --no-interactive
+   # For k >= 2 ONLY: the previous slice (k-1) just merged and advanced trunk, so this
+   # slice's parent moved out from under it locally. Re-align it onto the new trunk and
+   # refresh its PR BEFORE merging — without this gt merge aborts ("branch has not been
+   # submitted" / "updated remotely outside Graphite") and the stack half-lands:
+   gt restack --no-interactive
+   gt submit --stack --update-only --force --no-edit --no-interactive
    gt merge --no-interactive   # lands this slice (NOT --confirm: it forces a prompt --no-interactive cannot satisfy)
    # ...repeat for every slice, smallest k first, through the tip slice-<N>.
    ```
