@@ -20,6 +20,7 @@ import re
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import grade
 
@@ -683,6 +684,66 @@ class LlmJudgeTest(unittest.TestCase):
         self.assertEqual(stub.calls, 1, "second identical call is a cache hit")
         self.assertEqual(grade.JUDGE_TOKENS["input"], 500, "cache hit must add zero input tokens")
         self.assertEqual(grade.JUDGE_TOKENS["output"], 100, "cache hit must add zero output tokens")
+
+
+class LoadApiKeyTest(unittest.TestCase):
+    """Covers ``load_api_key`` env-precedence, ``.env`` fallback, and the
+    missing-in-both failure.
+
+    Isolation: each test redirects ``grade.DOTENV_PATH`` to a fresh temp file
+    (so the repo's real ``.env`` is never read) and runs under a clean
+    ``os.environ`` patch so a key present in the host shell can't leak in.
+    """
+
+    def setUp(self):
+        self._dotenv_dir = tempfile.mkdtemp(prefix="grade-dotenv-")
+        self._orig_dotenv_path = grade.DOTENV_PATH
+        grade.DOTENV_PATH = os.path.join(self._dotenv_dir, ".env")
+
+    def tearDown(self):
+        grade.DOTENV_PATH = self._orig_dotenv_path
+        shutil.rmtree(self._dotenv_dir, ignore_errors=True)
+
+    def _write_dotenv(self, content):
+        with open(grade.DOTENV_PATH, "w") as f:
+            f.write(content)
+
+    def test_env_var_takes_precedence_and_dotenv_not_read(self):
+        """Env var set -> returned verbatim; the ``.env`` file is never read."""
+        # A different value in .env proves precedence (env wins, not .env).
+        self._write_dotenv("ANTHROPIC_API_KEY=from-dotenv\n")
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "from-env"}, clear=True):
+            self.assertEqual(grade.load_api_key(), "from-env")
+
+    def test_env_unset_falls_back_to_dotenv_value(self):
+        """Env unset -> the ``KEY=VALUE`` value from a temp ``.env`` is returned."""
+        self._write_dotenv("# comment\nANTHROPIC_API_KEY=sk-from-dotenv\nOTHER=ignored\n")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            self.assertEqual(grade.load_api_key(), "sk-from-dotenv")
+
+    def test_missing_in_both_raises(self):
+        """Neither env nor ``.env`` supplies the key -> RuntimeError."""
+        # No .env file written; env cleared.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            with self.assertRaises(RuntimeError):
+                grade.load_api_key()
+
+    def test_dotenv_present_but_missing_key_raises(self):
+        """A ``.env`` without the key is not a fallback -> RuntimeError."""
+        self._write_dotenv("OTHER=value\n")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            with self.assertRaises(RuntimeError):
+                grade.load_api_key()
+
+    def test_dotenv_value_strips_surrounding_quotes(self):
+        """A quoted ``.env`` value has one layer of matching quotes trimmed."""
+        self._write_dotenv('ANTHROPIC_API_KEY="sk-quoted"\n')
+        with mock.patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            self.assertEqual(grade.load_api_key(), "sk-quoted")
 
 
 if __name__ == "__main__":

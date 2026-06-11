@@ -79,3 +79,32 @@
 - `LlmJudgeTest.setUp`/`tearDown` now also call `grade.reset_judge_tokens()` to isolate the global accumulator per test. Extend that class (do not touch the global directly) for any further token/cost tests.
 - The main-path cost line is printed in `grade_results` between the train-test-gap line and the "Grades written to" line; format: `Judge cost: $<cost> (<in> in @ $3/MTok + <out> out @ $15/MTok) vs $20/run ceiling`.
 
+
+---
+
+## Session 4 — Slice 4
+
+**Timestamp:** 2026-06-11T13:14:26Z
+**Tasks completed:** T25, T26, T27, T28, T29, T30, T31
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/grade_test.py` → 54 passed, 0 failed (5 new in `LoadApiKeyTest`; 49 pre-existing), exit 0, no network, ~0.006s
+- `test -f requirements.txt && grep -q anthropic requirements.txt && grep -q '^\.env$' .gitignore` → all pass
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none — added one extra defensive test (`test_dotenv_value_strips_surrounding_quotes`) beyond the plan's required env-precedence + .env-fallback + missing-in-both cases; covers the quote-stripping branch of `parse_dotenv`.
+
+**Notes for next session:**
+
+- API-key resolution lives in `scripts/grade.py`: `load_api_key() -> str` reads `os.environ["ANTHROPIC_API_KEY"]` first (env wins; `.env` is not read when set), else parses the gitignored root `.env` via `parse_dotenv(DOTENV_PATH)`, else raises `RuntimeError`. There is NO sentinel return — the missing-in-both contract is a raise.
+- `parse_dotenv(path) -> dict` is a stdlib `KEY=VALUE` parser: skips blanks/`#` comments/`=`-less lines, strips an optional `export ` prefix, trims one layer of matching surrounding quotes. Absent/unreadable file → `{}`.
+- Module constants: `ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY"`; `DOTENV_PATH` = repo-root `.env` (parent of `scripts/`). `DOTENV_PATH` is module-level so tests monkeypatch it to a temp path.
+- `run_llm_judge`'s default-client branch now calls `make_judge_client(load_api_key())` (was `make_judge_client()`). Injected stub clients still bypass this entirely, so the test suite needs no key.
+- `LoadApiKeyTest` isolates by redirecting `grade.DOTENV_PATH` to a temp file (setUp/tearDown) and patching `os.environ` with `mock.patch.dict(..., clear=True)` so a host-shell key cannot leak in. Extend that class for further key/dotenv tests.
+- New files: `requirements.txt` (declares `anthropic`, the first third-party runtime dep; imported lazily so tests run without it). `.gitignore` now has a bare `.env` line.
