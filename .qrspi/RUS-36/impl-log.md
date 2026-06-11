@@ -62,3 +62,33 @@
 - All four Slice-2 fixtures follow the exact Slice-1 canonical shapes (see Session 1 notes) — same regexes, same `## QN:` / `**Answer:**` / `**Evidence:**` / fenced-snippet structure. No new shape was introduced.
 
 ---
+
+## Session 3 — Slice 3: `billing_migration` chain (new upstream + design leaf)
+
+**Timestamp:** 2026-06-11T00:00:00Z
+**Tasks completed:** T19, T20, T21, T22, T23, T24
+**Tasks failed:** none
+**Tests:**
+
+- `cd evals && test -s <each of 4 fixtures>` → 4 present/non-empty, 0 missing (`ticket_billing_migration.md`, `questions_billing_migration.md`, `research_billing_migration.md`, `design_billing_migration.md`)
+- Chain-consistency: ticket ID **PAY-733** present in all 4 fixtures (`grep -lc`)
+- Structural shape (grader-regex, run from cwd=`evals/`): questions → 6 `## ` sections, 13 `- Q:` lines, 13 `**Target:**`; research → 13 `## QN:` headers / 13 `**Answer:**` / 13 `**Evidence:**` / 13 `` `file:line` `` citations; design → 6 `## ` sections, **0** code fences
+- Design `(ref: QN)` validity: design cites Q1–Q13, all ⊆ the 13 questions in `questions_billing_migration.md` (zero out-of-range), and is consistent with the research (same `Subscriptions.active` accessor, `source_legacy_id` unique-index idempotency, `runBatch`/`job_cursors` resumability, gateway idempotency-key charge dedup)
+- cwd render: `build_messages()` from cwd=`evals/` for **case_008** (the consuming case — structure phase, context.files = `fixtures/design_billing_migration.md`) → resolves and renders; `PAY-733` and `Subscriptions.active` present in the rendered user message, no MISSING/not-found markers
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none
+
+**Notes for next session:**
+
+- Ticket ID for this fully-new chain is **PAY-733** (no pre-existing ticket; T19 minted it). ACs threaded verbatim: "All active legacy subscriptions are copied into billing_subscriptions", "The migration is idempotent and resumable after an interruption", "No subscription is charged twice during or after the migration", "Migrated rows preserve the original next_renewal_at timestamp".
+- `design_billing_migration.md` is the **graded leaf input** for **case_008** (structure phase, "structure_large_feature_splitting" — asserts `slice_count('structure.md') >= 5`). It is the ONLY suite.json reference for this chain; the ticket/questions/research are backfilled upstream (RQ2) to make the design a real chain output, not graded directly.
+- All four fixtures follow the exact Slice-1 canonical shapes (Session 1 notes) — `- Q:` lines with `**Target:**`, `## QN:` research headers with `**Answer:**`/fenced `**Evidence:**`/backtick `file:line`/`**Dependencies:**`/`**Implicit contracts:**`, six-section design with `(ref: QN)` and no code fences. No new shape introduced.
+- The design deliberately has two `NEW PATTERN? No` decisions (reuse `runBatch`; reuse `active`+gateway-key dedup) — this chain composes existing patterns, in contrast to Slice 2's `websocket` new-pattern chain. Risk Register has 3 rows (≥2). Verification MUST run from `cd evals`.
+
+---
