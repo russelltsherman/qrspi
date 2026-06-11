@@ -44,6 +44,7 @@ Output: a single JSON envelope on stdout:
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -54,8 +55,17 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
 sys.path.insert(0, _SCRIPT_DIR)
 
-from qrspi_pr_state import branch_set  # noqa: E402
-from qrspi_resolve import pick_tip      # noqa: E402
+from qrspi_pr_state import (             # noqa: E402
+    branch_set,
+    stack_merge_state,
+    is_stack_fully_merged,
+    PR_QUERY,
+)
+from qrspi_resolve import (               # noqa: E402
+    pick_tip,
+    parse_name_with_owner,
+    _gh_name_with_owner,
+)
 
 # gt prints exactly one line per branch on a no-op restack:
 #   "<branch> does not need to be restacked on <trunk>."
@@ -70,6 +80,105 @@ def worktree_path(repo_root, ticket):
     """Canonical worktree path for a ticket. Pure; the path is computed here, never
     typed by the model."""
     return os.path.join(repo_root, ".worktrees", ticket)
+
+
+def _branch_rank(branch, ticket):
+    """Stack-order rank for a ticket branch: design < plan < slice-1 < slice-2 < ...
+
+    Returns an int sort key (lower = closer to trunk). A branch that does not match
+    the ticket's `<ticket>/{design,plan,slice-N}` shape sorts last (a large sentinel)
+    so foreign branches never get treated as an ancestor. Pure, so the stack ordering
+    is unit-testable without git/gt."""
+    prefix = "%s/" % ticket
+    if not branch.startswith(prefix):
+        return 10 ** 9
+    rest = branch[len(prefix):]
+    if rest == "design":
+        return 0
+    if rest == "plan":
+        return 1
+    m = re.match(r"^slice-(\d+)$", rest)
+    if m:
+        # +2 keeps slice-1 above plan; the slice number preserves slice ordering.
+        return 2 + int(m.group(1))
+    return 10 ** 9
+
+
+def merged_ancestors(branches, merged_flags):
+    """The subset of `branches` that are merged ancestors: merged AND below the lowest
+    still-open slice in stack order (design < plan < slice-1 < ...).
+
+    `branches` is the ticket's branch set (from branch_set()); `merged_flags` maps a
+    branch name -> bool (its PR is merged). A branch absent from the map is treated as
+    not-merged. The lowest open branch is the bottom-most (lowest-rank) branch whose
+    PR is NOT merged; every merged branch ranked strictly below it is a merged ancestor.
+    When every branch is merged there is no open branch, so no branch is "below" an open
+    one and the merged-ancestor set is empty (the fully-landed case is the short-circuit's
+    job, not this helper's). Pure, tuple-in/tuple-out. Needs the ticket to rank branches,
+    inferred from the shared `<ticket>/` prefix of `branches`."""
+    if not branches:
+        return set()
+    ticket = _infer_ticket(branches)
+    open_branches = [b for b in branches if not merged_flags.get(b, False)]
+    if not open_branches:
+        return set()
+    lowest_open = min(open_branches, key=lambda b: _branch_rank(b, ticket))
+    lo_rank = _branch_rank(lowest_open, ticket)
+    return {b for b in branches
+            if merged_flags.get(b, False) and _branch_rank(b, ticket) < lo_rank}
+
+
+def submit_scope(branches, merged_flags, ticket):
+    """Pure computation of the merged-ancestor-aware submit scope.
+
+    Returns a dict:
+        { "scope": [open branch names, stack order],
+          "lowestOpen": <lowest open branch name> | None,
+          "reparentParent": <merged-ancestor branch that is lowestOpen's tracked
+                             parent> | None }
+
+    - `scope` is the open (not-merged) branches, sorted in stack order, that the
+      `--stack` submit should cover. Empty when the stack is fully merged.
+    - `lowestOpen` is the bottom-most open branch (the one whose tracked parent may be
+      a merged ancestor that must be dropped). None when fully merged.
+    - `reparentParent` is set to the merged-ancestor branch immediately below
+      `lowestOpen` in stack order when that parent is merged (so the lowest open slice
+      must be re-parented onto trunk); None when the lowest open branch's tracked parent
+      is NOT a merged ancestor (fully-open stack, or its parent is still open).
+
+    The tracked parent is inferred from `<ticket>/slice-N` ordering + merged flags
+    (ref: structure.md Unverified Assumption "Tracked parent" read): the parent of the
+    lowest open branch is the highest-ranked branch strictly below it; if that parent is
+    merged, it is a merged ancestor to drop. Pure, tuple-in/tuple-out."""
+    ancestors = merged_ancestors(branches, merged_flags)
+    open_branches = [b for b in branches if not merged_flags.get(b, False)]
+    scope = sorted(open_branches, key=lambda b: _branch_rank(b, ticket))
+    if not scope:
+        return {"scope": [], "lowestOpen": None, "reparentParent": None}
+    lowest_open = scope[0]
+    lo_rank = _branch_rank(lowest_open, ticket)
+    # The tracked parent is the highest-ranked branch strictly below the lowest open
+    # branch. If that parent is a merged ancestor, the lowest open slice must be
+    # re-parented onto trunk.
+    below = [b for b in branches if _branch_rank(b, ticket) < lo_rank]
+    reparent_parent = None
+    if below:
+        parent = max(below, key=lambda b: _branch_rank(b, ticket))
+        if parent in ancestors:
+            reparent_parent = parent
+    return {"scope": scope, "lowestOpen": lowest_open, "reparentParent": reparent_parent}
+
+
+def _infer_ticket(branches):
+    """Infer the ticket id from a branch set sharing a common `<ticket>/...` prefix.
+
+    Branch names are `<ticket>/<phase>` (e.g. RUS-1/design, RUS-1/slice-2). Returns the
+    portion before the first '/' of any branch (they all share it for one ticket's
+    stack). Returns "" for an empty set. Pure."""
+    for b in sorted(branches):
+        if "/" in b:
+            return b.split("/", 1)[0]
+    return ""
 
 
 def classify_result(rc, stdout, stderr):
@@ -139,6 +248,63 @@ def existing_branches(ticket):
     return branch_set(out.splitlines()) if rc == 0 else set()
 
 
+def read_merge_state(ticket, branches):
+    """Read each branch's PR-merged status via gh GraphQL and fold it through the
+    tested `stack_merge_state` classifier. Returns the StackMergeState shape
+    `{ branch: {merged, prNumber, state, mergedByPr} }`.
+
+    Impure shell boundary (the only new network read): resolves owner/repo from the
+    gh-authenticated repo (same `gh repo view`/`parse_name_with_owner` path the
+    resolver uses), runs the shared PR_QUERY once per branch head ref, and builds the
+    `{branch: nodes}` map `stack_merge_state` consumes. A branch whose gh query fails
+    (e.g. its head ref was deleted after merge) degrades to no nodes -> the documented
+    not-merged sentinel inside stack_merge_state, never a crash (ref: structure.md
+    "New impure shell boundary"; Decision 2A). Intentionally untested per the
+    pure-core/impure-shell split (Q11); the merge logic it feeds is tested in
+    qrspi_pr_state_test.py."""
+    branches = list(branches)
+    if not branches:
+        return {}
+    owner, repo = parse_name_with_owner(_gh_name_with_owner())
+    graphql_nodes = {}
+    for head in branches:
+        rc, out, _ = _run(
+            ["gh", "api", "graphql",
+             "-f", "query=%s" % PR_QUERY,
+             "-F", "owner=%s" % owner, "-F", "repo=%s" % repo, "-F", "head=%s" % head],
+            cwd=REPO_ROOT)
+        if rc != 0:
+            # A failed read (commonly a head ref GitHub already deleted post-merge)
+            # -> no nodes -> stack_merge_state maps it to the not-merged sentinel.
+            graphql_nodes[head] = []
+            continue
+        try:
+            data = json.loads(out)
+            graphql_nodes[head] = data["data"]["repository"]["pullRequests"]["nodes"]
+        except (ValueError, KeyError, TypeError):
+            graphql_nodes[head] = []
+    return stack_merge_state(branches, graphql_nodes)
+
+
+def reparent_lowest_open(branch, worktree):
+    """Re-parent the ticket's lowest still-open slice onto trunk, dropping a merged
+    ancestor as its tracked parent (Decision 1, Option A). Returns (rc, out, err).
+
+    Runs `gt move --onto main --source <branch>` from the worktree, scoped to exactly
+    this one branch (the lowest open slice the caller already isolated). In gt 1.8.6
+    `gt move` rebases the source branch onto the target AND restacks its descendants, so
+    the one call both fixes the tracked-parent metadata (now trunk, not the merged
+    ancestor) and re-aligns the open slices above it — never touching the whole stack's
+    trunk and never another ticket's branches. After this the subsequent `--stack`
+    submit walks from the open tip down to trunk without ever stepping into a merged
+    ancestor (which is what aborted the submit). `--no-interactive` is required so it
+    never opens a selector in the batch. Impure shell boundary, intentionally untested
+    per the pure-core/impure-shell split (Q11); the `gt move --onto/--source` flags were
+    confirmed against the installed gt 1.8.6."""
+    return _run(["gt", "move", "--onto", "main", "--source", branch, "--no-interactive"],
+                cwd=worktree)
+
+
 def submit_stack(worktree):
     """Force-push the realigned stack to its existing phase PRs. Returns (ok, error).
 
@@ -152,18 +318,56 @@ def submit_stack(worktree):
     return classify_submit(rc, out, err)
 
 
-def restack(worktree, tip):
-    """Restack the ticket's whole stack onto current trunk from its tip, downstack, then
-    push the realigned branches to their PRs.
+def restack(worktree, tip, ticket, branches):
+    """Restack the ticket's open slices onto current trunk from its tip, downstack, then
+    push the realigned branches to their PRs — merged-ancestor-aware.
 
-    Returns (ok, restacked, submitted, error). On a restack conflict (non-zero rc) we
-    `gt abort` to restore a clean working tree — a half-applied rebase would otherwise
-    wedge the worktree for every later action — then report the conflict verbatim. We do
-    NOT try to resolve the conflict: a branch that genuinely conflicts with the new trunk
-    needs human attention. When the restack actually moved a branch, we force-push the
-    stack so the remote PRs stop pointing at the pre-restack commits; a push failure is
-    reported as ok=False (the tree is already clean, so no abort) so the divergence
-    surfaces instead of silently persisting."""
+    Returns (ok, restacked, submitted, error). Two new merge-aware paths gate the
+    existing restack/submit (ref: structure.md Slice 1; design.md Delta, Decisions 1 & 2,
+    OQ3):
+
+    1. Fully-landed short-circuit: read the stack's per-branch merge state and, when
+       EVERY branch's PR is merged (is_stack_fully_merged), return immediately with
+       ok=True, restacked=False, submitted=False — no `gt checkout`/`restack`/`submit`
+       runs at all. Re-restacking/submitting an already-landed stack is the work that
+       aborted; skipping it is the whole point (OQ3).
+
+    2. Partial-land re-parent: when some lower slices are merged but the top is still
+       open, the lowest open slice's tracked parent is a merged ancestor that `gt` would
+       walk into and abort on. Compute submit_scope(); if its reparentParent is set,
+       `gt move --onto main` that lowest open slice onto trunk FIRST, dropping the merged
+       ancestor, then run the existing checkout/restack/submit over the now-trunk-rooted
+       open chain (Decision 1A).
+
+    On a restack conflict (non-zero rc) we `gt abort` to restore a clean working tree — a
+    half-applied rebase would otherwise wedge the worktree for every later action — then
+    report the conflict verbatim. We do NOT try to resolve the conflict: a branch that
+    genuinely conflicts with the new trunk needs human attention. When the restack
+    actually moved a branch, we force-push the stack so the remote PRs stop pointing at
+    the pre-restack commits; a push failure is reported as ok=False (the tree is already
+    clean, so no abort) so the divergence surfaces instead of silently persisting."""
+    # --- merge-state gate (before any gt work) -----------------------------
+    merge_state = read_merge_state(ticket, branches)
+    if is_stack_fully_merged(merge_state):
+        # Every PR is merged: the stack is fully landed. Re-restacking/submitting it is
+        # exactly the work that aborted, so short-circuit with a clean no-op success and
+        # let the caller dispatch land/done instead of restack_conflict (OQ3).
+        return True, False, False, None
+
+    merged_flags = {b: merge_state.get(b, {}).get("merged", False) for b in branches}
+    scope = submit_scope(branches, merged_flags, ticket)
+
+    # Partial land: the lowest open slice sits on a merged ancestor. Re-parent it onto
+    # trunk FIRST so the upcoming downstack restack/submit never walks into the merged
+    # ancestor that aborts gt (Decision 1A). reparentParent is None for a fully-open
+    # stack, so this is a no-op there and the behaviour is unchanged.
+    if scope.get("reparentParent") and scope.get("lowestOpen"):
+        rc, out, err = reparent_lowest_open(scope["lowestOpen"], worktree)
+        if rc != 0:
+            return False, False, False, (
+                "gt move %s --onto main failed: %s"
+                % (scope["lowestOpen"], (err or out).strip()))
+
     # gt checkout the tip so `--downstack` covers the entire ticket chain
     # (tip -> ... -> design -> trunk), rebasing the bottom onto the current trunk tip.
     rc, out, err = _run(["gt", "checkout", tip, "--no-interactive"], cwd=worktree)
@@ -204,14 +408,15 @@ def main():
         print()
         return 0
 
-    tip = pick_tip(existing_branches(args.ticket), args.ticket)
+    branches = existing_branches(args.ticket)
+    tip = pick_tip(branches, args.ticket)
     if tip is None:
         env = build_envelope(args.ticket, worktree, None, ok=True, restacked=False)
         json.dump(env, sys.stdout, indent=2)
         print()
         return 0
 
-    ok, restacked, submitted, error = restack(worktree, tip)
+    ok, restacked, submitted, error = restack(worktree, tip, args.ticket, branches)
     env = build_envelope(args.ticket, worktree, tip, ok=ok, restacked=restacked,
                          submitted=submitted, error=error)
     json.dump(env, sys.stdout, indent=2)
