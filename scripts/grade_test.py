@@ -320,5 +320,87 @@ class RegistryAndDispatcherTest(unittest.TestCase):
                 self.assertIsInstance(msg, str)
 
 
+class ExtractJsonTest(unittest.TestCase):
+    """Pure helper: locate + parse the first JSON object in mixed prose+JSON."""
+
+    def test_valid_trailing_json_after_prose_prefix(self):
+        out = 'Running scope check...\nDONE\n{"out_of_scope": ["foo.py"]}'
+        self.assertEqual(grade._extract_json(out), {"out_of_scope": ["foo.py"]})
+
+    def test_pure_json(self):
+        self.assertEqual(grade._extract_json('{"ok": true}'), {"ok": True})
+
+    def test_malformed_truncated_json_returns_none(self):
+        self.assertIsNone(grade._extract_json('prefix {"out_of_scope": ['))
+
+    def test_no_brace_returns_none(self):
+        self.assertIsNone(grade._extract_json("no json here at all"))
+
+    def test_empty_returns_none(self):
+        self.assertIsNone(grade._extract_json(""))
+
+    def test_non_object_json_returns_none(self):
+        # A bare JSON array has no leading '{', so nothing is parsed.
+        self.assertIsNone(grade._extract_json("[1, 2, 3]"))
+
+
+class InterpretScriptResultTest(unittest.TestCase):
+    """Pure half of the script-check runner — exit code + streams → result dict."""
+
+    def _interpret(self, returncode, stdout="", stderr=""):
+        return grade.interpret_script_result(
+            "check_scope.py args", 2.0, returncode, stdout, stderr
+        )
+
+    def test_exit_zero_with_valid_json_passes(self):
+        r = self._interpret(0, stdout='{"out_of_scope": []}')
+        self.assertTrue(r["passed"])
+        self.assertIs(type(r["passed"]), bool)
+        self.assertIn("out_of_scope", r["evidence"])
+
+    def test_canonical_five_key_shape(self):
+        r = self._interpret(0, stdout='{"ok": true}')
+        self.assertEqual(
+            set(r.keys()), {"check", "type", "passed", "evidence", "weight"}
+        )
+        self.assertEqual(r["type"], "script")
+        self.assertEqual(r["check"], "check_scope.py args")
+        self.assertEqual(r["weight"], 2.0)
+
+    def test_exit_one_with_json_out_of_scope_fails_and_surfaces_it(self):
+        r = self._interpret(1, stdout='{"out_of_scope": ["secret.py"]}')
+        self.assertFalse(r["passed"])
+        self.assertIs(type(r["passed"]), bool)
+        self.assertIn("out_of_scope", r["evidence"])
+        self.assertIn("secret.py", r["evidence"])
+
+    def test_nonzero_unparseable_stdout_fails_with_raw_stderr(self):
+        r = self._interpret(1, stdout="Traceback nonsense", stderr="boom: bad arg")
+        self.assertFalse(r["passed"])
+        self.assertIs(type(r["passed"]), bool)
+        self.assertIn("boom: bad arg", r["evidence"])
+        self.assertIn("1", r["evidence"])  # exit code surfaced
+
+    def test_empty_stdout_exit_zero(self):
+        r = self._interpret(0, stdout="", stderr="")
+        self.assertTrue(r["passed"])
+        self.assertIs(type(r["passed"]), bool)
+
+    def test_empty_stdout_nonzero_falls_back_to_placeholder(self):
+        r = self._interpret(3, stdout="", stderr="")
+        self.assertFalse(r["passed"])
+        self.assertIn("3", r["evidence"])
+
+    def test_malformed_json_nonzero_uses_stderr(self):
+        r = self._interpret(1, stdout='partial {"a":', stderr="parse died")
+        self.assertFalse(r["passed"])
+        self.assertIn("parse died", r["evidence"])
+
+
+class ScriptModuleConstantsTest(unittest.TestCase):
+    def test_script_timeout_is_120(self):
+        self.assertEqual(grade.SCRIPT_TIMEOUT_SEC, 120)
+
+
 if __name__ == "__main__":
     unittest.main()
