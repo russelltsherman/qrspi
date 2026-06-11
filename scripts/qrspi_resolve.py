@@ -179,7 +179,8 @@ def comment_targets_of(decision):
 
 
 def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
-                   reviewers="", team_reviewers="", ticket_content_path=""):
+                   reviewers="", team_reviewers="", ticket_content_path="",
+                   tip=None, slices=None):
     """Assemble the JSON envelope the qrspi-batch resolveTicket() step consumes.
     Pure; `repoRoot` is always the module-level REPO_ROOT this script derived.
 
@@ -191,6 +192,14 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
     targets the resolver folded into `decision`) so the unified `revise` consumer
     iterates `r.commentTargets` without reaching into `decision`. It is [] for every
     non-`revise` decision (additive; unknown to old consumers, which ignore it).
+
+    `tip`/`slices` carry the stack's tip branch (`<ticket>/slice-<maxN>`, or the
+    plan/design fallback from pick_tip(), `None` when the ticket has no branch) and
+    the ascending list of slice branch names (`["<ticket>/slice-1", ...]`, derived
+    from slice_numbers()). They are additive root-level fields so the land worker
+    iterates the slice list straight from the contract instead of reconstructing
+    `<id>/slice-1` from the ticket id (ref: structure.md Modified Types / Envelope
+    contract; design.md §Delta, RQ3). `decision` is untouched.
 
     `ticket_content_path` is the token-free file the caller staged the Linear
     title+body to. We emit the PATH, never the body: the design-phase agents Read
@@ -209,10 +218,20 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
         "reviewers": reviewers,
         "teamReviewers": team_reviewers,
         "ticketContentPath": ticket_content_path,
+        "tip": tip,
+        "slices": slices if slices is not None else [],
     }
     if error is not None:
         env["error"] = error
     return env
+
+
+def slice_branches(branches, ticket):
+    """The ascending list of slice branch names for `ticket` from a normalized
+    `branch_set`, e.g. ["RUS-1/slice-1", "RUS-1/slice-2"]. Built from slice_numbers()
+    so the order matches the ascending int sort. Empty when the ticket has no slice
+    branches yet. Pure, so it is unit-testable."""
+    return ["%s/slice-%d" % (ticket, n) for n in slice_numbers(branches)]
 
 
 # --- subprocess-backed mechanics (not unit-tested) -------------------------
@@ -352,9 +371,12 @@ def main():
                                   create_design=(decision["action"] == "run_design"))
         existing = detect_existing(os.path.join(worktree, ".qrspi", args.ticket))
         reviewers, team_reviewers = load_reviewers()
+        branches = _existing_branches(args.ticket)
         env = build_envelope(worktree, decision, existing, ok=True,
                              reviewers=reviewers, team_reviewers=team_reviewers,
-                             ticket_content_path=ticket_content_path)
+                             ticket_content_path=ticket_content_path,
+                             tip=pick_tip(branches, args.ticket),
+                             slices=slice_branches(branches, args.ticket))
     except Exception as exc:  # noqa: BLE001 - any failure is reported, not retried
         worktree = os.path.join(REPO_ROOT, ".worktrees", args.ticket)
         env = build_envelope(worktree, None,

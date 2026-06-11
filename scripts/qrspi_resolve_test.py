@@ -16,6 +16,7 @@ from qrspi_resolve import (
     parse_name_with_owner,
     detect_existing,
     pick_tip,
+    slice_branches,
     build_envelope,
     comment_targets_of,
     select_source,
@@ -91,6 +92,17 @@ check("slice beats plan even out of order",
       pick_tip({"RUS-1/plan", "RUS-1/slice-3", "RUS-1/slice-1"}, "RUS-1"),
       "RUS-1/slice-3")
 
+# --- slice_branches (ascending slice branch names from the normalized branch set) --
+check("no slice branches -> empty list", slice_branches(set(), "RUS-1"), [])
+check("plan/design only -> no slices",
+      slice_branches({"RUS-1/design", "RUS-1/plan"}, "RUS-1"), [])
+check("ascending slice branch names",
+      slice_branches({"RUS-1/design", "RUS-1/plan", "RUS-1/slice-1", "RUS-1/slice-2"}, "RUS-1"),
+      ["RUS-1/slice-1", "RUS-1/slice-2"])
+check("slices sorted ascending even when set is out of order",
+      slice_branches({"RUS-1/slice-3", "RUS-1/slice-1", "RUS-1/slice-2"}, "RUS-1"),
+      ["RUS-1/slice-1", "RUS-1/slice-2", "RUS-1/slice-3"])
+
 # --- build_envelope ---------------------------------------------------------
 _dec = {"action": "run_design", "reason": "x"}
 _ex = {name: False for name in ARTIFACTS}
@@ -110,6 +122,27 @@ rev_env = build_envelope("/wt/RUS-1", _dec, _ex, ok=True,
                          reviewers="alice,bob", team_reviewers="org/team")
 check("envelope carries reviewers", rev_env["reviewers"], "alice,bob")
 check("envelope carries teamReviewers", rev_env["teamReviewers"], "org/team")
+
+# --- root-level tip/slices (additive; the land worker reads the slice list from the
+# contract instead of reconstructing <id>/slice-1 from the ticket id; RUS-70) --------
+check("default envelope tip is None", ok_env["tip"], None)
+check("default envelope slices is empty list", ok_env["slices"], [])
+check("err envelope tip default None", err_env["tip"], None)
+check("err envelope slices default empty", err_env["slices"], [])
+_slices = ["RUS-1/slice-1", "RUS-1/slice-2"]
+ts_env = build_envelope("/wt/RUS-1", _dec, _ex, ok=True,
+                        tip="RUS-1/slice-2", slices=_slices)
+check("envelope carries root-level tip", ts_env["tip"], "RUS-1/slice-2")
+check("envelope carries root-level slices (ascending)", ts_env["slices"], _slices)
+# tip/slices are additive — pre-existing root fields are byte-for-byte unchanged.
+check("tip/slices addition leaves decision untouched", ts_env["decision"], _dec)
+check("tip/slices addition leaves repoRoot untouched", ts_env["repoRoot"], REPO_ROOT)
+check("tip/slices addition leaves worktreeDir untouched",
+      ts_env["worktreeDir"], "/wt/RUS-1")
+check("tip/slices addition leaves existing untouched", ts_env["existing"], _ex)
+check("tip/slices addition leaves reviewers default untouched", ts_env["reviewers"], "")
+check("tip/slices addition leaves commentTargets default untouched",
+      ts_env["commentTargets"], [])
 
 # --- ticketContentPath handoff (decouple: the script emits the PATH, never the body, so
 # the fragile ticket text — e.g. Linear <issue> mention tags — is read file->file by the
