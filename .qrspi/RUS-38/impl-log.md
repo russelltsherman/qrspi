@@ -52,3 +52,30 @@
 - `cache_read`/`cache_write` read `JUDGE_CACHE_PATH` at call time (not import time), so monkeypatching the constant redirects them. `LlmJudgeTest.setUp`/`tearDown` already isolate every judge test to a temp cache dir — extend that class for further judge tests rather than touching the real cache.
 - `weight` is NOT part of the cached entry; it is taken from the live `assertion` on every call (a hit re-applies the current assertion's weight to the cached score/passed/rationale).
 
+---
+
+## Session 3 — Slice 3
+
+**Timestamp:** 2026-06-11T13:11:09Z
+**Tasks completed:** T19, T20, T21, T22, T23, T24
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/grade_test.py` → 49 passed, 0 failed (3 new in `LlmJudgeTest`: token-accumulation+cost-formula, failed-call-zero-tokens, cache-hit-zero-tokens; 46 pre-existing), exit 0, no network, ~0.004s. Confirmed no `results/.cache/` created in the worktree.
+
+**Deviations from structure.md:**
+
+- none. A module-level accumulator `grade.JUDGE_TOKENS = {"input": 0, "output": 0}` is the producer/consumer contract between `run_llm_judge` (increments) and the main-path cost print (consumes). The cost print uses `input_tok*$3/MTok + output_tok*$15/MTok` vs the `$20` ceiling exactly.
+
+**Deviations from plan.md:**
+
+- none on behavior. The plan's "main path" cost print (Step 21) lives in `grade_results` (the function `main()` calls) — printed alongside the existing Train/Test/gap score lines, which is where those lines already are. `reset_judge_tokens()` (Step 19) is called at the top of `grade_results`, not inside `main()`, so the accumulator is reset for both CLI and any direct `grade_results` caller.
+- Accumulation (Step 20) is placed immediately after a SUCCESSFUL `call_with_retry` return (cache misses only reach this code; cache hits return earlier and add zero). A call-exhaustion failure returns before accumulation and carries no usage, so it also adds zero — asserted by `test_failed_call_does_not_accumulate_tokens` (an extra test beyond the two the plan named).
+
+**Notes for next session:**
+
+- Per-run token accounting lives in `scripts/grade.py`: module constant `JUDGE_TOKENS = {"input": 0, "output": 0}`; `reset_judge_tokens()` zeroes it (called at the start of `grade_results`); `judge_cost(input_tokens, output_tokens)` returns USD at `JUDGE_INPUT_COST_PER_MTOK=3.0` / `JUDGE_OUTPUT_COST_PER_MTOK=15.0` per million tokens. `JUDGE_COST_CEILING=20.0` is the noted per-run ceiling.
+- `run_llm_judge` increments `JUDGE_TOKENS` only after a successful `call_with_retry` (cache miss + non-exhausted call). Cache hits return before that line; failures return before it too — both add zero.
+- `LlmJudgeTest.setUp`/`tearDown` now also call `grade.reset_judge_tokens()` to isolate the global accumulator per test. Extend that class (do not touch the global directly) for any further token/cost tests.
+- The main-path cost line is printed in `grade_results` between the train-test-gap line and the "Grades written to" line; format: `Judge cost: $<cost> (<in> in @ $3/MTok + <out> out @ $15/MTok) vs $20/run ceiling`.
+
