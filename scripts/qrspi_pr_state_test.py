@@ -341,6 +341,99 @@ check("build_state default -> blockedBy []",
       _default["blockedBy"], [])
 
 
+# --- build_state: pruned design head re-query for merge signal (RUS-69 Slice 2) ----
+# In the mid-land window the design/plan heads are pruned (branchExists False) while
+# slice branches remain live. build_state must re-query the absent design head and,
+# on a MERGED PR, set phases.design.merged=True so the resolver's design_already_landed
+# predicate diverts the stack from the entry gate. The subprocess-backed helpers are
+# stubbed so the test is hermetic and exercises only the re-query logic.
+def _build_state_pruned_design_case(branch_lines, pr_by_head, ahead=None):
+    """Run build_state with stubbed git/gh. `pr_by_head` maps a head ref name ->
+    the GraphQL pullRequests.nodes list to return for that head. `ahead` maps a
+    branch -> commits-ahead-of-trunk (defaults: every listed branch is ahead by 1).
+    Records every head _query_pr is called for so a guard test can assert no re-query."""
+    queried = []
+
+    def fake_query(owner, repo, head):
+        queried.append(head)
+        return pr_by_head.get(head, [])
+
+    bare = [ln.strip().lstrip("*+ ").strip() for ln in branch_lines]
+    ahead = ahead if ahead is not None else {b: 1 for b in bare}
+
+    saved = (qrspi_pr_state._git_branches,
+             qrspi_pr_state._git_show,
+             qrspi_pr_state._file_in_tree,
+             qrspi_pr_state._bot_login,
+             qrspi_pr_state._commits_ahead,
+             qrspi_pr_state._query_pr)
+    qrspi_pr_state._git_branches = lambda ticket: list(branch_lines)
+    qrspi_pr_state._git_show = lambda ref_path: ""
+    qrspi_pr_state._file_in_tree = lambda ref, path: False
+    qrspi_pr_state._bot_login = lambda: "qrspi-bot"
+    qrspi_pr_state._commits_ahead = lambda branch, trunk: ahead.get(branch, 0)
+    qrspi_pr_state._query_pr = fake_query
+    try:
+        state = build_state("o", "r", "RUS-1", True, "Selected")
+    finally:
+        (qrspi_pr_state._git_branches,
+         qrspi_pr_state._git_show,
+         qrspi_pr_state._file_in_tree,
+         qrspi_pr_state._bot_login,
+         qrspi_pr_state._commits_ahead,
+         qrspi_pr_state._query_pr) = saved
+    return state, queried
+
+
+# T14 — pruned design head with a MERGED PR + live slice => phases.design.merged True.
+# The design branch is absent from the branch list (pruned); only slice-1 is live.
+_merged_node = [{"number": 700, "state": "MERGED", "merged": True,
+                 "mergedAt": "2026-06-10T00:00:00Z", "reviewDecision": "APPROVED",
+                 "reviewThreads": {"nodes": []}}]
+_open_slice = [{"number": 701, "state": "OPEN", "merged": False,
+                "reviewDecision": "APPROVED", "reviewThreads": {"nodes": []}}]
+_pruned_state, _pruned_queried = _build_state_pruned_design_case(
+    ["  RUS-1/slice-1"],
+    {"RUS-1/design": _merged_node, "RUS-1/slice-1": _open_slice})
+check("pruned design head with MERGED PR -> phases.design.merged True",
+      _pruned_state["phases"]["design"]["merged"], True)
+check("pruned design head re-query surfaces the merged PR number",
+      _pruned_state["phases"]["design"]["number"], 700)
+check("pruned design head still reports branchExists False",
+      _pruned_state["phases"]["design"]["branchExists"], False)
+check("re-query fired for the absent design head",
+      "RUS-1/design" in _pruned_queried, True)
+
+# T15 — stack-level started/merged verdict is populated consistently (Decision 2 B).
+check("stack-level merged verdict matches per-phase design merge",
+      _pruned_state["stack"]["merged"], True)
+check("stack-level started True once a merge signal/live branch exists",
+      _pruned_state["stack"]["started"], True)
+
+# T16a — guard: a PRESENT design branch is queried normally (active selection), and
+# the re-query branch does NOT fabricate a merged signal from a non-merged head.
+_present_state, _present_queried = _build_state_pruned_design_case(
+    ["  RUS-1/design", "  RUS-1/slice-1"],
+    {"RUS-1/design": _open_slice, "RUS-1/slice-1": _open_slice})
+check("present design branch reads branchExists True",
+      _present_state["phases"]["design"]["branchExists"], True)
+check("present non-merged design branch is not marked merged",
+      _present_state["phases"]["design"]["merged"], False)
+
+# T16b — guard: a NOT-in-flight ticket (no live slices) does NOT fire the absent-head
+# re-query, so `gh` calls stay bounded. Only the (absent) design/plan heads exist with
+# no slice branch -> looks_in_flight False -> design/plan are never queried.
+_not_inflight_state, _not_inflight_queried = _build_state_pruned_design_case(
+    [],
+    {"RUS-1/design": _merged_node})
+check("not-in-flight ticket: design.merged stays False (no re-query)",
+      _not_inflight_state["phases"]["design"]["merged"], False)
+check("not-in-flight ticket: design head never queried (gh calls bounded)",
+      "RUS-1/design" not in _not_inflight_queried, True)
+check("not-in-flight ticket: stack-level merged False",
+      _not_inflight_state["stack"]["merged"], False)
+
+
 # --- unaddressed_reviewer_comments (RUS-54: comment gather, AC5/AC6) --------
 BOT = "qrspi-bot"
 
