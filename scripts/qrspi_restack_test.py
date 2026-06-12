@@ -16,6 +16,8 @@ from qrspi_restack import (
     classify_result,
     classify_submit,
     build_envelope,
+    merged_ancestors,
+    submit_scope,
     REPO_ROOT,
 )
 from qrspi_resolve import pick_tip
@@ -115,6 +117,63 @@ check("tip picks highest slice over plan/design",
       "RUS-1/slice-3")
 check("tip is None when ticket has no branch",
       pick_tip(set(), "RUS-1"), None)
+
+# --- merged_ancestors / submit_scope (merged-ancestor-aware restack) --------
+# A ticket's stack ordering is design < plan < slice-1 < slice-2 < ...; branches is the
+# set from branch_set(), merged_flags maps branch -> bool (its PR merged).
+
+# Fully-open input: no branch merged. No merged ancestors; submit_scope covers the whole
+# stack in order and flags no re-parent.
+_open_branches = {"RUS-1/slice-1", "RUS-1/slice-2"}
+check("fully-open: no merged ancestors",
+      merged_ancestors(_open_branches, {}), set())
+check("fully-open: scope is the full open stack in order",
+      submit_scope(_open_branches, {}, "RUS-1")["scope"],
+      ["RUS-1/slice-1", "RUS-1/slice-2"])
+check("fully-open: lowestOpen is the bottom slice",
+      submit_scope(_open_branches, {}, "RUS-1")["lowestOpen"], "RUS-1/slice-1")
+check("fully-open: reparentParent unset",
+      submit_scope(_open_branches, {}, "RUS-1")["reparentParent"], None)
+
+# Partial-land input: lower slices merged, top slice open. merged_ancestors returns the
+# merged lower slices; submit_scope.scope is the open slices only and the lowest open
+# slice is flagged for re-parent onto trunk (its tracked parent is a merged ancestor).
+_partial_branches = {"RUS-1/slice-1", "RUS-1/slice-2", "RUS-1/slice-3"}
+_partial_flags = {"RUS-1/slice-1": True, "RUS-1/slice-2": True}
+check("partial-land: merged lower slices are the ancestors",
+      merged_ancestors(_partial_branches, _partial_flags),
+      {"RUS-1/slice-1", "RUS-1/slice-2"})
+check("partial-land: scope is open slices only",
+      submit_scope(_partial_branches, _partial_flags, "RUS-1")["scope"],
+      ["RUS-1/slice-3"])
+check("partial-land: lowest open slice flagged for re-parent",
+      submit_scope(_partial_branches, _partial_flags, "RUS-1")["lowestOpen"],
+      "RUS-1/slice-3")
+check("partial-land: reparentParent is the merged ancestor immediately below",
+      submit_scope(_partial_branches, _partial_flags, "RUS-1")["reparentParent"],
+      "RUS-1/slice-2")
+
+# Partial-land across phases: design+plan merged, slice-1 open. The lowest open slice's
+# tracked parent (plan) is a merged ancestor, so it must re-parent onto trunk.
+_phase_branches = {"RUS-1/design", "RUS-1/plan", "RUS-1/slice-1"}
+_phase_flags = {"RUS-1/design": True, "RUS-1/plan": True}
+check("phase partial-land: design+plan are merged ancestors",
+      merged_ancestors(_phase_branches, _phase_flags),
+      {"RUS-1/design", "RUS-1/plan"})
+check("phase partial-land: reparentParent is the merged plan branch",
+      submit_scope(_phase_branches, _phase_flags, "RUS-1")["reparentParent"],
+      "RUS-1/plan")
+
+# Fully-landed input: every slice merged. There is no open branch, so merged_ancestors is
+# empty and submit_scope returns the empty/short-circuit scope (the caller short-circuits
+# via is_stack_fully_merged before any gt work).
+_landed_branches = {"RUS-1/slice-1", "RUS-1/slice-2"}
+_landed_flags = {"RUS-1/slice-1": True, "RUS-1/slice-2": True}
+check("fully-landed: no merged ancestors (no open branch to sit below)",
+      merged_ancestors(_landed_branches, _landed_flags), set())
+check("fully-landed: empty short-circuit scope",
+      submit_scope(_landed_branches, _landed_flags, "RUS-1"),
+      {"scope": [], "lowestOpen": None, "reparentParent": None})
 
 print("\n%d passed, %d failed" % (total - failures, failures))
 sys.exit(1 if failures else 0)
