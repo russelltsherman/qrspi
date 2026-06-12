@@ -1,0 +1,18 @@
+{
+  "name": "qrspi",
+  "version": "0.1.0",
+  "description": "QRSPI structured feature-development workflow: Questions, Research, Structure, Plan, Implement — PR-gated phase skills, agents, and the Linear MCP binding.",
+  "author": {
+    "name": "Russell Sherman"
+  },
+  "skills": [
+    "./skills"
+  ],
+  "agents": [
+    "./agents"
+  ],
+  "scripts": [
+    "./scripts"
+  ],
+  "mcpServers": "./.mcp.json"
+}

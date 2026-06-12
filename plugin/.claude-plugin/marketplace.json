@@ -1,0 +1,12 @@
+{
+  "name": "qrspi-marketplace",
+  "owner": {
+    "name": "Russell Sherman"
+  },
+  "plugins": [
+    {
+      "name": "qrspi",
+      "source": ".."
+    }
+  ]
+}
