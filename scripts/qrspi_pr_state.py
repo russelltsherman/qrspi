@@ -397,15 +397,41 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main",
     ahead = {b: _commits_ahead(b, trunk) for b in branches}
     real = real_branches(branches, ahead)
 
+    real_snums = [n for n in snums if ("%s/slice-%d" % (ticket, n)) in real]
+
+    # The ticket "looks in-flight" when at least one slice branch still carries live
+    # work. In that window an absent/pruned PHASE head (design/plan) is most likely a
+    # head GitHub reaped after its PR merged — not an un-started ticket — so we re-query
+    # it for merge state (Decision 2, Risk row 3). The guard bounds `gh` calls: a
+    # present branch is queried as before, and a NOT-in-flight ticket (no live slices)
+    # never fires the extra re-query.
+    looks_in_flight = bool(real_snums)
+
     def phase_pr(name):
         head = "%s/%s" % (ticket, name)
         exists = head in real
-        pr = parse_pr_nodes(_query_pr(owner, repo, head), bot_login=bot) if exists else \
-            parse_pr_nodes([], bot_login=bot)
+        if exists:
+            pr = parse_pr_nodes(_query_pr(owner, repo, head), bot_login=bot)
+        elif looks_in_flight:
+            # Absent head + in-flight ticket: re-query the pruned head for merge state.
+            # The GraphQL query is by headRefName, so it still returns nodes for a
+            # deleted ref. select_pr(prefer="merged") ("any MERGED node wins") avoids the
+            # index-0 masking class, mirroring qrspi_cleanup.py (Decision 2 Option A,
+            # Risk row 5). If a MERGED PR exists, surface merged=True so the resolver's
+            # design_already_landed predicate sees it.
+            nodes = _query_pr(owner, repo, head)
+            merged_node = select_pr(nodes, prefer="merged")
+            pr = parse_pr_nodes([], bot_login=bot)
+            if merged_node is not None and merged_node.get("merged") is True:
+                pr["merged"] = True
+                pr["number"] = merged_node.get("number")
+                pr["state"] = merged_node.get("state")
+                pr["mergedAt"] = merged_node.get("mergedAt")
+        else:
+            pr = parse_pr_nodes([], bot_login=bot)
         pr["branchExists"] = exists
         return pr
 
-    real_snums = [n for n in snums if ("%s/slice-%d" % (ticket, n)) in real]
     slices = []
     for n in real_snums:
         head = "%s/slice-%d" % (ticket, n)
@@ -427,15 +453,31 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main",
         _git_show("%s:.qrspi/%s/plan.md" % (plan_src, ticket))) if plan_src else 0
     pr_summary_committed = _file_in_tree(top_slice, ".qrspi/%s/pr-summary.md" % ticket)
 
+    design_phase = phase_pr("design")
+    plan_phase = phase_pr("plan")
+
+    # Stack-level started/merged verdict (Decision 2 Option B): a clean read for the
+    # resolver's entry gate, aggregated from the per-phase merge signals. `started` is
+    # True once any work exists (a real phase branch or a re-queried merged head);
+    # `merged` mirrors the design phase's merge signal (the entry gate keys on design).
+    # design_already_landed already reads phases.design.merged directly, so this verdict
+    # is additive observability — no consumer is forced onto it.
+    stack_started = bool(real) or bool(design_phase.get("merged")) or bool(plan_phase.get("merged"))
+    stack_merged = bool(design_phase.get("merged"))
+
     return {
         "ticketId": ticket,
         "assigned": assigned,
         "linearStatus": linear_status,
         "blockedOpen": blocked_open,
         "blockedBy": list(blocked_by or []),
+        "stack": {
+            "started": stack_started,
+            "merged": stack_merged,
+        },
         "phases": {
-            "design": phase_pr("design"),
-            "plan": phase_pr("plan"),
+            "design": design_phase,
+            "plan": plan_phase,
             "implementation": {
                 "branchExists": bool(real_snums),
                 "slices": slices,
