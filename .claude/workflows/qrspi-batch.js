@@ -106,11 +106,12 @@ const TICKETS_SCHEMA = {
       type: 'array',
       items: {
         type: 'object',
-        required: ['id', 'title', 'status'],
+        required: ['id', 'title', 'status', 'createdAt'],
         properties: {
           id: { type: 'string' },
           title: { type: 'string' },
           status: { type: 'string' },
+          createdAt: { type: 'string' },
         },
       },
     },
@@ -172,6 +173,44 @@ function parseResolveEnvelope(text, ticketId) {
   if (!env.decision || !RESOLVE_ACTIONS.has(env.decision.action))
     return { ok: false, error: `resolve: unknown decision.action (${env.decision && env.decision.action})` }
   return env
+}
+
+// Scan for the first balanced top-level JSON ARRAY in text (qrspi_order_tickets.py emits
+// a tickets ARRAY on stdout, not an object — so extractJsonObject does not apply). Mirrors
+// the brace-matching of extractJsonObject for brackets.
+function extractJsonArray(text) {
+  const s = String(text == null ? '' : text)
+  const start = s.indexOf('[')
+  if (start < 0) return null
+  let depth = 0, inStr = false, esc = false
+  for (let i = start; i < s.length; i++) {
+    const c = s[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (c === '\\') esc = true
+      else if (c === '"') inStr = false
+    } else if (c === '"') inStr = true
+    else if (c === '[') depth++
+    else if (c === ']') { depth--; if (depth === 0) return s.slice(start, i + 1) }
+  }
+  return null
+}
+
+// Parse + validate the order worker's text into the SORTED tickets array (RUS-71). This is
+// order-only: a garbled/mangled echo, a parse failure, or any drift from the input id-set
+// returns null so the caller keeps the deduped (correct, just unsorted) queue — sorting is
+// a nicety, never a gate, and must never add, drop, or mutate tickets. The returned array
+// must be a permutation of the input (same multiset of ids) for the sort to be accepted.
+function parseOrderedTickets(text, original) {
+  const raw = extractJsonArray(text)
+  if (!raw) return null
+  let arr
+  try { arr = JSON.parse(raw) } catch { return null }
+  if (!Array.isArray(arr) || arr.length !== original.length) return null
+  const want = original.map(t => t && t.id).sort()
+  const got = arr.map(t => t && typeof t === 'object' ? t.id : undefined).sort()
+  for (let i = 0; i < want.length; i++) if (want[i] !== got[i]) return null
+  return arr
 }
 
 // Parse + validate the restack worker's text into the qrspi_restack.py envelope
@@ -1136,14 +1175,14 @@ const batches = await parallel(
 - assignee: "me"
 - limit: 250${ALL_PROJECTS ? '\n(do not pass a project argument — include every project)' : `\n- project: "${PROJECT}"`}
 
-Return every ticket as { id, title, status } with id like "RUS-8" and status "${status}". Nothing else.`,
+Return every ticket as { id, title, status, createdAt } with id like "RUS-8", status "${status}", and createdAt the ticket's ISO-8601 creation timestamp. Nothing else (besides createdAt).`,
       { label: `list:${status.toLowerCase().replace(/\s+/g, '-')}`, phase: 'Query', schema: TICKETS_SCHEMA }
     )
   )
 )
 
 const seen = new Set()
-const tickets = []
+let tickets = []
 for (const b of batches) {
   if (!b) continue
   for (const t of b.tickets) {
@@ -1151,6 +1190,38 @@ for (const b of batches) {
     seen.add(t.id)
     tickets.push(t)
   }
+}
+
+// RUS-71: deterministic within-phase ordering. After flatten+dedup, sort the queue by
+// STATUSES (phase) order, then by createdAt ascending with id numeric-suffix tie-break,
+// so tickets are processed in within-phase FIFO order. The pure comparator lives in the
+// tested helper scripts/qrspi_order_tickets.py; the JS sandbox cannot run python (it
+// delegates all python mechanics to worker agents — same pattern as qrspi_resolve.py),
+// so a Query-phase worker runs the helper over the {tickets, statuses} envelope and
+// returns the sorted tickets ARRAY as verbatim JSON, which we parse and reassign here.
+// A non-empty queue is required for this step (the empty short-circuit below still runs
+// when there are none); the sort is order-only and never adds/drops tickets.
+if (tickets.length > 1) {
+  const orderEnvelope = JSON.stringify({ tickets, statuses: STATUSES })
+  const sortedOut = await agent(
+    `You are the ORDER worker for the qrspi-batch Query phase. Run EXACTLY this command,
+verbatim, from your cwd (the repo/worktree root) — do NOT hand-derive, re-implement, or
+substitute paths. Pipe the JSON envelope below to its stdin on a single invocation:
+
+  cat <<'QRSPI_ORDER_EOF' | python3 scripts/qrspi_order_tickets.py
+${orderEnvelope}
+QRSPI_ORDER_EOF
+
+The helper reads the { "tickets": [...], "statuses": [...] } envelope from stdin and writes
+the SORTED tickets ARRAY (grouped by statuses order, then createdAt ascending with id
+tie-break) as JSON to stdout. Output that command's STDOUT — the JSON array — as your FINAL
+message: exactly and verbatim, with NO surrounding prose, NO code fences, NO edits. Do NOT
+call any structured-output tool; do NOT summarize. If the command errors or prints nothing,
+output the verbatim error (HARD STOP — do NOT retry or improvise an alternative).`,
+    { label: 'order:tickets', phase: 'Query' }
+  )
+  const sorted = parseOrderedTickets(sortedOut, tickets)
+  if (sorted) tickets = sorted
 }
 
 log(`Found ${tickets.length} ticket(s): ${tickets.map(t => `${t.id} (${t.status})`).join(', ') || '(none)'}`)

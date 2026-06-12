@@ -38,3 +38,63 @@
 - Stdlib-only (`json`, `sys`, `datetime`, `re`); no third-party deps.
 
 ---
+
+## Session 2 — Slice 2
+
+**Timestamp:** 2026-06-12T01:47:12Z
+**Tasks completed:** T8, T9, T10, T11
+**Tasks failed:** none
+**Tests:**
+
+- `node --check .claude/workflows/qrspi-batch.js` → parses cleanly (PARSE_OK), 0 errors
+- Sanity e2e of the JS↔Python boundary: piped the exact `{tickets, statuses}` envelope
+  the workflow now builds into `python3 scripts/qrspi_order_tickets.py` → returns the
+  tickets ARRAY grouped by `STATUSES` order then ascending `createdAt`
+  (Selected: RUS-9 → RUS-7; then Design Review: RUS-71), no traceback
+- Live `/qrspi-batch` e2e (Found-line grouping + `[i/total]` progression, AC6) deferred to
+  a real batch run per plan §11 — not runnable from this slice
+
+**Deviations from structure.md:**
+
+- **Sort step mechanism (structure §JS call site / plan §10 say "the workflow shells
+  out").** The workflow's JS sandbox **cannot execute python** (qrspi-batch.js header,
+  lines 24-25: it "delegate[s] the git/gh/Linear/python mechanics (which the JS sandbox
+  cannot run) to worker agents"). A Node `child_process`/`execFileSync` call to
+  `qrspi_order_tickets.py` would not run. So I implemented the sort exactly as the cited
+  reference pattern actually works in this file — the SAME `qrspi_resolve.py` pattern the
+  structure names: a Query-phase worker `agent()` runs
+  `python3 scripts/qrspi_order_tickets.py` over the `{tickets, statuses: STATUSES}`
+  envelope (heredoc on stdin) and returns the sorted tickets ARRAY as verbatim JSON, which
+  the JS parses via a new `parseOrderedTickets()` and reassigns to `tickets`. This honors
+  the structure's contract intent (stdin envelope → stdout sorted array, "same pattern as
+  qrspi_resolve.py") while respecting the runtime constraint; only the literal verb
+  "shells out" changes to "worker-agent runs python", which is what every other python
+  call in this workflow already does.
+- Added a guard `if (tickets.length > 1)` around the sort (a 0/1-ticket queue needs no
+  sort) and a defensive `parseOrderedTickets()` that returns null — keeping the deduped,
+  unsorted-but-complete queue — on any parse failure or id-set drift, so a garbled worker
+  echo degrades to "unsorted" and can never add/drop/mutate tickets. Not in the plan text
+  but consistent with the "order-only, AC4 dedup unaffected" intent (structure §Slice 2
+  Verification) and the resolver's "garbled echo → clean fallback" convention.
+
+**Deviations from plan.md:**
+
+- Changed `const tickets` to `let tickets` (plan §10 says "reassign `tickets`", which is
+  impossible on a `const`). Mechanical, required by the reassignment the plan mandates.
+- Added a `parseOrderedTickets()` + `extractJsonArray()` helper pair next to
+  `parseResolveEnvelope`/`extractJsonObject` (the helper emits a JSON ARRAY, not an object,
+  so the existing `extractJsonObject` did not apply). Same deviation as the structure one
+  above — see that note for rationale.
+
+**Notes for next session:**
+
+- Slice 2 complete; both slices implemented. No further implementation sessions.
+- The ONLY remaining work is the deferred live `/qrspi-batch` e2e (plan §11): confirm the
+  real `mcp__linear__list_issues` response returns `createdAt` as an ISO-8601 **string**
+  (OQ1 / Risk Register — external contract NOT FOUND in repo). The schema now REQUIRES
+  `createdAt` as `{type:'string'}`, so a non-string live shape would reject worker returns
+  and stall the Query phase — this must be verified against a live payload before relying
+  on the run. The comparator itself degrades safely (missing/unparseable → sorts last,
+  never raises), but the schema gate is strict by design (OQ2 RESOLVED: required).
+- Sort is wired AFTER flatten+dedup and BEFORE `log("Found …")`; downstream loop, `seen`
+  dedup, reconciliation `.sort()`, and `STATUSES` are untouched (Delta item 4).
