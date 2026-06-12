@@ -11,8 +11,11 @@ gate so a preview can be taken before anything is destroyed.
 
 Design (mirrors qrspi_resolve.py / qrspi_pr_state.py conventions)
 -----------------------------------------------------------------
-- Self-locating: REPO_ROOT is derived from `__file__` (two levels up), never typed
-  by the caller — the same path-mangling defence the rest of the harness uses.
+- Self-locating: REPO_ROOT is resolved via the shared
+  `qrspi_paths.resolve_repo_root()` (git-common-dir first — the MAIN checkout even
+  from a worktree; `__file__` parent only as a last resort), never typed by the
+  caller — the same path-mangling defence the rest of the harness uses. ENGINE_ROOT
+  (this script's own dir, from `__file__`) is used ONLY for sibling imports.
 - A PURE classifier `classify_cleanup(stack_merge_state, dirty_porcelain)` decides
   destroy / skip / blocked; it is unit-tested without any subprocess.
     * blocked  — the worktree has uncommitted changes (dirty porcelain). Never

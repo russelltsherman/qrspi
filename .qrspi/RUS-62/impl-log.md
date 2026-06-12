@@ -58,3 +58,34 @@
 - Caveat unchanged from Slice 1: marketplace `source='..'` relative-base and manifest field-name correctness remain unproven until the Slice 4 `--plugin-dir` smoke check (fail-loud).
 
 ---
+
+## Session 3 — Slice 3
+
+**Timestamp:** 2026-06-12T15:40:15Z
+**Tasks completed:** T13, T14, T15, T16, T17, T18
+**Tasks failed:** none
+**Tests:**
+
+- T17: `PYTHONPATH=plugin/scripts python3 plugin/scripts/qrspi_cleanup_test.py` → 25 passed, 0 failed (docstring edit changed no behavior).
+- T18 checkpoint: `! grep -rn 'python3 scripts/qrspi' plugin/skills/qrspi-work/SKILL.md && grep -q 'CLAUDE_PLUGIN_ROOT' …` → prints OK (no cwd-relative invocations remain; 13 `CLAUDE_PLUGIN_ROOT` refs present).
+- Narrative single-source: `## QRSPI Workflow` count = 1 in `plugin/CLAUDE.md`, 0 in `.claude/CLAUDE.md`; distinctive line ("best-effort reporting projection") matches `plugin/CLAUDE.md` only across `CLAUDE.md` files.
+- Stale docstring: `grep 'two levels up' plugin/scripts/qrspi_cleanup.py` → gone.
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- T13 (step 13) also rewrote the **inline backtick prose mentions** of engine scripts (e.g. `` `scripts/qrspi_resolve.py` ``, `` `scripts/qrspi_comment_reply.py` ``, `` `scripts/qrspi_revise_amend.py …` ``, `` `<repo-root>/scripts/qrspi_clear_stale_pr.py …` ``) to `${CLAUDE_PLUGIN_ROOT}/scripts/...`, not only the executable code-block invocations. This is within the structure contract ("every remaining live cwd-relative engine reference") and keeps the prose internally consistent — no behavior change.
+- T14 (step 14): the host `.claude/CLAUDE.md` was **entirely** the QRSPI narrative (no separable non-QRSPI host content to preserve). Rather than leave an empty/confusing file, the narrative block was replaced with a 4-line pointer stub directing readers to `plugin/CLAUDE.md`. The narrative *block itself* (and its distinctive lines) is removed from the host file and appears only in `plugin/CLAUDE.md` — satisfies the single-source verify-gate (no loss, no duplicate). Stub contains zero narrative content.
+
+**Notes for next session:**
+
+- Slice 3 doc/prose migration complete. `plugin/skills/qrspi-work/SKILL.md` now invokes every engine script as `${CLAUDE_PLUGIN_ROOT}/scripts/<name>.py` (13 refs); zero bare `python3 scripts/qrspi*` or `<repo-root>/scripts/...` remain.
+- QRSPI workflow narrative now ships from `plugin/CLAUDE.md` (verbatim move of the former host narrative). Host `.claude/CLAUDE.md` is a short pointer stub. NOTE for Slice 4: the migrated narrative was moved **verbatim** per plan step 15, so it still contains a few intra-narrative path references that predate the Slice 2 move (e.g. "Phase agent definitions live in `.claude/agents/`", `scripts/qrspi_*.py`, `.mcp.json`). These were intentionally NOT rewritten (plan said "verbatim"; no code reads this file per Q9) — if the Slice 4 smoke check or PR review wants the in-narrative paths updated to `plugin/...`, that is a follow-up, not part of the Slice 3 contract.
+- `plugin/scripts/qrspi_cleanup.py` line-14 docstring now correctly states REPO_ROOT is resolved via `qrspi_paths.resolve_repo_root()` (git-common-dir first, `__file__` last resort) — matching the actual line-58 behavior — instead of the stale "derived from `__file__` (two levels up)" claim (which was doubly wrong after the Slice 2 move). `qrspi_cleanup_test.py` still green (25/25).
+- 4 files changed: `plugin/skills/qrspi-work/SKILL.md` (M), `.claude/CLAUDE.md` (M), `plugin/CLAUDE.md` (new), `plugin/scripts/qrspi_cleanup.py` (M).
+- Slice 4 targets unchanged: author `plugin/scripts/qrspi_plugin_smoke.py` + `_test.py`, run the `--plugin-dir` dev install + `CLAUDE_PLUGIN_ROOT=$(pwd)/plugin` smoke check. Caveat from Slice 1 still open: marketplace `source` relative-base + manifest field-name correctness proven only by the Slice 4 smoke check.
+
+---
