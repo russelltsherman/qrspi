@@ -21,6 +21,13 @@ per-user step; the repo stays portable.
 (`linearTeam` / `linearProject`, default project `QRSPI`; see `.qrspi/config.example.json`).
 If `linearTeam` is unset it discovers/asks. No team name is hard-coded in the harness.
 
+`linearProject` scopes **both** ticket creation **and** `qrspi-batch` runs: by default the
+batch Query phase sweeps only the mapped project's assigned tickets (precedence
+`input.allProjects` > `input.project` > config `linearProject` > `QRSPI`). Pass
+`{"project":"..."}` to override for one run, or `{"allProjects":true}` to restore the
+all-projects sweep (an absent project no longer means "all projects"). A concrete scope
+that matches no Linear project aborts the run (fail loud) rather than sweeping empty.
+
 ### Lifecycle — PR-gated
 
 **PR review state — not Linear status — is the authority for advancement.** Linear has

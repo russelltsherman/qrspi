@@ -3,7 +3,7 @@ export const meta = {
   description: 'Drive every assigned in-flight QRSPI ticket one PR-gated step forward by resolving each ticket\'s PR review state and spawning the typed phase agents from the workflow script itself',
   whenToUse: 'After assigning tickets and moving them to Selected, or after approving phase PRs. Runs the autonomously-runnable actions (run_design, advance, submit, land, automatic reset/discard, and revise — addressing a CHANGES_REQUESTED phase PR in place then re-requesting review); leaves not-yet-approved tickets (wait) untouched.',
   phases: [
-    { title: 'Query', detail: 'List assigned Selected + in-flight (Design/Plan/Code Review) tickets' },
+    { title: 'Query', detail: 'List assigned Selected + in-flight (Design/Plan/Code Review) tickets, scoped to the mapped Linear project (input.allProjects > input.project > config linearProject > "QRSPI")' },
     { title: 'Resolve', detail: 'Per ticket: worktree + PR-state gather + tested resolver → decision (worker agent)' },
     { title: 'Restack', detail: 'Per ticket: restack the stack onto current trunk so drift/conflicts surface early (worker agent)' },
     { title: 'Design', detail: 'action=run_design → questions/research/design phase agents' },
@@ -58,7 +58,21 @@ const SKILL = '.claude/skills/qrspi-work/SKILL.md'
 
 // --- args ------------------------------------------------------------------
 // Optional overrides: { statuses?: string[], project?: string,
+//                       allProjects?: boolean,
 //                       reconcile?: boolean, reconcileDryRun?: boolean }
+//
+// PROJECT SCOPE (RUS-66): the Query sweep is scoped to ONE Linear project by
+// default — the repo's mapped project — instead of every project the assignee
+// touches. Scope is resolved at Query start through this precedence chain:
+//   1. input.allProjects === true  ⇒ ALL projects (the explicit opt-in; an
+//      undefined/absent project no longer means "all projects").
+//   2. input.project (truthy after trim; a blank/whitespace value is normalized
+//      to unset and falls through) ⇒ that concrete project.
+//   3. the config linearProject value (scripts/qrspi_config.py --key linearProject,
+//      reading .qrspi/config.json) ⇒ that concrete project.
+//   4. "QRSPI" (the helper's built-in default) ⇒ that concrete project.
+// A concrete resolved scope that matches NO Linear project aborts the Query phase
+// (fail loud, naming the unresolved project) rather than sweeping silently empty.
 const input = typeof args === 'string'
   ? (() => { try { return JSON.parse(args) } catch { return undefined } })()
   : args
@@ -66,7 +80,13 @@ const input = typeof args === 'string'
 // may have landed that we can act on. *Approved states were dropped (approval lives
 // in the PR), so we sweep the review statuses to detect approvals and auto-advance.
 const STATUSES = input?.statuses ?? ['Selected', 'Design Review', 'Plan Review', 'Code Review']
-const PROJECT = input?.project // undefined ⇒ all projects
+// All-projects is now an EXPLICIT opt-in (was: any falsy project ⇒ all projects).
+const ALL_PROJECTS = input?.allProjects === true
+// input.project, blank/whitespace normalized to unset (so a blank string falls
+// through to config rather than meaning all-projects).
+const PROJECT_ARG = (typeof input?.project === 'string' && input.project.trim() !== '')
+  ? input.project.trim()
+  : undefined
 // Reconciliation pass (RUS-52): reap already-merged-but-uncleaned tickets stranded in
 // `.worktrees/` (the backlog the old per-land prose left behind on failure/skip). It is
 // OPT-IN (default off — a normal batch run doesn't sweep the whole worktree dir) and
@@ -194,6 +214,23 @@ function parseLandVerdict(text) {
     return { status: 'incomplete', openBranches: [], error: 'land-verify: verdict missing/unknown status' }
   }
   return { status: v.status, openBranches: Array.isArray(v.openBranches) ? v.openBranches : [] }
+}
+
+// Parse + validate the config worker's text into the qrspi_config.py envelope
+// ({ ok, key, value, error? }). Same text-return + JS-parse shape as resolve/restack
+// (no StructuredOutput). A garbled echo or a non-ok/non-string value becomes a clean
+// ok:false so the caller can decide (here: hard-fail the Query scope resolution rather
+// than silently fall through to a wrong/empty sweep — see Slice 1 notes, RUS-66).
+function parseConfigEnvelope(text, key) {
+  const raw = extractJsonObject(text)
+  if (!raw) return { ok: false, error: 'config: no JSON envelope in worker output' }
+  let env
+  try { env = JSON.parse(raw) } catch (e) { return { ok: false, error: `config: unparseable envelope (${e.message})` } }
+  if (typeof env.ok !== 'boolean') return { ok: false, error: 'config: envelope missing ok flag' }
+  if (!env.ok) return env  // helper reported a clean ok:false — pass it through verbatim
+  if (env.key !== key) return { ok: false, error: `config: envelope key mismatch (want ${key}, got ${env.key})` }
+  if (typeof env.value !== 'string') return { ok: false, error: `config: envelope value not a string (got ${env.value})` }
+  return env
 }
 
 const WORKER_SCHEMA = {
@@ -994,13 +1031,84 @@ async function runReconciliation(alreadyProcessed) {
 // ===========================================================================
 phase('Query')
 
+// --- resolve project scope (RUS-66) ----------------------------------------
+// Precedence: input.allProjects > input.project (trimmed) > config linearProject
+// > "QRSPI". The JS sandbox cannot run python, so a one-line worker runs the
+// self-locating helper verbatim and returns its JSON stdout, which we parse with
+// the same text-return-then-JS-parse shape as resolve/restack. The config read
+// only happens when scope is NOT already pinned by allProjects or input.project.
+// A non-ok config read is a HARD FAILURE (per Slice 1 notes) — never a silent
+// fall-through to a wrong/empty sweep.
+let PROJECT // the concrete resolved project name, or undefined when ALL_PROJECTS
+if (!ALL_PROJECTS) {
+  if (PROJECT_ARG !== undefined) {
+    PROJECT = PROJECT_ARG
+  } else {
+    const cfgOut = await agent(
+      `You are the CONFIG worker for the QRSPI batch. Your cwd is the main repo root.
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives:
+
+  python3 scripts/qrspi_config.py --key linearProject
+
+It reads the repo's .qrspi/config.json (self-locating) and prints a one-line JSON
+envelope { "ok": true, "key": "linearProject", "value": "<project>" } to stdout
+(falling back to "QRSPI" when no config is present). Output that JSON as your FINAL
+message, exactly and verbatim — NO surrounding prose, NO code fences, NO edits. Do NOT
+call any structured-output tool. If it printed ok:false, still output that JSON verbatim
+(HARD STOP — do NOT retry or improvise alternative commands/paths).`,
+      { label: 'config:linearProject', phase: 'Query' }
+    )
+    const cfg = parseConfigEnvelope(cfgOut, 'linearProject')
+    if (!cfg.ok) {
+      // Fail loud rather than sweep the wrong/whole set: an unreadable config scope
+      // resolution is unrecoverable for this run (Slice 1 notes — treat non-ok as a
+      // hard failure, not a silent fall-through).
+      throw new Error(`qrspi-batch: could not resolve project scope from config — ${cfg.error ?? 'unknown error'}`)
+    }
+    PROJECT = cfg.value
+  }
+}
+
+log(`Project scope: ${ALL_PROJECTS ? 'all projects (input.allProjects)' : `"${PROJECT}"`}`)
+
+// Fail loud on a non-matching concrete scope (Decision 4 / AC4b): a typo'd or
+// otherwise unresolved project name must abort the run with an error naming the
+// project, NOT fall through to a silent empty sweep that is indistinguishable from
+// an empty queue. We validate the resolved name against the Linear project list
+// before sweeping. The scope log() above fires first so the resolved project is
+// visible. All-projects (the explicit opt-in) needs no validation.
+if (!ALL_PROJECTS) {
+  const matchOut = await agent(
+    `You are the PROJECT-SCOPE validator for the QRSPI batch.
+Use mcp__linear__list_projects to list the Linear projects in the authenticated
+workspace. Determine whether a project whose name is EXACTLY "${PROJECT}" exists
+(exact, case-sensitive name match — not a substring, not fuzzy).
+
+Return ONLY a single-line JSON object, nothing else, no prose, no code fences:
+  { "exists": true }  if such a project exists, otherwise  { "exists": false }`,
+    { label: 'validate:project-scope', phase: 'Query' }
+  )
+  let matched = false
+  try {
+    const raw = extractJsonObject(matchOut)
+    if (raw) matched = JSON.parse(raw).exists === true
+  } catch { matched = false }
+  if (!matched) {
+    throw new Error(
+      `qrspi-batch: resolved project scope "${PROJECT}" matches no Linear project — ` +
+      `aborting rather than sweeping an empty set (check .qrspi/config.json linearProject, ` +
+      `pass {"project":"..."} to override, or {"allProjects":true} to sweep all projects).`
+    )
+  }
+}
+
 const batches = await parallel(
   STATUSES.map(status => () =>
     agent(
       `Use mcp__linear__list_issues with:
 - state: "${status}"
 - assignee: "me"
-- limit: 250${PROJECT ? `\n- project: "${PROJECT}"` : '\n(do not pass a project argument — include every project)'}
+- limit: 250${ALL_PROJECTS ? '\n(do not pass a project argument — include every project)' : `\n- project: "${PROJECT}"`}
 
 Return every ticket as { id, title, status } with id like "RUS-8" and status "${status}". Nothing else.`,
       { label: `list:${status.toLowerCase().replace(/\s+/g, '-')}`, phase: 'Query', schema: TICKETS_SCHEMA }
