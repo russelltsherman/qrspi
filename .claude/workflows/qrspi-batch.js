@@ -1,5 +1,10 @@
 export const meta = {
   name: 'qrspi-batch',
+  // version — kept in lockstep with the plugin manifest (.claude-plugin/plugin.json) and the
+  // synced workflow's version marker (.claude/workflows/.qrspi-batch.version). The qrspi-batch
+  // sync skill compares the host marker against the plugin manifest version; surfacing it here
+  // lets the synced workflow file be self-describing (no path-resolution logic depends on it).
+  version: '0.1.0',
   description: 'Drive every assigned in-flight QRSPI ticket one PR-gated step forward by resolving each ticket\'s PR review state and spawning the typed phase agents from the workflow script itself',
   whenToUse: 'After assigning tickets and moving them to Selected, or after approving phase PRs. Runs the autonomously-runnable actions (run_design, advance, submit, land, automatic reset/discard, and revise — addressing a CHANGES_REQUESTED phase PR in place then re-requesting review); leaves not-yet-approved tickets (wait) untouched.',
   phases: [
