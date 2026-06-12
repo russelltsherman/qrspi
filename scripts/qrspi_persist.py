@@ -34,11 +34,20 @@ import os
 import shutil
 import sys
 
-# The script lives at <repo-root>/scripts/qrspi_persist.py, so the repo root is
-# two levels up. Deriving it from __file__ (not cwd, not an argument) is the whole
-# point: it removes the path the worker model keeps corrupting.
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+# ENGINE_ROOT: the dir holding this engine's scripts/ (derived from __file__) — used
+# ONLY for sibling imports, never a host path. REPO_ROOT: the HOST checkout root the
+# artifact is persisted into, resolved through the shared qrspi_paths.resolve_repo_root()
+# (git-common-dir first, so it is the MAIN checkout even when invoked from a worktree;
+# __file__ parent as the last resort). validate=False keeps gh off the import path; the
+# runtime override is validated in main(). Decoupling these two is the whole point of
+# RUS-60: the engine can live anywhere while writing to a different host checkout
+# (ref: design.md Decision 2; structure.md Modified Types).
+ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE_ROOT)
+
+import qrspi_paths  # noqa: E402
+
+REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 
 ARTIFACTS = ["questions", "research", "design", "structure", "plan", "worktree"]
 
@@ -93,15 +102,25 @@ def main():
                         help="Artifact name without extension (e.g. plan)")
     parser.add_argument("--stage-root", default=STAGE_ROOT,
                         help="Staging root (default: %s)" % STAGE_ROOT)
+    parser.add_argument("--repo-root", default=None,
+                        help="Explicit host checkout root override (validated against gh "
+                             "repo view). When omitted, the host root is auto-detected from "
+                             "cwd via git-common-dir (the MAIN checkout even from a worktree); "
+                             "see qrspi_paths.resolve_repo_root.")
     args = parser.parse_args()
 
+    # The HOST checkout root the artifact lands in: --repo-root wins (validated), else
+    # git-common-dir from cwd. Decoupled from ENGINE_ROOT so the engine can write into a
+    # different host checkout (ref: design.md Decision 2).
+    repo_root = qrspi_paths.resolve_repo_root(args.repo_root, cwd=os.getcwd())
+
     src = staging_path(args.stage_root, args.ticket, args.artifact)
-    dest = dest_path(REPO_ROOT, args.ticket, args.artifact)
+    dest = dest_path(repo_root, args.ticket, args.artifact)
     bytes_written, error = persist(src, dest)
 
     env = {
         "ok": error is None,
-        "repoRoot": REPO_ROOT,
+        "repoRoot": repo_root,
         "src": src,
         "dest": dest,
         "bytes": bytes_written,

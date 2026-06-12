@@ -30,3 +30,37 @@
 - Test stubs `qrspi_paths.subprocess.run` (swap-and-restore) — no real git/gh/network. Slice 2/3 divergence tests can reuse the same stubbing approach.
 
 ---
+
+## Session 2 — Slice 2: Rewire host-path-critical scripts to the shared resolver
+
+**Timestamp:** 2026-06-12T00:00:00Z
+**Tasks completed:** T14, T15, T16, T17, T18, T19, T20, T21, T22, T23, T24, T25, T26, T27 (plan steps 15-28)
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/qrspi_resolve_test.py` → 81 passed, 0 failed (added the host-root/engine-root divergence section and the `--repo-root` override flow: validated-success + fail-loud HostRootError)
+- `python3 scripts/qrspi_persist_test.py` → 9 passed, 0 failed (added `test_dest_follows_host_checkout_not_engine_dir` divergence case)
+- `python3 scripts/qrspi_cleanup_test.py` → 25 passed, 0 failed (unchanged; resolver-backed REPO_ROOT, monkeypatch contract preserved)
+- `python3 scripts/qrspi_restack_test.py` → 45 passed, 0 failed (unchanged; resolver-backed REPO_ROOT)
+- `python3 scripts/qrspi_clear_stale_pr_test.py` → 28 passed, 0 failed (unchanged; resolver-backed REPO_ROOT)
+- Full suite (`scripts/qrspi_*_test.py`) → ALL PASS (no regressions in importers)
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- Plan steps 16/18 say "split the single `REPO_ROOT` constant into `ENGINE_ROOT` + host root from the resolver". I kept a module-level `REPO_ROOT` *name* (now computed via `qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)`) IN ADDITION TO the runtime host root threaded through `main()`. Reason: the existing `qrspi_cleanup_test.py` fixture monkeypatches `qrspi_cleanup.REPO_ROOT`, and `qrspi_resolve_test.py`/`qrspi_restack_test.py` assert `envelope["repoRoot"] == REPO_ROOT`. Removing the symbol would break those tests. The constant is now resolver-derived (git-common-dir first), so behavior matches the design; it serves as the `build_envelope` default while `main()` passes the validated runtime root explicitly. This is behavior-preserving and within slice scope.
+
+**Notes for next session:**
+
+- Slice 3 scripts (`qrspi_pr_body.py`, `qrspi_comment_reply.py`, `qrspi_revise_amend.py`) still hold their OWN private git-common-dir copies — collapse them onto `qrspi_paths.resolve_repo_root(...)` per plan steps 29-31. Pattern to follow (established this slice): replace the `_SCRIPT_DIR`/`REPO_ROOT = dirname(dirname(__file__))` block with `ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, ENGINE_ROOT); import qrspi_paths; REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)`.
+- `validate=False` is used for every MODULE-LEVEL `REPO_ROOT` (import time) so `gh` is never invoked on import and the offline unit tests stay clean. The `--repo-root` override (resolve/persist) is resolved at RUNTIME in `main()` with `validate=True` (default), so a stale override fails loud via `HostRootError`.
+- `qrspi_resolve.py` host-path threading: every host-keyed helper now takes `repo_root=REPO_ROOT` (`_gh_name_with_owner`, `_gh_authenticated_login`, `_read_reviewer_config`, `load_reviewers`, `_existing_branches`, `setup_worktree`) and `build_envelope` gained a `repo_root=None` param (defaults to module `REPO_ROOT`). `main()` resolves once and passes the result through all of them. `ENGINE_ROOT` is used ONLY for `sys.path.insert`.
+- `qrspi_persist.py` `dest_path(repo_root, ticket, artifact)` already took `repo_root`; `main()` now passes the runtime-resolved host root. The `repoRoot` envelope field is the runtime root, not the module constant.
+- Divergence is real and verified: from inside a linked worktree, `ENGINE_ROOT` = `<worktree>/scripts` while `REPO_ROOT` = the MAIN checkout (git-common-dir). Confirmed live: `ENGINE_ROOT=/workspaces/qrspi/.worktrees/RUS-60/scripts`, `REPO_ROOT=/workspaces/qrspi`.
+- `qrspi_restack.read_merge_state` calls the imported `qrspi_resolve._gh_name_with_owner(REPO_ROOT)` — now passes restack's own `REPO_ROOT` explicitly (both resolve to the main checkout anyway).
+- `qrspi-batch.js` orchestrator call sites + SKILL constant are Slice 3 (step 32), NOT touched this slice.
+
+---

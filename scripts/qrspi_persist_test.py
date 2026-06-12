@@ -30,6 +30,20 @@ class DestPathTest(unittest.TestCase):
             d = qp.dest_path("/repo", "RUS-7", name)
             self.assertTrue(d.endswith("/.qrspi/RUS-7/%s.md" % name))
 
+    def test_dest_follows_host_checkout_not_engine_dir(self):
+        # RUS-60 divergence: when the engine lives at a DIFFERENT path than the host
+        # checkout, dest_path must follow the host checkout root the resolver returns
+        # (passed in as `repo_root`), never the engine dir. Prove the two diverge by
+        # passing a synthetic host root distinct from the engine's own dir.
+        engine_dir = os.path.dirname(os.path.abspath(qp.__file__))
+        host_root = "/synthetic/host-checkout"
+        self.assertNotEqual(host_root, os.path.dirname(engine_dir))
+        d = qp.dest_path(host_root, "RUS-60", "structure")
+        self.assertEqual(d, "/synthetic/host-checkout/.worktrees/RUS-60/.qrspi/RUS-60/structure.md")
+        # The dest must be rooted at the host checkout, NOT under the engine dir.
+        self.assertTrue(d.startswith(host_root + os.sep))
+        self.assertFalse(d.startswith(engine_dir + os.sep))
+
 
 class PersistTest(unittest.TestCase):
     def setUp(self):

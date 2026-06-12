@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 
+import qrspi_resolve
 from qrspi_resolve import (
     parse_name_with_owner,
     detect_existing,
@@ -23,8 +24,10 @@ from qrspi_resolve import (
     references_me,
     resolve_reviewers,
     ARTIFACTS,
+    ENGINE_ROOT,
     REPO_ROOT,
 )
+import qrspi_paths
 
 failures = 0
 total = 0
@@ -143,6 +146,56 @@ check("tip/slices addition leaves existing untouched", ts_env["existing"], _ex)
 check("tip/slices addition leaves reviewers default untouched", ts_env["reviewers"], "")
 check("tip/slices addition leaves commentTargets default untouched",
       ts_env["commentTargets"], [])
+
+# --- RUS-60 host-root / engine-root divergence (Slice 2) --------------------------------
+# The envelope's repoRoot must follow the HOST checkout root the resolver returns (passed
+# to build_envelope as `repo_root`), NOT the engine dir. ENGINE_ROOT (used for sibling
+# imports via sys.path.insert) stays the engine's own scripts/ dir. Prove the two diverge.
+check("ENGINE_ROOT is the engine scripts/ dir",
+      ENGINE_ROOT, os.path.dirname(os.path.abspath(qrspi_resolve.__file__)))
+_SYNTH_HOST = "/synthetic/host-checkout"
+div_env = build_envelope("%s/.worktrees/RUS-1" % _SYNTH_HOST, _dec, _ex, ok=True,
+                         repo_root=_SYNTH_HOST)
+check("envelope repoRoot follows the supplied host checkout root",
+      div_env["repoRoot"], _SYNTH_HOST)
+check("envelope worktreeDir follows the host checkout, not the engine dir",
+      div_env["worktreeDir"], "/synthetic/host-checkout/.worktrees/RUS-1")
+check("host root diverges from ENGINE_ROOT (engine != host)",
+      div_env["repoRoot"] != ENGINE_ROOT, True)
+# Default (no repo_root arg) still uses the module-level host root — back-compat.
+check("build_envelope without repo_root defaults to module REPO_ROOT",
+      build_envelope("/wt/RUS-1", _dec, _ex, ok=True)["repoRoot"], REPO_ROOT)
+
+# --- --repo-root override flows through the shared resolver (validated) -----------------
+# main() resolves the host root via qrspi_paths.resolve_repo_root(args.repo_root, ...).
+# Stub the gh validation gate (swap qrspi_paths.subprocess.run) and assert an explicit
+# --repo-root value wins and is returned absolute, exactly as build_envelope would receive
+# it. This pins the wiring without spawning gh/git.
+class _Fake:
+    def __init__(self, rc=0, out="", err=""):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+_real_run = qrspi_paths.subprocess.run
+try:
+    qrspi_paths.subprocess.run = lambda cmd, **kw: (
+        _Fake(0, "octo/host-repo\n") if cmd[:3] == ["gh", "repo", "view"]
+        else _Fake(0, ""))
+    check("--repo-root override resolves (validated) to the supplied root",
+          qrspi_paths.resolve_repo_root("/synthetic/flag-root", cwd="/anywhere"),
+          os.path.abspath("/synthetic/flag-root"))
+finally:
+    qrspi_paths.subprocess.run = _real_run
+
+# A stale/wrong --repo-root must fail loud (HostRootError), never silently resolve.
+try:
+    qrspi_paths.subprocess.run = lambda cmd, **kw: (
+        _Fake(1, "", "not a github repo") if cmd[:3] == ["gh", "repo", "view"]
+        else _Fake(0, ""))
+    check_raises("stale --repo-root raises (fail loud)",
+                 lambda: qrspi_paths.resolve_repo_root("/synthetic/stale", cwd="/x"))
+finally:
+    qrspi_paths.subprocess.run = _real_run
 
 # --- ticketContentPath handoff (decouple: the script emits the PATH, never the body, so
 # the fragile ticket text — e.g. Linear <issue> mention tags — is read file->file by the

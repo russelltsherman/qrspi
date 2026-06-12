@@ -36,15 +36,24 @@ import os
 import subprocess
 import sys
 
-# The script lives at <repo-root>/scripts/qrspi_resolve.py, so the repo root is
-# two levels up. Deriving it from __file__ (not cwd, not an argument) is the whole
-# point: it removes the path the model kept corrupting.
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
-sys.path.insert(0, _SCRIPT_DIR)
+# Two distinct roots, decoupled so the engine can live anywhere (e.g. an installed
+# plugin) while operating on a *different* host checkout (ref: design.md Decision 2):
+#   - ENGINE_ROOT: the dir holding this engine's scripts/, derived purely from __file__.
+#     Used ONLY for sys.path.insert so siblings import correctly; never a host path.
+#   - REPO_ROOT (host checkout root): the repo the engine operates ON. Resolved through
+#     the shared qrspi_paths.resolve_repo_root() — git-common-dir first (so it is the
+#     MAIN checkout even when invoked from a linked worktree), __file__ parent as the
+#     last resort. validate=False at import keeps gh off the import path; the runtime
+#     host root in main() validates the --repo-root override. REPO_ROOT stays a
+#     module-level name so it remains the build_envelope default and is monkeypatchable.
+ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE_ROOT)
 
 from qrspi_pr_state import build_state, branch_set, slice_numbers  # noqa: E402
 from qrspi_resolve_state import resolve  # noqa: E402
+import qrspi_paths  # noqa: E402
+
+REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 
 ARTIFACTS = ["questions", "research", "design", "structure", "plan", "worktree"]
 
@@ -180,9 +189,11 @@ def comment_targets_of(decision):
 
 def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
                    reviewers="", team_reviewers="", ticket_content_path="",
-                   tip=None, slices=None):
+                   tip=None, slices=None, repo_root=None):
     """Assemble the JSON envelope the qrspi-batch resolveTicket() step consumes.
-    Pure; `repoRoot` is always the module-level REPO_ROOT this script derived.
+    Pure; `repoRoot` is the resolved host checkout root — `repo_root` when supplied
+    (the runtime root from resolve_repo_root, honouring --repo-root), else the
+    module-level REPO_ROOT default.
 
     `reviewers`/`team_reviewers` are comma-joined strings ready to drop straight
     behind `gt submit --reviewers`/`--team-reviewers` (empty string => omit the
@@ -210,7 +221,7 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
     envelope thus stays angle-bracket-free for ANY ticket and any content."""
     env = {
         "ok": ok,
-        "repoRoot": REPO_ROOT,
+        "repoRoot": REPO_ROOT if repo_root is None else repo_root,
         "worktreeDir": worktree_dir,
         "existing": existing,
         "decision": decision,
@@ -242,28 +253,28 @@ def _run(cmd, cwd=None):
     return res.returncode, res.stdout, res.stderr
 
 
-def _gh_name_with_owner():
+def _gh_name_with_owner(repo_root=REPO_ROOT):
     rc, out, err = _run(["gh", "repo", "view", "--json", "nameWithOwner",
-                         "-q", ".nameWithOwner"], cwd=REPO_ROOT)
+                         "-q", ".nameWithOwner"], cwd=repo_root)
     if rc != 0:
         raise RuntimeError("gh repo view failed: %s" % (err.strip() or out.strip()))
     return out.strip()
 
 
-def _gh_authenticated_login():
+def _gh_authenticated_login(repo_root=REPO_ROOT):
     """The login of the gh-authenticated user (the human running the harness), or
     None if gh is unauthenticated. This is what @me expands to — so the default is
     'request review from whoever is running this', with no username in the repo."""
-    rc, out, _ = _run(["gh", "api", "user", "-q", ".login"], cwd=REPO_ROOT)
+    rc, out, _ = _run(["gh", "api", "user", "-q", ".login"], cwd=repo_root)
     login = out.strip()
     return login if (rc == 0 and login) else None
 
 
-def _read_reviewer_config():
+def _read_reviewer_config(repo_root=REPO_ROOT):
     """Parse the optional, gitignored <repo>/.qrspi/config.json. Missing or invalid
     file -> {} (the @me default takes over). Never raises — reviewer resolution is
     best-effort and must not break a resolve."""
-    path = os.path.join(REPO_ROOT, ".qrspi", *REVIEWER_CONFIG)
+    path = os.path.join(repo_root, ".qrspi", *REVIEWER_CONFIG)
     try:
         with open(path) as fh:
             cfg = json.load(fh)
@@ -272,23 +283,23 @@ def _read_reviewer_config():
         return {}
 
 
-def load_reviewers():
+def load_reviewers(repo_root=REPO_ROOT):
     """Resolve (reviewers_csv, team_reviewers_csv) from .qrspi/config.json, falling
     back to the @me default, looking up the authenticated login only when @me is
     actually referenced. Never raises; returns ("", "") if nothing resolves so the
     flag is simply omitted."""
-    config = _read_reviewer_config()
-    me_login = _gh_authenticated_login() if references_me(config) else None
+    config = _read_reviewer_config(repo_root)
+    me_login = _gh_authenticated_login(repo_root) if references_me(config) else None
     revs, teams = resolve_reviewers(config, me_login)
     return ",".join(revs), ",".join(teams)
 
 
-def _existing_branches(ticket):
-    rc, out, _ = _run(["git", "branch", "--list", "%s/*" % ticket], cwd=REPO_ROOT)
+def _existing_branches(ticket, repo_root=REPO_ROOT):
+    rc, out, _ = _run(["git", "branch", "--list", "%s/*" % ticket], cwd=repo_root)
     return branch_set(out.splitlines()) if rc == 0 else set()
 
 
-def setup_worktree(ticket, trunk="main", create_design=False):
+def setup_worktree(ticket, trunk="main", create_design=False, repo_root=REPO_ROOT):
     """Provision the ticket's worktree at <repo>/.worktrees/<ticket> and return its
     path. Idempotent.
 
@@ -303,16 +314,16 @@ def setup_worktree(ticket, trunk="main", create_design=False):
 
     Raises RuntimeError with the verbatim git/gt error on failure — the caller turns
     that into a single ok:false envelope rather than retrying."""
-    worktrees_dir = os.path.join(REPO_ROOT, ".worktrees")
+    worktrees_dir = os.path.join(repo_root, ".worktrees")
     worktree = os.path.join(worktrees_dir, ticket)
 
     if os.path.isdir(worktree):
         return worktree  # reuse
 
-    tip = pick_tip(_existing_branches(ticket), ticket)
+    tip = pick_tip(_existing_branches(ticket, repo_root), ticket)
     if tip:
         os.makedirs(worktrees_dir, exist_ok=True)
-        rc, _, err = _run(["git", "worktree", "add", worktree, tip], cwd=REPO_ROOT)
+        rc, _, err = _run(["git", "worktree", "add", worktree, tip], cwd=repo_root)
         if rc != 0:
             raise RuntimeError("git worktree add (reuse %s) failed: %s" % (tip, err.strip()))
         return worktree
@@ -323,7 +334,7 @@ def setup_worktree(ticket, trunk="main", create_design=False):
     # run_design on a brand-new ticket: create the design branch off trunk and track it.
     os.makedirs(worktrees_dir, exist_ok=True)
     rc, _, err = _run(["git", "worktree", "add", "-b", "%s/design" % ticket, worktree, trunk],
-                      cwd=REPO_ROOT)
+                      cwd=repo_root)
     if rc != 0:
         raise RuntimeError("git worktree add -b %s/design failed: %s" % (ticket, err.strip()))
     rc, _, err = _run(["gt", "track", "--parent", trunk, "--no-interactive"], cwd=worktree)
@@ -351,6 +362,11 @@ def main():
     parser.add_argument("--blocked-by", action="append", default=[],
                         help="Identifier of an open blocker (repeatable; comma-joined values also accepted). "
                              "From Linear, supplied by caller.")
+    parser.add_argument("--repo-root", default=None,
+                        help="Explicit host checkout root override (validated against gh "
+                             "repo view). When omitted, the host root is auto-detected from "
+                             "cwd via git-common-dir (the MAIN checkout even from a worktree); "
+                             "see qrspi_paths.resolve_repo_root.")
     args = parser.parse_args()
 
     ticket_content_path = args.ticket_content_file
@@ -359,30 +375,40 @@ def main():
     # Any infrastructure failure -> ONE ok:false envelope with the verbatim error.
     # Never partial-retry: a clean stop is what keeps a weak model from spiralling.
     try:
+        # Resolve the HOST checkout root: --repo-root wins (validated), else
+        # git-common-dir from cwd (validated). This is decoupled from ENGINE_ROOT so the
+        # engine can live elsewhere; every host path below keys off it, NOT __file__.
+        repo_root = qrspi_paths.resolve_repo_root(args.repo_root, cwd=os.getcwd())
         # Decide first (read-only: build_state reads shared git refs + gh, no worktree
         # needed), THEN provision the worktree only as the decision requires — so an
         # entry_blocked ticket never leaves a stray branch behind.
-        owner, repo = parse_name_with_owner(_gh_name_with_owner())
+        owner, repo = parse_name_with_owner(_gh_name_with_owner(repo_root))
         state = build_state(owner, repo, args.ticket, args.assigned, args.linear_status,
                             trunk=args.trunk, blocked_open=args.blocked_open,
                             blocked_by=blocked_by)
         decision = resolve(state)
         worktree = setup_worktree(args.ticket, trunk=args.trunk,
-                                  create_design=(decision["action"] == "run_design"))
+                                  create_design=(decision["action"] == "run_design"),
+                                  repo_root=repo_root)
         existing = detect_existing(os.path.join(worktree, ".qrspi", args.ticket))
-        reviewers, team_reviewers = load_reviewers()
-        branches = _existing_branches(args.ticket)
+        reviewers, team_reviewers = load_reviewers(repo_root)
+        branches = _existing_branches(args.ticket, repo_root)
         env = build_envelope(worktree, decision, existing, ok=True,
                              reviewers=reviewers, team_reviewers=team_reviewers,
                              ticket_content_path=ticket_content_path,
                              tip=pick_tip(branches, args.ticket),
-                             slices=slice_branches(branches, args.ticket))
+                             slices=slice_branches(branches, args.ticket),
+                             repo_root=repo_root)
     except Exception as exc:  # noqa: BLE001 - any failure is reported, not retried
-        worktree = os.path.join(REPO_ROOT, ".worktrees", args.ticket)
+        # Best-effort host root for the error envelope: prefer the override (unvalidated
+        # here — we are already in the error path), else the module default.
+        err_root = os.path.abspath(args.repo_root) if args.repo_root else REPO_ROOT
+        worktree = os.path.join(err_root, ".worktrees", args.ticket)
         env = build_envelope(worktree, None,
                              {name: False for name in ARTIFACTS},
                              ok=False, error="%s: %s" % (type(exc).__name__, exc),
-                             ticket_content_path=ticket_content_path)
+                             ticket_content_path=ticket_content_path,
+                             repo_root=err_root)
 
     json.dump(env, sys.stdout, indent=2)
     print()
