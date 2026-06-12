@@ -89,3 +89,29 @@
 - Slice 4 targets unchanged: author `plugin/scripts/qrspi_plugin_smoke.py` + `_test.py`, run the `--plugin-dir` dev install + `CLAUDE_PLUGIN_ROOT=$(pwd)/plugin` smoke check. Caveat from Slice 1 still open: marketplace `source` relative-base + manifest field-name correctness proven only by the Slice 4 smoke check.
 
 ---
+
+## Session 4 — Slice 4
+
+**Timestamp:** 2026-06-12T00:00:00Z
+**Tasks completed:** T19, T20, T21, T22, T23, T24
+**Tasks failed:** none
+**Tests:**
+
+- T21: `PYTHONPATH=plugin/scripts python3 plugin/scripts/qrspi_plugin_smoke_test.py` → 8 passed, 0 failed (success + fail-loud + plugin_root() precedence cases).
+- T22/T23: `CLAUDE_PLUGIN_ROOT="$(pwd)/plugin" python3 plugin/scripts/qrspi_plugin_smoke.py` → exit 0; all 6 required bundled scripts resolve under `${CLAUDE_PLUGIN_ROOT}/scripts/...`. Fail-loud confirmed: a bogus `CLAUDE_PLUGIN_ROOT=/nonexistent/plugin` exits 1 (`MissingBundledScript`, ref Q13).
+- T24 full regression: `for t in plugin/scripts/qrspi_*_test.py; do PYTHONPATH=plugin/scripts python3 "$t"; done` → ALLGREEN, 15/15 test files pass (every relocated `_test.py` plus the new `qrspi_plugin_smoke_test.py`).
+
+**Deviations from structure.md:**
+
+- none. The smoke script implements the New Type contract exactly: `plugin_root()` precedence `${CLAUDE_PLUGIN_ROOT}` → `qrspi_paths.engine_root()`-parent fallback (ref Q6); `resolve_bundled_script()` resolves the literal `${CLAUDE_PLUGIN_ROOT}/scripts/<name>.py` form and raises `MissingBundledScript` (fail-loud, Q13) on absence.
+
+**Deviations from plan.md:**
+
+- T22 (step 22) "run the dev install pointing `--plugin-dir` at `plugin/`": the actual `claude --plugin-dir plugin/` install was NOT invoked — this implement agent runs headless in a worktree and the in-scope Done-when gate is the *scripted* smoke check (design OQ3, "scripted now"), which is exactly what was run via `CLAUDE_PLUGIN_ROOT="$(pwd)/plugin"`. The smoke script's `plugin_root()` resolves the same env var the `--plugin-dir` loader populates, so the script-level resolution is proven; the live `--plugin-dir` discovery of skills/agents + MCP registration (Slice 4 verify checkbox 1) is the loader's responsibility and remains a manual/PR-review confirmation, not something this scripted gate can assert. This matches the structure's documented Unverified Assumptions (manifest field names, `source` relative-base, `${CLAUDE_PLUGIN_ROOT}` population) being "finalized against the live loader."
+
+**Notes for next session:**
+
+- Slice 4 complete — this is the final implementation slice. New files: `plugin/scripts/qrspi_plugin_smoke.py` (smoke-check script) + `plugin/scripts/qrspi_plugin_smoke_test.py` (8 unittest cases). The scripted Done-when gate passes: `CLAUDE_PLUGIN_ROOT="$(pwd)/plugin" python3 plugin/scripts/qrspi_plugin_smoke.py` exits 0; a missing bundled script exits 1.
+- `REQUIRED_BUNDLED_SCRIPTS` in the smoke script is a representative set of 6 load-bearing engine modules (`qrspi_paths`, `qrspi_resolve`, `qrspi_resolve_state`, `qrspi_pr_state`, `qrspi_persist`, `qrspi_pr_body`), not the full file list — kept deliberately small so a relocation that drops any anchor fails loud without coupling the test to the exact script inventory.
+- STILL DEFERRED (per structure Unverified Assumptions + design OQ3): the LIVE `claude --plugin-dir plugin/` install asserting skill/agent discovery + `linear` MCP registration, plus manifest field-name / `marketplace.json` `source` relative-base correctness against the real loader. These are surfaced for PR review / a foreign-repo proof (read-only-root risk explicitly deferred to RUS-64). The scripted env-var-driven resolution is the only loader behavior this headless slice can assert.
+- 2 files changed (both new): `plugin/scripts/qrspi_plugin_smoke.py`, `plugin/scripts/qrspi_plugin_smoke_test.py`.
