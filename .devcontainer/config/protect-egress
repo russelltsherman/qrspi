@@ -10,20 +10,32 @@ ip6tables -F OUTPUT
 ip6tables -A OUTPUT -o lo -j ACCEPT
 
 # Allow direct traffic to the Docker host gateway (host.docker.internal).
-# This lets the omlx and ollama aliases reach the local model server without going
-# through squid, which Node.js HTTP clients don't reliably support for
-# plain HTTP. Safe because the host is the user's own machine, not the
-# public internet. The gateway may resolve to IPv4, IPv6, or both depending
-# on the Docker Desktop version and host network configuration.
-while IFS= read -r line; do
-  addr="$(echo "$line" | awk '{print $1}')"
+# This lets the omlx and ollama aliases reach the local model server without
+# going through squid, which Node.js HTTP clients don't reliably support for
+# plain HTTP. Safe because the host is the user's own machine, not the public
+# internet.
+#
+# Docker's `--add-host=host.docker.internal:host-gateway` writes BOTH an IPv4
+# and an IPv6 entry to /etc/hosts, and we must permit every family the
+# application's resolver might connect over. Do NOT resolve with `getent hosts`
+# here: it has gethostbyname semantics and returns only a single,
+# non-deterministic family (observed returning IPv6-only on this image), while
+# Node/Claude Code connect via getaddrinfo and pick IPv4. When the two disagree,
+# the family the app actually uses gets no ACCEPT rule, hits the terminal DROP
+# below, and the omlx/ollama API silently times out. Reading /etc/hosts directly
+# enumerates every advertised family regardless of resolver ordering.
+#
+# PROTECT_EGRESS_HOSTS_FILE is a testing seam (defaults to /etc/hosts); honored
+# only so the unit suite can drive this with a fixture. Production is unchanged.
+hosts_file="${PROTECT_EGRESS_HOSTS_FILE:-/etc/hosts}"
+while IFS= read -r addr; do
   [[ -z "$addr" ]] && continue
   if [[ "$addr" == *:* ]]; then
     ip6tables -A OUTPUT -d "$addr" -j ACCEPT
   else
     iptables -A OUTPUT -d "$addr" -j ACCEPT
   fi
-done < <(getent hosts host.docker.internal 2>/dev/null || true)
+done < <(awk '{ for (i = 2; i <= NF; i++) if ($i == "host.docker.internal") { print $1; break } }' "$hosts_file" 2>/dev/null || true)
 
 # Allow the squid proxy user to reach the internet
 iptables -A OUTPUT -m owner --uid-owner proxy -j ACCEPT
