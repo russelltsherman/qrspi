@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "qrspi",
+  "version": "0.1.0",
+  "description": "QRSPI structured feature-development workflow (Questions, Research, Structure, Plan, Implement) packaged as a Claude Code plugin, bundling its phase skills and the linear MCP binding.",
+  "skills": ".claude/skills",
+  "mcpServers": ".mcp.json"
+}
