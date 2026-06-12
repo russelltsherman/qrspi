@@ -41,11 +41,17 @@ import os
 import subprocess
 import sys
 
-# The script lives at <repo-root>/scripts/qrspi_clear_stale_pr.py, so the repo root is
-# two levels up. Deriving it from __file__ (not cwd, not an argument) is the whole point:
-# it removes the path a weak worker model keeps corrupting.
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+# ENGINE_ROOT: the dir holding this engine's scripts/ (from __file__) — used ONLY for
+# sibling imports. REPO_ROOT: the HOST checkout root the .graphite_pr_info cache resolves
+# from, via the shared qrspi_paths.resolve_repo_root() (git-common-dir first — the MAIN
+# checkout even from a worktree; __file__ parent last resort). validate=False keeps gh off
+# the import path. Decoupling the two is the RUS-60 core change (ref: design.md Decision 2).
+ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE_ROOT)
+
+import qrspi_paths  # noqa: E402
+
+REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 
 # Graphite marks an association dead with one of these PR states. We only ever drop a
 # ticket's entry when it carries one of them -- never an OPEN association.

@@ -36,13 +36,16 @@ import os
 import subprocess
 import sys
 
-# The script lives at <repo-root>/scripts/qrspi_cleanup.py, so the repo root is two
-# levels up. Deriving it from __file__ (not cwd, not an argument) keeps the only
-# path the model could corrupt out of the caller's hands — see qrspi_resolve.py.
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
-sys.path.insert(0, _SCRIPT_DIR)
+# ENGINE_ROOT: the dir holding this engine's scripts/ (from __file__) — used ONLY for
+# sibling imports. REPO_ROOT: the HOST checkout root all host paths key off, resolved via
+# the shared qrspi_paths.resolve_repo_root() (git-common-dir first — the MAIN checkout even
+# from a worktree; __file__ parent last resort). validate=False keeps gh off the import
+# path. Decoupling the two is the RUS-60 core change (ref: design.md Decision 2). REPO_ROOT
+# stays a module-level name so the fixture test can still redirect it.
+ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE_ROOT)
 
+import qrspi_paths  # noqa: E402
 from qrspi_pr_state import (  # noqa: E402
     branch_set,
     is_stack_fully_merged,
@@ -51,6 +54,8 @@ from qrspi_pr_state import (  # noqa: E402
 )
 from qrspi_resolve import parse_name_with_owner  # noqa: E402
 from qrspi_restack import worktree_path  # noqa: E402
+
+REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 
 
 # --- pure classifier (unit-tested) -----------------------------------------

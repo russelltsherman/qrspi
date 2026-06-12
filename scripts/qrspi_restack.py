@@ -48,13 +48,15 @@ import re
 import subprocess
 import sys
 
-# The script lives at <repo-root>/scripts/qrspi_restack.py, so the repo root is two
-# levels up. Deriving it from __file__ (not cwd, not an argument) is the whole point:
-# it removes the path a weak worker model keeps corrupting.
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
-sys.path.insert(0, _SCRIPT_DIR)
+# ENGINE_ROOT: the dir holding this engine's scripts/ (from __file__) — used ONLY for
+# sibling imports. REPO_ROOT: the HOST checkout root all host paths key off, resolved via
+# the shared qrspi_paths.resolve_repo_root() (git-common-dir first — the MAIN checkout even
+# from a worktree; __file__ parent last resort). validate=False keeps gh off the import
+# path. Decoupling the two is the RUS-60 core change (ref: design.md Decision 2).
+ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE_ROOT)
 
+import qrspi_paths  # noqa: E402
 from qrspi_pr_state import (             # noqa: E402
     branch_set,
     stack_merge_state,
@@ -66,6 +68,8 @@ from qrspi_resolve import (               # noqa: E402
     parse_name_with_owner,
     _gh_name_with_owner,
 )
+
+REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 
 # gt prints exactly one line per branch on a no-op restack:
 #   "<branch> does not need to be restacked on <trunk>."
@@ -265,7 +269,7 @@ def read_merge_state(ticket, branches):
     branches = list(branches)
     if not branches:
         return {}
-    owner, repo = parse_name_with_owner(_gh_name_with_owner())
+    owner, repo = parse_name_with_owner(_gh_name_with_owner(REPO_ROOT))
     graphql_nodes = {}
     for head in branches:
         rc, out, _ = _run(
