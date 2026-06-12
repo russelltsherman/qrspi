@@ -64,3 +64,36 @@
 - `qrspi-batch.js` orchestrator call sites + SKILL constant are Slice 3 (step 32), NOT touched this slice.
 
 ---
+
+## Session 3 — Slice 3: Align PR-message scripts and orchestrator call sites
+
+**Timestamp:** 2026-06-12T00:00:00Z
+**Tasks completed:** T28, T29, T30, T31, T32, T33 (plan steps 29-33)
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/qrspi_pr_body_test.py` → 23 passed, 0 failed (added 2 regression-guard checks: envelope `repoRoot` default IS the resolver-backed module `REPO_ROOT`; resolver-backed root yields the same canonical `.worktrees/<ticket>` dest as before — alignment is behavior-preserving)
+- `python3 scripts/qrspi_comment_reply_test.py` → 15 passed, 0 failed (unchanged; resolver-backed REPO_ROOT)
+- `python3 scripts/qrspi_revise_amend_test.py` → 22 passed, 0 failed (unchanged; resolver-backed REPO_ROOT)
+- Regression sweep — `qrspi_paths_test`, `qrspi_resolve_test`, `qrspi_persist_test`, `qrspi_cleanup_test`, `qrspi_restack_test`, `qrspi_clear_stale_pr_test` → ALL PASS (no collateral breakage in importers)
+- `node --check .claude/workflows/qrspi-batch.js` → SYNTAX OK
+- Grep-audit (step 33 checkpoint): every `scripts/qrspi_*.py` invocation and the SKILL constant in `qrspi-batch.js` is engine-root-prefixed (`engineCmd(...)`); the only remaining bare `scripts/...` references are prose comments.
+- Import-smoke (cwd = worktree `/workspaces/qrspi/.worktrees/RUS-60`): all three scripts resolve `REPO_ROOT = /workspaces/qrspi` (the MAIN checkout via git-common-dir), NOT the worktree — divergence preserved; no `gh` invoked on import (validate=False); private `resolve_repo_root` removed from all three.
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- Plan step 32 names "every bare-relative `scripts/qrspi_*.py` invocation". I ALSO converted the four already-explicitly-rooted `${r.repoRoot}/scripts/...` invocations (qrspi_pr_body / qrspi_revise_amend ×2 / qrspi_comment_reply) to `engineCmd('scripts/...')`. Reason: `r.repoRoot` is the resolver's HOST checkout root (post-Slice-2), but those files are ENGINE scripts — addressing them via the host root is the exact engine/host conflation Slice 3 closes (structure.md Contracts: "addresses sibling scripts and the SKILL via an explicit engine root"). Today engine == host so this is behavior-preserving; under decoupling it is the correct root. Within slice scope (orchestrator call-site alignment).
+
+**Notes for next session:**
+
+- Slice 3 is the FINAL slice — no further implementation session. (`pr-summary.md` / the PR phase is next.)
+- Pattern applied to all three PR-message scripts (collapsing their private git-common-dir copies onto the shared resolver): module top now has `ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, ENGINE_ROOT); import qrspi_paths` then `REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)`. The private `resolve_repo_root()` function was DELETED from each; `main()` now calls `qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)` directly. Module-level `REPO_ROOT` name is KEPT (it is the `build_envelope` repoRoot fallback default and `qrspi_pr_body_test.py` imports it). `qrspi_comment_reply.resolve_owner_repo(cwd=...)` is untouched (separate concern from root resolution).
+- `qrspi-batch.js` engine-root indirection (INTERIM, per design §Delta — `${CLAUDE_PLUGIN_ROOT}` carriage is sub-ticket 3): added a module-level `const ENGINE_ROOT` (precedence `process.env.CLAUDE_PLUGIN_ROOT` → `process.cwd()` → `'.'`, the last keeping deterministic engine==cwd behavior when neither is available) and a `const engineCmd = (rel) => \`${ENGINE_ROOT}/${rel}\``. `SKILL` is now `engineCmd('.claude/skills/qrspi-work/SKILL.md')`. Every script invocation goes through `engineCmd('scripts/...')`. The `${CLAUDE_PLUGIN_ROOT}`-first precedence means flipping to a plugin install in sub-ticket 3 is a one-line change.
+- `qrspi_land_verify.py` and `qrspi_order_tickets.py` and `qrspi_config.py` invocations were ALSO engine-root-prefixed (they matched the grep-audit's `scripts/qrspi_*.py` pattern), though their internal root-resolution was not part of Slice 2's swap set — prefixing is behavior-preserving regardless.
+- Prose comments in `qrspi-batch.js` still say some workers' "cwd is the MAIN repo root" / scripts "self-locate REPO_ROOT from __file__". These were left intact: they remain true today (engine==cwd) and updating the engine/host-decoupling narrative is out of this slice's literal scope (invocation + SKILL prefixing only). A future doc-alignment pass (or sub-ticket 3) should reconcile that prose with the resolver-backed self-location.
+
+---

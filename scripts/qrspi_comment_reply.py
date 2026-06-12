@@ -34,11 +34,18 @@ import os
 import subprocess
 import sys
 
-# The script lives at <repo-root>/scripts/qrspi_comment_reply.py, so the repo root is two
-# levels up. This is the FALLBACK root; resolve_repo_root() prefers the git-common-dir so
-# the script is correct whether invoked from the main checkout or a linked worktree.
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+# ENGINE_ROOT: the dir holding this engine's scripts/ (from __file__) — used ONLY for
+# sibling imports. REPO_ROOT: the HOST checkout root all host paths key off, resolved via
+# the shared qrspi_paths.resolve_repo_root() (git-common-dir first — the MAIN checkout even
+# from a worktree; __file__ parent last resort). validate=False keeps gh off the import
+# path. This collapses the script's former private git-common-dir copy onto the shared
+# resolver — behavior-preserving (ref: design.md Decision 2, §Delta).
+ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE_ROOT)
+
+import qrspi_paths  # noqa: E402
+
+REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 
 REPLY_MODE_INLINE = "inline"
 REPLY_MODE_TOPLEVEL = "toplevel"
@@ -156,16 +163,6 @@ def _run(cmd, cwd=None, stdin=None):
     return res.returncode, res.stdout, res.stderr
 
 
-def resolve_repo_root():
-    """The MAIN repo root, correct from any cwd inside the repo (including a linked
-    worktree). Mirrors qrspi_revise_amend.resolve_repo_root."""
-    rc, out, _ = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
-    common = (out or "").strip()
-    if rc == 0 and common:
-        return os.path.dirname(common)
-    return REPO_ROOT
-
-
 def resolve_owner_repo(cwd=None):
     """Derive (owner, repo) from the GitHub remote via gh, so the worker never types it.
 
@@ -213,7 +210,7 @@ def main():
                         help="Path to a file holding the reply body (avoids shell quoting)")
     args = parser.parse_args()
 
-    repo_root = resolve_repo_root()
+    repo_root = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
     worktree = os.path.join(repo_root, ".worktrees", args.ticket)
     cwd = worktree if os.path.isdir(worktree) else repo_root
 
