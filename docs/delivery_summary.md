@@ -96,6 +96,7 @@ The `.claude/skills/` directory contains the actual Claude Code skill files:
 
 ```
 .claude/skills/
+├── qrspi-feature/SKILL.md   ← front door for new feature work
 ├── qrspi-ticket/SKILL.md
 ├── qrspi-questions/SKILL.md
 ├── qrspi-research/SKILL.md
@@ -127,7 +128,7 @@ Each skill handles one QRSPI phase. Invoked via `/qrspi-<phase> <ticket-id>`.
 
 4. **This Week:**
    - Identify a medium-complexity feature
-   - Run `/qrspi-ticket` through `/qrspi-pr` on it
+   - Run `/qrspi-feature` through `/qrspi-pr` on it
    - Measure total time including debugging
 
 ### Team Adoption

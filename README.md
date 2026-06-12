@@ -37,15 +37,15 @@ Phases run sequentially. Each artifact must be reviewed before the next phase st
 
 Most workflows require only two commands:
 
-**`/qrspi-ticket <description>`** creates a new feature ticket through guided conversation. It gathers problem context, drafts a structured Linear issue, and sets up the local artifact directory. This is the starting point for any new feature.
+**`/qrspi-feature <description>`** is the front door for any new feature. It elicits requirements, then proposes a *reviewed* decomposition — one ticket vs several, a dependency DAG, and an overlap scan against in-flight tickets — and **stops for your approval before any Linear write**, so a multi-ticket split is never an unreviewed side effect. On approval it creates the ticket(s) through the shared writer, setting `blockedBy` edges and a Linear parent issue. The bias is hard toward one ticket with slices. (For a single, already-scoped ticket you want filed directly, **`/qrspi-ticket <description>`** is the direct entry — it runs the same guided interview and the same writer, without the decomposition step.)
 
 **`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It reads the ticket's **PR review state** (not Linear status), determines the current phase, and executes the appropriate action — design, plan, implementation, advance, reset, or land — without manual phase-by-phase invocation. Use this to drive a ticket from `Selected` through to a landed stack.
 
 ```
-# Start a new feature
-/qrspi-ticket Add webhook support for deployment notifications
+# Start a new feature (decompose + review gate + create tickets)
+/qrspi-feature Add webhook support for deployment notifications
 
-# After the ticket is created (e.g., RUS-42), drive it forward
+# After the ticket(s) are created (e.g., RUS-42), drive forward
 /qrspi-work RUS-42
 ```
 

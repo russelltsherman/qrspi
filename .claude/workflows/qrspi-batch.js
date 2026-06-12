@@ -75,6 +75,35 @@ const ENGINE_ROOT =
 // rather than assuming the engine is its cwd.
 const engineCmd = (rel) => `${ENGINE_ROOT}/${rel}`
 
+// engineCmdFor(r, rel) — engine path for prompts that run in a WORKER cwd (a worktree),
+// where engineCmd's `.` fallback is WRONG. ENGINE_ROOT resolves to the RUNNER's cwd (the
+// main checkout) — or to a bare `.` when the sandbox does not expose process.cwd(). A `.`
+// re-resolves against the *worker's* cwd, not the runner's: a finalize/submit/revise worker
+// runs "in <worktree>", so `./scripts/...` looks inside the worktree. That misses whenever a
+// ticket's branch has RELOCATED the engine scripts (RUS-62 git-mv's scripts/ → plugin/scripts/
+// in its own HEAD), producing the "No such file or directory" hard stop.
+//
+// The anchor must be ABSOLUTE and reliably present. `r.repoRoot` is NOT reliable: it rides the
+// weak resolve worker's verbatim-stdout echo and — unlike worktreeDir/decision, which
+// parseResolveEnvelope VALIDATES — is silently dropped when the worker reshapes its output,
+// leaving engineRootFor to fall back to the broken `.`. `r.worktreeDir` IS reliable: the parser
+// REQUIRES it to be `<absolute-root>/.worktrees/<ticketId>`, so stripping that suffix yields the
+// MAIN checkout root deterministically (the engine scripts live at <root>/scripts/ on trunk,
+// present regardless of what a worktree's HEAD moved). Precedence: CLAUDE_PLUGIN_ROOT (the
+// future plugin install, mirroring ENGINE_ROOT's first precedence) → host root derived from
+// worktreeDir → ENGINE_ROOT.
+const hostRootFromWorktree = (r) => {
+  const wd = r && r.worktreeDir
+  if (typeof wd !== 'string') return null
+  const m = wd.match(/^(.*)\/\.worktrees\/[^/]+$/)
+  return m ? m[1] : null
+}
+const engineRootFor = (r) =>
+  (typeof process !== 'undefined' && process.env && process.env.CLAUDE_PLUGIN_ROOT) ||
+  hostRootFromWorktree(r) ||
+  ENGINE_ROOT
+const engineCmdFor = (r, rel) => `${engineRootFor(r)}/${rel}`
+
 const SKILL = engineCmd('.claude/skills/qrspi-work/SKILL.md')
 
 // --- args ------------------------------------------------------------------
@@ -719,7 +748,7 @@ REPO_ROOT = ${wd}`,
     `You are the implementation finalize worker for ${t.id}, in ${wd}. Follow the SKILL "advance → implementation" submit steps. PR bodies are authored at Graphite CREATION via the commit message — there is NO \`gh pr edit\` step (\`gt submit\` has no body flag and seeds the body from the commit message at creation only; this is a gt/commit-message constraint, not a permission wall). Do:
 1. Amend pr-summary.md into the last slice commit as the durable artifact (git add .qrspi/${t.id}/pr-summary.md && gt modify --no-interactive).
 2. Splice pr-summary.md into the SLICE-1 commit MESSAGE (so the slice-1 PR body is the full summary at creation), BEFORE submitting, by running EXACTLY this one self-locating command verbatim — no path edits, no alternatives:
-     python3 ${engineCmd('scripts/qrspi_pr_body.py')} --ticket ${t.id} --slice 1
+     python3 ${engineCmdFor(r, 'scripts/qrspi_pr_body.py')} --ticket ${t.id} --slice 1
    It preserves the slice-1 subject+trailer, splices the summary in between, amends via \`gt modify\` (auto-restacking the slices above), and prints JSON { ok, branch, subject, bytes, error? }. If it prints ok:false, return ok:false — HARD STOP, do NOT fall back to gh pr edit or any gt body flag.
 3. Submit the entire stack PUBLISHED with Graphite (bodies already live in the commit messages, so --no-edit keeps them; slices 2..N carry their focused "Part N/total" body): \`gt submit --publish --stack${reviewerFlags(r)} --no-edit --no-interactive\`${reviewerFlags(r) ? ' (submit the reviewer flag EXACTLY as written — it surfaces the PRs in the reviewer\'s Graphite queue)' : ''}. Do NOT run gh pr edit.
 4. BEST-EFFORT project Linear → "Code Review" (WARN on failure).
@@ -736,7 +765,7 @@ async function doSubmit(t, r) {
   phase('Finalize')
 
   const fin = await agent(
-    `You are the submit worker for ${t.id} (active phase: ${r.decision.phase}), in ${r.worktreeDir}. Follow the "action: submit" steps of ${SKILL}: the phase branch exists but its PR was not opened. Verify the phase's artifacts are present+non-empty (if any are missing AND cannot be produced, return ok:false — never fabricate). This path CREATES the PR, and PR bodies are authored at Graphite creation via the commit message (there is NO gh pr edit — \`gt submit\` has no body flag and seeds the body at creation only; a gt/commit-message constraint, not a permission wall). If the active phase is IMPLEMENTATION, FIRST splice pr-summary.md into the slice-1 commit message by running EXACTLY, verbatim: \`python3 ${engineCmd('scripts/qrspi_pr_body.py')} --ticket ${t.id} --slice 1\` (if it prints ok:false, return ok:false — HARD STOP). Then submit the PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)} --no-edit --no-interactive\` (add --stack for implementation)${reviewerFlags(r) ? ' — submit the reviewer flag EXACTLY as written, it surfaces the PR in the reviewer\'s Graphite queue' : ''} and BEST-EFFORT project the matching Linear review status. Do NOT run gh pr edit.
+    `You are the submit worker for ${t.id} (active phase: ${r.decision.phase}), in ${r.worktreeDir}. Follow the "action: submit" steps of ${SKILL}: the phase branch exists but its PR was not opened. Verify the phase's artifacts are present+non-empty (if any are missing AND cannot be produced, return ok:false — never fabricate). This path CREATES the PR, and PR bodies are authored at Graphite creation via the commit message (there is NO gh pr edit — \`gt submit\` has no body flag and seeds the body at creation only; a gt/commit-message constraint, not a permission wall). If the active phase is IMPLEMENTATION, FIRST splice pr-summary.md into the slice-1 commit message by running EXACTLY, verbatim: \`python3 ${engineCmdFor(r, 'scripts/qrspi_pr_body.py')} --ticket ${t.id} --slice 1\` (if it prints ok:false, return ok:false — HARD STOP). Then submit the PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)} --no-edit --no-interactive\` (add --stack for implementation)${reviewerFlags(r) ? ' — submit the reviewer flag EXACTLY as written, it surfaces the PR in the reviewer\'s Graphite queue' : ''} and BEST-EFFORT project the matching Linear review status. Do NOT run gh pr edit.
 Return: ok, prUrl, newStatus, summary.`,
     { label: `submit:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
@@ -830,7 +859,7 @@ Steps:
 2. Read the change request: the CHANGES_REQUESTED review SUMMARY body AND any unresolved thread comments not already addressed (READ-only queries per the SKILL).
 3. If there is remaining feedback to act on, address it by editing the phase's artifacts/code in ${r.worktreeDir}. If the prior per-comment step already applied every needed change and NOTHING further remains, do NOT invent an edit — skip straight to step 5 (re-request review).
 4. When you made edits, stage them AND amend the phase commit IN PLACE by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives) — for design/plan run it once; for implementation run it once per CHANGES_REQUESTED slice branch, lowest slice number first:
-   \`python3 ${engineCmd('scripts/qrspi_revise_amend.py')} --ticket ${t.id} --branch <BRANCH>\` where <BRANCH> = \`${t.id}/${d.phase}\` for design/plan, or \`${t.id}/slice-<N>\` for an implementation slice.
+   \`python3 ${engineCmdFor(r, 'scripts/qrspi_revise_amend.py')} --ticket ${t.id} --branch <BRANCH>\` where <BRANCH> = \`${t.id}/${d.phase}\` for design/plan, or \`${t.id}/slice-<N>\` for an implementation slice.
    The script checks out the branch, stages every edit you made (excluding caches), amends the commit with \`gt modify\` keeping its EXACT subject+trailers (it does NOT rename the subject), and VERIFIES the amend captured your changes — it FAILS if nothing was staged or the tree is left dirty. It prints JSON { ok, branch, oldOid, newOid, dirty, error? }. If ANY invocation prints ok:false, return ok:false — HARD STOP; do NOT hand-run \`gt modify\`/\`git add\`/\`git commit\`/\`git reset\` to work around it. Never run a bare \`gt modify --no-interactive\` here: without staging it amends an empty index and silently drops your edits. (If step 3 determined nothing further needs changing, SKIP this step entirely — do not run the amend script with no staged edits.)
 5. Re-request review so the stale CHANGES_REQUESTED is cleared (ALWAYS do this, whether or not you amended in step 4): \`gt submit --publish --no-edit --rerequest-review${reviewerFlags(r)}${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`. Do NOT run \`gh pr edit\`.
 6. BEST-EFFORT keep Linear in the current review status (a failed Linear write is a WARN, still return ok:true if review was re-requested).
@@ -894,13 +923,13 @@ Steps (do EXACTLY these; no extra git/gh mutations beyond the two self-locating 
 2. Decide your response to the comment, choosing exactly ONE:
    (a) ANSWER — the comment is a question or concern you can address from the real state. Write a faithful answer.
    (b) APPLY — the comment requests a concrete, sound change WITHIN the ${d.phase} phase only (never edit a downstream phase — that is reset/revise, not this). Make the edit in ${r.worktreeDir}, then stage+amend the phase commit IN PLACE by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives):
-         python3 ${engineCmd('scripts/qrspi_revise_amend.py')} --ticket ${t.id} --branch ${d.phase === 'implementation' ? '<the affected slice branch, e.g. ' + t.id + '/slice-<N>>' : `${t.id}/${d.phase}`}
+         python3 ${engineCmdFor(r, 'scripts/qrspi_revise_amend.py')} --ticket ${t.id} --branch ${d.phase === 'implementation' ? '<the affected slice branch, e.g. ' + t.id + '/slice-<N>>' : `${t.id}/${d.phase}`}
        It checks out the branch, stages your edits (excluding caches), amends with \`gt modify\` keeping the EXACT subject+trailers, and VERIFIES the amend captured a real change (it FAILS if nothing was staged or the tree is left dirty), printing JSON { ok, branch, oldOid, newOid, dirty, error? }. If it prints ok:false, do NOT hand-run git/gt to work around it — fall back to ANSWER or DECLINE and say so honestly. After a successful amend, re-publish the (re)stacked branch so the PR reflects the change: \`gt submit --publish --no-edit${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`${reviewerFlags(r) ? ' ' + reviewerFlags(r).trim() : ''}.
    (c) DECLINE — the suggestion is wrong, out of scope, or unsound. Give a concrete, respectful rationale grounded in the actual state.
 3. Write your in-thread reply text — your answer/what-you-applied/your-decline-rationale, and NOTHING duplicated into artifacts or the impl-log (the reply is the only place the rationale lives). Use the Write tool to write it verbatim to this token-free file:
      ${bodyFile}
 4. Post the reply by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives), choosing --reply-mode = the comment's threadType (${ct.threadType}):
-     python3 ${engineCmd('scripts/qrspi_comment_reply.py')} --ticket ${t.id} --pr <PR_NUMBER> --comment-id ${ct.commentId} --reply-mode ${ct.threadType} --body-file ${bodyFile}
+     python3 ${engineCmdFor(r, 'scripts/qrspi_comment_reply.py')} --ticket ${t.id} --pr <PR_NUMBER> --comment-id ${ct.commentId} --reply-mode ${ct.threadType} --body-file ${bodyFile}
    It self-locates owner/repo and prints a ReplyEnvelope JSON { ok, replyId, inReplyToId, error? }. Read ok off its STDOUT (do NOT infer success from exit code alone). If it prints ok:false, return ok:false with the verbatim error — do NOT retry or improvise an alternative mutation (a genuine write failure here means the comment reply cannot be relied on; report it honestly so the wait sink stays correct).
 Return: ok (true only if the reply posted), applied (true ONLY if you chose APPLY and the amend+publish succeeded), prUrl (the PR url if known, else ""), summary (1-2 sentences naming the comment and how you engaged it).`,
       { label: `respond-comment:${t.id}#${i}`, phase: 'Finalize', schema: COMMENT_REPLY_SCHEMA }

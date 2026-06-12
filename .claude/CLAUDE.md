@@ -17,9 +17,11 @@ you to approve it, then you authenticate (OAuth) into **your** Linear workspace 
 one holding your QRSPI team/project. That OAuth/workspace selection is the only
 per-user step; the repo stays portable.
 
-`/qrspi-ticket` files new issues under the team/project from `.qrspi/config.json`
-(`linearTeam` / `linearProject`, default project `QRSPI`; see `.qrspi/config.example.json`).
-If `linearTeam` is unset it discovers/asks. No team name is hard-coded in the harness.
+`/qrspi-feature` (the front door) and `/qrspi-ticket` (direct single-ticket entry) both
+materialize issues through the **same shared writer** (`.claude/skills/qrspi-ticket/references/writer.md`),
+which files under the team/project from `.qrspi/config.json` (`linearTeam` / `linearProject`,
+default project `QRSPI`; see `.qrspi/config.example.json`). If `linearTeam` is unset it
+discovers/asks. No team name is hard-coded in the harness.
 
 `linearProject` scopes **both** ticket creation **and** `qrspi-batch` runs: by default the
 batch Query phase sweeps only the mapped project's assigned tickets (precedence
@@ -77,7 +79,14 @@ Selected (assigned)
 
 ### Available skills (invoke with / or let Claude auto-invoke)
 
-- `/qrspi-ticket <initial description>` — Create a Linear issue through guided conversation
+- `/qrspi-feature <feature description>` — **The front door for new feature work.** Elicits
+  requirements, proposes a *reviewed* ticket decomposition (one ticket vs N, a dependency DAG, and
+  an overlap scan against in-flight tickets), gates on human approval **before any Linear write**,
+  then creates the ticket(s) via the shared writer with `blockedBy` edges under a Linear parent
+  issue. Bias is hard toward one ticket with slices. Use this whenever a feature has no ticket yet.
+- `/qrspi-ticket <initial description>` — Direct single-ticket entry: draft and file **one**
+  already-scoped ticket through a guided interview (and the shared writer `qrspi-feature` reuses).
+  For a whole feature that might split or carry dependencies, use `/qrspi-feature` instead.
 - `/qrspi-questions <ticket-id>` — Generate technical questions from a ticket (fetched from Linear)
 - `/qrspi-research <ticket-id>` — Map the codebase (ticket is hidden from this phase)
 - `/qrspi-design <ticket-id>` — Produce a design document (ticket fetched from Linear)

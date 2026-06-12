@@ -84,7 +84,14 @@ QRSPI:
 
 In day-to-day use you don't drive the phases by hand. Two commands cover almost everything:
 
-1. **`/qrspi-ticket <brief description>`** — author a Linear ticket through guided conversation.
+1. **`/qrspi-feature <brief description>`** — the **front door** for new feature work. It elicits
+   requirements, then proposes a *reviewed* ticket decomposition (one ticket vs. several, a
+   dependency DAG, and an overlap scan against in-flight tickets) and **stops for your approval
+   before any Linear write**, then files the ticket(s) — wiring `blockedBy` edges and a Linear
+   parent issue for a multi-ticket feature. It biases hard toward one ticket with slices. (For a
+   single, already-scoped piece of work you want filed as one ticket, **`/qrspi-ticket <brief
+   description>`** is the direct single-ticket entry — same interview and shared writer, without
+   the decomposition/approval gate.)
 2. **`/qrspi-work <ticket-id>`** — the autonomous orchestrator. It reads the ticket's **PR review
    state** (not its Linear status), figures out which action is next, and runs it. Call it
    repeatedly to push the ticket forward; it advances automatically when a phase PR is approved
@@ -124,13 +131,20 @@ Plan PR on branch `<id>/plan`, stacked on top of design. Each phase is its own b
 PR — there is no single combined planning branch. The whole stack is held open (nothing merges to
 trunk) until every PR is approved, then landed bottom-up.
 
-### Step 1: Draft Your Ticket
+### Step 1: Draft Your Feature (or a single ticket)
 
-Run `/qrspi-ticket <brief description>` and work with the agent conversationally until a
-**Linear issue** is created in your Linear team, QRSPI project. The agent assigns the
-Linear ID (e.g., `RUS-42`) — there is no local `ticket.md`. The ticket holds the problem
-statement; QRSPI artifacts are stored locally under `.qrspi/<ticket-id>/`, while Linear holds
-only status and phase-transition comments.
+A new feature starts at the front door: run `/qrspi-feature <brief description>` and work with the
+agent conversationally. It elicits requirements, proposes a *reviewed* decomposition (one ticket
+vs. several, plus a dependency DAG and an overlap scan against in-flight work) and **stops for your
+approval before writing anything to Linear**, then files the resulting ticket(s) — so a single
+feature may produce one **Linear issue** or several (linked by `blockedBy` edges under a parent
+issue). It biases toward one ticket with slices. If the work is already a single, well-scoped
+ticket you just want filed as one, `/qrspi-ticket <brief description>` is the direct single-ticket
+path (same interview and writer, without the decomposition/approval gate).
+
+Either way the agent assigns the Linear ID (e.g., `RUS-42`) — there is no local `ticket.md`. The
+ticket holds the problem statement; QRSPI artifacts are stored locally under `.qrspi/<ticket-id>/`,
+while Linear holds only status and phase-transition comments.
 
 ### Step 2: Identify Your Feature
 
@@ -178,8 +192,8 @@ tests plus a manual end-to-end run.
 Let `/qrspi-work` resolve PR state and run the next action for you:
 
 ```txt
-1. Run /qrspi-ticket <brief description> to author the Linear ticket; assign it and move
-   it to Selected (this is the entry gate)
+1. Run /qrspi-feature <brief description> (the front door) to elicit + review a decomposition
+   and author the Linear ticket(s); assign and move to Selected (this is the entry gate)
 2. Run /qrspi-work <ticket-id> — it runs the design phase, opens the Design PR
    (<id>/design), and reports Design Review in Linear
 3. Review and APPROVE the Design PR on GitHub
@@ -1398,7 +1412,8 @@ QRSPI is slower upfront to be faster overall.
 ### The 30-Second Version
 
 ```txt
-0. /qrspi-ticket <description>   → author the Linear ticket; assign it + move to Selected
+0. /qrspi-feature <description>  → elicit + reviewed decomposition + create ticket(s);
+                                    assign + move to Selected
 1. /qrspi-work <ticket-id>       → runs the design phase (Q-R-D), opens the Design PR
                                     (<id>/design), reports Design Review
 2. Approve the Design PR on GitHub

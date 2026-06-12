@@ -13,12 +13,12 @@ QRSPI offers an autonomous path and a manual path. Most work uses the autonomous
 - **`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It reads the ticket's **PR review state** (not Linear status), determines the current phase, runs the matching phase agents, commits artifacts, submits stacked PRs, and projects the active phase back to Linear best-effort. Each invocation does exactly one PR-gated step. Use this to drive a ticket from `Selected` through to a landed stack.
 - **Individual phase skills** (`/qrspi-questions`, `/qrspi-research`, etc.) exist primarily for the orchestrator's internal use, but are available when you need to re-run a single phase or work step-by-step. The per-phase sections below document each one.
 
-A ticket starts with `/qrspi-ticket <description>`, which creates a Linear issue through guided conversation. From there, `/qrspi-work <ticket-id>` advances it.
+A feature starts with `/qrspi-feature <description>` — the front door. It elicits requirements, proposes a *reviewed* ticket decomposition (one ticket vs several, a dependency DAG, an overlap scan against in-flight work), and gates on your approval before any Linear write, then creates the ticket(s). For a single, already-scoped ticket you want filed directly, `/qrspi-ticket <description>` is the direct entry (same interview and writer, no decomposition). From there, `/qrspi-work <ticket-id>` advances each ticket.
 
 ```
-# Start a new feature
-/qrspi-ticket "Add webhook support for deployment notifications"
-# → converse until the Linear issue is created (e.g., RUS-42)
+# Start a new feature (decompose + review gate + create tickets)
+/qrspi-feature "Add webhook support for deployment notifications"
+# → answer a few questions, approve the decomposition; tickets are created (e.g., RUS-42)
 
 # Drive it forward through the lifecycle
 /qrspi-work RUS-42

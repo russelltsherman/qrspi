@@ -124,8 +124,9 @@ Step-by-step instructions for installing and running QRSPI using Claude Code age
 4. **Setup:** Claude Code Implementation Guide (~30 min)
    - Goal: Install the phase agents, skill wrappers, and CLAUDE.md in your project
 
-5. **Do:** Create a ticket for your next feature
-   - Command: `/qrspi-ticket <brief description>` — drafts a Linear issue through guided conversation
+5. **Do:** Turn your next feature into ticket(s)
+   - Command: `/qrspi-feature <brief description>` — the front door for new feature work: it elicits requirements, proposes a *reviewed* ticket decomposition (one ticket vs. several, a dependency DAG, and an overlap scan against in-flight tickets), and **stops for your approval before any Linear write**, then files the ticket(s) via the shared writer
+   - For a single, already-scoped ticket: `/qrspi-ticket <brief description>` — files ONE ticket through the same guided interview and shared writer, without the decomposition/approval gate
 
 6. **Continue:** Drive the ticket forward
    - Command: `/qrspi-work <ticket-id>` — reads the ticket's PR review state, runs the matching phase, and auto-advances when the active phase PR is approved; it waits at any PR still in review
@@ -224,7 +225,8 @@ The whole stack is **held open** until every PR is approved, then **landed botto
 
 ## How It Runs
 
-- **`/qrspi-ticket <description>`** creates a new Linear ticket through guided conversation.
+- **`/qrspi-feature <description>`** is the **front door** for new feature work. It elicits requirements, proposes a *reviewed* ticket decomposition (one ticket vs. several, a dependency DAG, and an overlap scan against in-flight tickets) with a hard bias toward one ticket with slices, and **stops for human approval before any Linear write** — then creates the ticket(s) via the shared writer, setting `blockedBy` edges and a Linear parent issue for multi-ticket features.
+- **`/qrspi-ticket <description>`** is the **direct single-ticket entry**: it drafts and files ONE already-scoped ticket through the same guided interview and the same shared writer, *without* the decomposition/approval gate. (For a whole feature that might split or carry dependencies, use `/qrspi-feature`.)
 - **`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It gathers the ticket's PR review state, resolves the next action with the tested resolver (`scripts/qrspi_resolve_state.py`), and executes it — design, plan, implementation, advance, reset, or land. It auto-advances when a phase PR is approved and clean, waits while a PR is still in review, and never decides advancement from Linear status.
 - Each phase's logic lives in a purpose-built agent at `.claude/agents/qrspi-<phase>.md` with per-phase tool lockdowns; the orchestrator spawns them by `subagent_type`. Slash-command wrappers live at `.claude/skills/qrspi-<phase>/SKILL.md`.
 - **`qrspi-batch`** (`.claude/workflows/qrspi-batch.js`) drives many assigned tickets one PR-gated step forward by resolving each ticket's PR state and spawning the typed phase agents. It runs the autonomously-runnable actions (run_design, advance, submit, land, and automatic reset/discard) and deliberately leaves manual revise and not-yet-approved (wait) tickets untouched.

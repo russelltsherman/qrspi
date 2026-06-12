@@ -24,8 +24,10 @@ your-project/
 │   │   ├── qrspi-implement.md
 │   │   └── qrspi-pr.md
 │   ├── skills/                            # Slash-command wrappers (thin) + orchestrator + ticket creation
+│   │   ├── qrspi-feature/
+│   │   │   └── SKILL.md                   # /qrspi-feature — front door: elicit→decompose→gate→create tickets
 │   │   ├── qrspi-ticket/
-│   │   │   └── SKILL.md                   # /qrspi-ticket — guided Linear ticket creation
+│   │   │   └── SKILL.md                   # /qrspi-ticket — direct single-ticket entry (shared writer)
 │   │   ├── qrspi-questions/
 │   │   │   └── SKILL.md                   # /qrspi-questions
 │   │   ├── qrspi-research/
@@ -81,7 +83,7 @@ Create the scaffolding:
 
 ```bash
 mkdir -p .claude/agents
-mkdir -p .claude/skills/{qrspi-ticket,qrspi-questions,qrspi-research,qrspi-design,qrspi-structure,qrspi-plan,qrspi-worktree,qrspi-implement,qrspi-pr,qrspi-work}
+mkdir -p .claude/skills/{qrspi-feature,qrspi-ticket,qrspi-questions,qrspi-research,qrspi-design,qrspi-structure,qrspi-plan,qrspi-worktree,qrspi-implement,qrspi-pr,qrspi-work}
 mkdir -p .claude/workflows
 mkdir -p .qrspi/templates
 ```
@@ -135,7 +137,8 @@ is approved, then landed bottom-up:
 
 ### Available skills (invoke with / or let Claude auto-invoke)
 
-- `/qrspi-ticket <description>` — Create a Linear issue through guided conversation
+- `/qrspi-feature <description>` — Front door for new feature work: elicits requirements, proposes a reviewed ticket decomposition (one ticket vs several + dependency DAG + overlap scan), stops for approval before any Linear write, then creates ticket(s) via the shared writer
+- `/qrspi-ticket <description>` — Direct single-ticket entry: drafts/files one already-scoped Linear issue via the same interview + shared writer (no decomposition/gate)
 - `/qrspi-work <ticket-id>` — Autonomous orchestrator: reads PR review state, runs the matching action
 - `/qrspi-questions <ticket-id>` — Generate technical questions from a ticket (fetched from Linear)
 - `/qrspi-research <ticket-id>` — Map the codebase (ticket is hidden from this phase)
@@ -168,10 +171,11 @@ QRSPI's phase logic lives in two layers:
 - **Agents** (`.claude/agents/qrspi-<phase>.md`) hold the heavy phase logic and a per-phase tool lockdown. The orchestrator spawns them via the `Agent` tool with `subagent_type: qrspi-<phase>` and a structured input contract — it never reads the phase SKILL.md files or hand-engineers prompts. This is the agent-vs-skill split: the substance is in agents; skills are thin wrappers.
 - **Skills** (`.claude/skills/qrspi-<phase>/SKILL.md`) are the slash-command wrappers (`/qrspi-questions`, etc.) that let a human invoke a single phase directly. They exist primarily for the orchestrator's surface area and for manual re-runs.
 
-Two skills are not phase wrappers:
+Three skills are not phase wrappers:
 
 - `.claude/skills/qrspi-work/SKILL.md` is the autonomous **orchestrator** — it resolves the next action from the ticket's PR review state (see §5).
-- `.claude/skills/qrspi-ticket/SKILL.md` creates a new Linear ticket through guided conversation.
+- `.claude/skills/qrspi-feature/SKILL.md` is the **front door** for new feature work — it elicits requirements, proposes a *reviewed* ticket decomposition (one ticket vs several, a dependency DAG, an overlap scan against in-flight tickets), **stops for approval before any Linear write**, then creates ticket(s) via the shared writer (with `blockedBy` edges and a Linear parent issue).
+- `.claude/skills/qrspi-ticket/SKILL.md` is the **direct single-ticket entry** — it drafts and files one already-scoped Linear ticket through the same guided interview and the same shared writer, without the decomposition/gate.
 
 ### Per-phase tool lockdowns (firewalls)
 
@@ -190,7 +194,7 @@ Author each agent and skill from the canonical templates in `.qrspi/templates/`.
 
 | Phase | Artifact | What it does |
 |-------|----------|--------------|
-| **Ticket** | Linear issue | Defines the problem, goals, acceptance criteria. No solutions. Created with `/qrspi-ticket`. |
+| **Ticket** | Linear issue | Defines the problem, goals, acceptance criteria. No solutions. Created via `/qrspi-feature` (front door — decomposes + gates) or `/qrspi-ticket` (direct single-ticket entry). |
 | **Questions** | `questions.md` | 8–15 targeted technical questions derived from the ticket. |
 | **Research** | `research.md` | Answers the questions by reading the codebase. Ticket hidden to prevent anchoring. |
 | **Design** | `design.md` | Pattern decisions, risk register, delta, open questions. |
@@ -258,6 +262,8 @@ Key mechanics the orchestrator handles:
 ---
 
 ## 7. Running a Single Ticket
+
+For **new feature work**, the front door is `/qrspi-feature <description>` — it elicits requirements, proposes a reviewed decomposition, and may create *several* tickets (with dependency edges and a parent issue). The `/qrspi-ticket` path shown below is the **direct single-ticket entry**, for work you've already scoped to one ticket.
 
 ### Step 0 — Create the ticket (Linear)
 
@@ -366,7 +372,7 @@ For substantial design redirects, the cleanest path is a `CHANGES_REQUESTED` on 
 
 ### Configure Linear
 
-Tickets live in Linear. The harness references the Linear MCP server by the fixed name `linear` (its binding is committed in `.mcp.json`; authenticate it to your workspace on first use), and `/qrspi-ticket` reads the team/project from `.qrspi/config.json` (`linearTeam`/`linearProject`; see `.qrspi/config.example.json`) so it files issues in the right place. Linear is **not** the state machine — it is an entry gate plus a best-effort reporting projection — so only the reporting statuses need to exist in your Linear team: `Selected`, `Design Review`, `Plan Review`, `Code Review`, `Done`. (The `*Approved` statuses were dropped; approval lives in the PR.) You also need GitHub PRs reachable via the `gh` CLI, since PR review state is the authority.
+Tickets live in Linear. The harness references the Linear MCP server by the fixed name `linear` (its binding is committed in `.mcp.json`; authenticate it to your workspace on first use), and the ticket-creation skills (`/qrspi-feature` and `/qrspi-ticket`, which share the same writer) read the team/project from `.qrspi/config.json` (`linearTeam`/`linearProject`; see `.qrspi/config.example.json`) so they file issues in the right place. Linear is **not** the state machine — it is an entry gate plus a best-effort reporting projection — so only the reporting statuses need to exist in your Linear team: `Selected`, `Design Review`, `Plan Review`, `Code Review`, `Done`. (The `*Approved` statuses were dropped; approval lives in the PR.) You also need GitHub PRs reachable via the `gh` CLI, since PR review state is the authority.
 
 ### Customize test commands
 

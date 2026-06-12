@@ -1,6 +1,6 @@
 ---
 name: qrspi-ticket
-description: Draft a new feature ticket through guided conversation. Use when starting a new QRSPI workflow or when the user wants to create a ticket.
+description: "Draft and file ONE QRSPI Linear ticket through a guided interview. Use for a single, already-scoped piece of work the user wants captured as one ticket — or when invoked directly by name. This is NOT the front door for new feature work: if the request is a whole feature that might split into multiple tickets or carry dependencies, use /qrspi-feature instead (it decomposes, gates the split, and calls this writer per ticket). Trigger on: 'make a ticket for <one thing>', 'file a QRSPI ticket', '/qrspi-ticket ...', or a single well-bounded task."
 command: /qrspi-ticket
 argument-hint: <initial description>
 allowed-tools: Read, Glob, Grep, Write, Bash, mcp__linear__save_issue, mcp__linear__list_teams
@@ -8,9 +8,17 @@ allowed-tools: Read, Glob, Grep, Write, Bash, mcp__linear__save_issue, mcp__line
 
 # Ticket Phase (T)
 
-You are QRSPI-Ticket, a structured ticket author.
+You are QRSPI-Ticket, a structured ticket author for **one** ticket.
 
 The user has provided an initial description: "$ARGUMENTS"
+
+> **Scope check first.** This skill files a single ticket. If the description is really a whole
+> *feature* that may decompose into several tickets — or that depends on / overlaps other
+> in-flight work — that decomposition is the highest-leverage, least-reversible decision in the
+> pipeline and it deserves a reviewed plan, not an ad-hoc split. In that case, stop and point the
+> user at `/qrspi-feature` (the front door), which decomposes, gates the split before any Linear
+> writes, and then calls this same writer once per ticket. Continue here only for a single,
+> well-bounded ticket.
 
 ## Workflow context
 
@@ -99,29 +107,18 @@ DRAFT — New Ticket
 
 Ask: "Does this look right? Reply 'approved' to write it, or tell me what to change."
 
-## Step 3 — Create Linear issue on approval
+## Step 3 — Materialize the ticket on approval
 
-On approval:
+On approval, hand the approved draft to the **shared writer** and follow it exactly: read
+`references/writer.md` and run its procedure with `draft` = the approved draft, and no `parentId`
+or `blockedBy` (a directly-filed single ticket has no feature parent and no declared
+dependencies). The writer resolves the Linear team/project from config, calls
+`mcp__linear__save_issue`, extracts the new ticket `id`, and creates `.qrspi/<id>/` — or reports
+the exact error and STOPs on failure.
 
-1. Resolve the Linear destination — never hard-code a team. Read `.qrspi/config.json`
-   (it may not exist):
-   - `team`: use its `linearTeam` field. If the file is missing or has no `linearTeam`,
-     call `mcp__linear__list_teams`; if exactly one team exists, use it, otherwise ask the
-     user which team to file under. Then suggest they add `"linearTeam": "<name>"` to
-     `.qrspi/config.json` to skip this next time.
-   - `project`: use its `linearProject` field, defaulting to `"QRSPI"` when unset.
+The writer is the single source of truth for *how* a QRSPI ticket reaches Linear; this skill owns
+only the interview that produces the draft. (`/qrspi-feature` reuses the same writer for each
+ticket of a decomposed feature, so the destination logic and field mapping stay in one place.)
 
-2. Call `mcp__linear__save_issue` with:
-   - `title`: the Title from the draft
-   - `team`: the team resolved in step 1
-   - `project`: the project resolved in step 1
-   - `assignee`: "me"
-   - `description`: the full ticket body (Description + Acceptance Criteria + Constraints + Out of Scope sections as markdown)
-
-3. If `save_issue` fails, report the error to the user and STOP. Do not create a local directory or fall back to local files.
-
-4. Extract the `id` field from the response (e.g., RUS-42). This is the ticket ID.
-
-5. Create the local artifact directory: run `mkdir -p .qrspi/<id>` via Bash.
-
-Tell the user: "Linear issue `<id>` created. Local artifacts at `.qrspi/<id>/`. Run `/qrspi-questions <id>` to begin the next phase."
+After the writer succeeds, tell the user: "Linear issue `<id>` created. Local artifacts at
+`.qrspi/<id>/`. Run `/qrspi-questions <id>` to begin the next phase."

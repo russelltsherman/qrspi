@@ -182,8 +182,15 @@ approval lives in the PR.
   SKILL.md
 .claude/skills/qrspi-work/          /qrspi-work — autonomous orchestrator. Resolves
   SKILL.md                          PR review state into an action and dispatches it.
-.claude/skills/qrspi-ticket/        /qrspi-ticket — creates a Linear ticket via
-  SKILL.md                          guided conversation.
+.claude/skills/qrspi-feature/       /qrspi-feature — THE front door for new
+  SKILL.md                          feature work. Elicits requirements, proposes a
+                                    REVIEWED decomposition (one ticket vs several +
+                                    dependency DAG + overlap scan), STOPS for human
+                                    approval, then files the ticket(s) via the shared
+                                    writer with blockedBy edges + a Linear parent.
+.claude/skills/qrspi-ticket/        /qrspi-ticket — direct single-ticket entry:
+  SKILL.md                          files ONE already-scoped ticket via the same
+                                    interview + shared writer, no decomposition/gate.
 .claude/workflows/qrspi-batch.js    Batch driver — pushes MANY assigned tickets one
                                     PR-gated step forward (autonomous actions only).
 scripts/qrspi_resolve_state.py      Tested resolver — computes the action from PR state.
@@ -314,7 +321,11 @@ CODE REVIEW:
 ## Quick Commands
 
 ```bash
-# Create a Linear ticket (Phase 0) via guided conversation
+# Phase 0 front door — elicit, propose a REVIEWED decomposition (one ticket vs
+# several + dependency DAG + overlap scan), gate on approval, then file ticket(s)
+/qrspi-feature <description>
+
+# Direct single-ticket entry — file ONE already-scoped ticket, no decomposition/gate
 /qrspi-ticket <brief description>
 
 # Autonomous orchestrator — resolves PR review state, runs the matching action

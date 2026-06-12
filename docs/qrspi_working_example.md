@@ -38,13 +38,13 @@ Each phase lives on its **own** branch (`RUS-42/design`, `RUS-42/plan`, `RUS-42/
 
 ---
 
-## Phase 0: Ticket — create the Linear issue
+## Phase 0: Feature intake — decompose & create the ticket
 
 ### What Actually Happened
 
-Engineer ran: `/qrspi-ticket We need to let users control which emails they receive`
+Engineer ran: `/qrspi-feature We need to let users control which emails they receive`
 
-The `qrspi-ticket` skill opened a guided conversation, then created a **Linear issue** in your Linear team, QRSPI project. Linear assigned the identifier `RUS-42`. The skill also created the local artifact directory `.qrspi/RUS-42/`.
+`/qrspi-feature` is the **front door** for new feature work. The skill elicited requirements through a guided conversation, then proposed a *reviewed* decomposition — one ticket vs. several, a dependency DAG, and an overlap scan against in-flight tickets — and **stopped for approval before any Linear write**. Because this feature is small and cohesive, the decomposition concluded **one ticket** (the bias-to-one-ticket default; it would still be built as vertical slices). The engineer approved the plan at the review gate, and the skill then created a single **Linear issue** in your Linear team, QRSPI project, via the shared writer. Linear assigned the identifier `RUS-42`. The skill also created the local artifact directory `.qrspi/RUS-42/`. (For a single, already-scoped ticket with no decomposition needed, `/qrspi-ticket` is the direct entry to the same writer.)
 
 ### The Conversation
 
@@ -1201,7 +1201,7 @@ After the merge, the orchestrator syncs `main` (`gt sync --force`, which prunes 
 ## Summary: Total QRSPI Time
 
 ```txt
-Phase 0 (Ticket):            15 min
+Phase 0 (Feature intake):    15 min
 Phase 1 (Questions):         20 min
 Phase 2 (Research):          45 min
 Phase 3 (Design):            40 min  ──┐
