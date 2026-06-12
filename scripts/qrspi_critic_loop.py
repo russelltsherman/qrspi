@@ -27,8 +27,10 @@ the agent runner, or git — so the whole decision is verifiable by the `_test.p
 with zero dependency on `agent()` or the JS orchestrator.
 """
 
+import argparse
 import json
 import re
+import sys
 
 
 def _coerce_verdict(obj):
@@ -109,3 +111,47 @@ def next_action(verdicts, round, max_rounds):
         return {"action": "cap_reached", "residual_findings": list(latest["findings"])}
 
     return {"action": "revise", "residual_findings": list(latest["findings"])}
+
+
+# --- thin CLI (RUS-55 Slice 3) ---------------------------------------------
+# A deterministic stdin->stdout shim so the JS orchestrator (which cannot run python in its
+# sandbox) can invoke the pure `next_action` decision via a worker, exactly like the other
+# qrspi_*.py scripts. The pure functions above are unchanged; this only exposes them.
+#
+#   printf '%s' '<json verdicts array>' | python3 qrspi_critic_loop.py --round R --max-rounds M
+#
+# Reads a JSON ARRAY of verdict dicts from stdin (each entry is run through _coerce_verdict /
+# parse_critic_verdict so a malformed entry fails closed to NOT-passed, never raising), then
+# prints `next_action(verdicts, round, max_rounds)` as JSON: { action, residual_findings }.
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Decide the critic loop's next action from stdin verdict(s) (self-contained CLI)")
+    parser.add_argument("--round", type=int, required=True,
+                        help="Current 0-based round index")
+    parser.add_argument("--max-rounds", type=int, required=True,
+                        help="Per-phase round cap (>=1)")
+    args = parser.parse_args(argv)
+
+    raw = sys.stdin.read()
+    verdicts = []
+    try:
+        parsed = json.loads(raw) if raw.strip() else []
+    except (ValueError, TypeError):
+        parsed = []
+    if isinstance(parsed, list):
+        # Coerce each element fail-closed: a dict goes through _coerce_verdict; anything else
+        # is run through the text parser (which also fails closed to NOT-passed).
+        for entry in parsed:
+            if isinstance(entry, dict):
+                verdicts.append(_coerce_verdict(entry))
+            else:
+                verdicts.append(parse_critic_verdict(entry if isinstance(entry, str) else ""))
+
+    decision = next_action(verdicts, args.round, args.max_rounds)
+    json.dump(decision, sys.stdout)
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

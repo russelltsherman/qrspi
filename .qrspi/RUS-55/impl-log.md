@@ -55,3 +55,44 @@
 - Files added: `.claude/agents/qrspi-critic.md`, `.claude/skills/qrspi-critic/SKILL.md`. NOT committed (orchestrator handles commits).
 
 ---
+
+## Session 3 — Slice 3: Wire `runCriticLoop` into `runPhase`, enable for design/plan
+
+**Timestamp:** 2026-06-12T23:05:00Z
+**Tasks completed:** T14, T15, T16, T17, T18, T19, T20a, T20b, T20c, T20, T21a, T21, T22
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/qrspi_critic_loop_test.py` → 33 passed, 0 failed (Slice 1 regression — unchanged pure functions)
+- `python3 scripts/qrspi_critic_body_test.py` → 32 passed, 0 failed (new path-A body helper)
+- `node --check .claude/workflows/qrspi-batch.js` → exit 0 (syntax OK)
+- `qrspi_critic_loop.py` CLI shim end-to-end (5 cases: converged / revise / cap_reached / empty-fail-closed / garbage-fail-closed) → all correct
+- `runCriticLoop` static control-flow harness (stubbed `agent`, REAL python decision CLI), 4 cases → all pass: (A) passing artifact ⇒ 1 critic call / 0 revise / converged / no residual (AC4); (B) fail→revise→pass ⇒ 2 critic / 1 revise / converged; (C) fail→revise→fail ⇒ cap_reached, ok:true, 2 residual findings (AC2); (D) null critic verdict ⇒ ok:false (stops ticket)
+- `qrspi_critic_body.py` on the real RUS-55 worktree: empty findings ⇒ ok:true bytes:0 (no gt invoked — converged phase never touches the commit); missing findings file ⇒ ok:false "not found"; bad `--phase` ⇒ argparse rejects
+- Call-site arity grep: questions/research/structure/worktree pass 6 positional args (criticConfig `undefined`); only design/plan pass the 7th `criticConfig` (AC1 byte-for-byte unchanged no-critic behavior)
+
+**Deviations from structure.md:**
+
+- **`runCriticLoop` signature** is `runCriticLoop(name, id, criticConfig)` — NOT `(name, id, criticConfig, ...ctx)`. The structure's §Contracts sketch reads the upstream via `art(wd, id, criticConfig.upstream)` inside the loop, which would require threading `wd`. Per structure §Unverified Assumptions ("exact `runCriticLoop` signature/context params … resolved at plan/implementation time"), I instead resolve the absolute upstream path AT THE CALL SITE in `doDesign`/`doPlan` (where `wd` is in scope) and put it on `criticConfig.upstreamPath`. So `runPhase`/`runCriticLoop` need no `wd` at all, and `runPhase`'s existing 6 params stay untouched (AC1). `criticConfig` shape is therefore `{ upstreamPath, maxRounds?, rubric? }` rather than `{ upstream, maxRounds?, rubric? }`.
+- **`runPhase` return contract preserved as boolean.** Structure/plan implied threading `residualFindings` out of `runPhase`. To keep every no-critic call site byte-for-byte unchanged (they treat the return as a boolean), `runPhase` still returns `true`/`false`; on cap-reached it writes the findings back onto the passed `criticConfig` object as `criticConfig.residualFindings`, which `doDesign`/`doPlan` read after the call. No call-site return-shape change.
+
+**Deviations from plan.md:**
+
+- **T15 body-path decision: chose PATH A** (`scripts/qrspi_critic_body.py` + `_test.py`), per plan §3.19. The design/plan finalize commit messages are bare inline subject strings built in the `agent()` prompt (no clean staged-body seam exists today), and the commit is created by a worker via `gt modify -c` / `gt create`. Path A mirrors `qrspi_pr_body.py`: residual findings → token-free staged JSON file → script appends a "## Residual critic findings" section to the phase commit message.
+- **Body splice runs INSIDE the finalize worker, between commit-create and `gt submit`** — NOT as a separate post-finalize worker. Reason: `gt submit` seeds the PR body from the commit message at CREATION ONLY (the same constraint documented for `qrspi_pr_body.py`); amending after the first submit would not update the PR body. So `criticBodyStep(...)` builds a conditional prompt fragment spliced into the design/plan finalize prompt (empty string when there are no findings ⇒ the finalize prompt is byte-for-byte unchanged for the converged/no-critic case). The worker writes the findings JSON to `/tmp/phase-stage/<id>/critic-findings-<phase>.json` and runs `qrspi_critic_body.py` before `gt submit`.
+- **Plan §3.21 named `next_action`/`qrspi_critic_loop.py` as the decision delegate but that module had NO CLI** (Slice 1 shipped pure functions only). Added a thin, additive `main()`/argparse + stdin shim to `qrspi_critic_loop.py` (`printf '%s' '<json verdicts array>' | python3 qrspi_critic_loop.py --round R --max-rounds M` → `{action, residual_findings}`). The pure `next_action`/`parse_critic_verdict`/`_coerce_verdict` functions are UNCHANGED (Slice 1 regression test still 33/33); the shim only exposes them to the JS orchestrator (which cannot run python in-sandbox) via the worker-runs-script pattern used by `qrspi_persist.py`/`qrspi_resolve.py`. The shim coerces each stdin verdict fail-closed.
+- **Manual e2e §3.30 verified by a static control-flow harness, not a live design run.** The implement-phase context has no `Agent` (subagent-spawn) tool — the critic/reviser are spawned only by the workflow RUNNER (`agent({agentType})`) — and no live Linear/git mutation is permitted here. I instead inlined the `runCriticLoop` body into a Node harness that stubs `agent()`/`log()` but calls the REAL `qrspi_critic_loop.py` decision CLI, and asserted the exact call counts and outcomes the §3.30 checkpoint requires (passing⇒1 critic/0 revise; degraded⇒critique→revise→re-critique; cap⇒success+residual). The live agent-spawn + `gt`-backed PR-body splice is exercised on the first real batch design/plan run.
+- **`LOOP_DECISION_SCHEMA` added** (not separately listed in the plan) as the StructuredOutput contract for the `criticDecision` worker that runs the python CLI — mirrors how every other worker-runs-script call (`PERSIST_SCHEMA`) is schema'd.
+
+**Notes for next session:**
+
+- Slice 3 is the final slice — feature complete. No further implementation session.
+- **Files changed/added this slice:**
+  - ⚠️ `.claude/workflows/qrspi-batch.js` — added `CRITIC_VERDICT_SCHEMA` + `LOOP_DECISION_SCHEMA`; `runCriticLoop(name,id,criticConfig)`, `criticDecision(verdicts,round,maxRounds)`, `criticBodyStep(id,phase,findings,wd)`; trailing optional `criticConfig` param on `runPhase` with a guarded `if (criticConfig)` loop between produce-success and the persist gate; `doDesign`/`doPlan` each pass a `criticConfig` ({upstreamPath, maxRounds:2}) and splice residual findings into the finalize PR body + fold a critic summary into `res.summary`.
+  - ✨ `scripts/qrspi_critic_body.py` + `scripts/qrspi_critic_body_test.py` (path A body helper, 32/32).
+  - ✨ thin CLI added to `scripts/qrspi_critic_loop.py` (additive; pure functions unchanged).
+- **Reviser identity (resolved Unverified Assumption):** the reviser is a generic agent re-prompted with the findings + both paths, instructed to rewrite `stg(id,name)` IN PLACE — NOT a distinctly-registered agent type and NOT the typed phase producer re-spawned with its full original prompt. It carries no `agentType`, so it runs as the default worker model. If a future slice wants a stronger reviser, swap in `agentType: '<phase-producer>'` at the `revise:` `agent(...)` call in `runCriticLoop`.
+- **Persist gate still authoritative:** the critic loop runs BEFORE `persistArtifact`, on the still-staged `stg(id,name)`. The reviser is instructed to write a non-empty artifact in place; if it empties it, persist's non-empty check fails and `runPhase` returns false (no `ok:true` from an emptied artifact) — AC preserved.
+- **Critic agent prompt contract (matches Slice 2's `qrspi-critic.md`):** `runCriticLoop` passes `UPSTREAM_PATH`, `ARTIFACT_PATH`, and an optional `RUBRIC` line; the critic returns `{pass, findings}` via `CRITIC_VERDICT_SCHEMA`. `maxRounds` default is 2 (OQ4), set explicitly on both design and plan criticConfigs.
+
+---
