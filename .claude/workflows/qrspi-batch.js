@@ -407,6 +407,34 @@ const PERSIST_SCHEMA = {
   },
 }
 
+// The qrspi-critic agent's verdict (Decision 2 — schema'd return, no staged file). The
+// edge-critic judges the produced artifact as a faithful DERIVATION of its upstream input
+// and replies { pass, findings }: pass:true => findings empty; pass:false => findings is a
+// non-empty list of self-contained strings, each naming a specific upstream requirement
+// the artifact dropped/contradicted/distorted. Shape matches qrspi_critic_loop.py's
+// canonical verdict ({pass, findings}); findings elements are pinned to strings here.
+const CRITIC_VERDICT_SCHEMA = {
+  type: 'object',
+  required: ['pass', 'findings'],
+  properties: {
+    pass: { type: 'boolean' },
+    findings: { type: 'array', items: { type: 'string' } },
+  },
+}
+
+// The decision returned by scripts/qrspi_critic_loop.py's CLI shim (next_action): the
+// converge/revise/cap_reached action plus any residual findings to surface into the PR body
+// on cap-reached. The JS glue (criticDecision) never re-derives this — it is the tested
+// pure module's single source of truth.
+const LOOP_DECISION_SCHEMA = {
+  type: 'object',
+  required: ['action', 'residual_findings'],
+  properties: {
+    action: { type: 'string', enum: ['converged', 'revise', 'cap_reached'] },
+    residual_findings: { type: 'array', items: { type: 'string' } },
+  },
+}
+
 // --- helpers ---------------------------------------------------------------
 
 const tpl = (wd, name) => `${wd}/.qrspi/templates/${name}`
@@ -452,10 +480,135 @@ improvise alternative commands or paths.`,
   )
 }
 
+// Edge-critic loop (RUS-55). Runs ENTIRELY inside the pre-persist staging window of
+// runPhase: it critiques the just-produced artifact at stg(id, name) against its upstream
+// input (the rubric anchor), and on a non-pass spawns a reviser that REWRITES stg(id, name)
+// in place, then re-critiques — up to the cap. The converge / continue / cap decision is
+// NOT re-derived here; it is delegated to the tested pure module scripts/qrspi_critic_loop.py
+// (single-critic per round => the verdict is passed to next_action as a one-element list,
+// OQ2). Returns { ok, residualFindings }: ok is true whenever the loop completed (converged
+// OR cap_reached — a cap-reached artifact is still finalized, with its residual findings
+// surfaced into the PR body, AC2); residualFindings is [] on converge and the last verdict's
+// findings on cap_reached. A spawn failure (critic or reviser returns null) is ok:false
+// (the loop could not run) — runPhase treats that like any other phase failure.
+//
+// criticConfig fields consumed here:
+//   upstreamPath : absolute path to the upstream artifact (rubric anchor) — resolved at the
+//                  call site where `wd` is in scope (doDesign/doPlan), so this function needs
+//                  no `wd` (ref: structure §Unverified Assumptions, deferred-ctx note).
+//   maxRounds    : cap, default 2 when omitted.
+//   rubric       : optional extra rubric text spliced into the critic prompt; omitted when absent.
+async function runCriticLoop(name, id, criticConfig) {
+  const maxRounds = criticConfig.maxRounds ?? 2
+  const upstreamPath = criticConfig.upstreamPath
+  const artifactPath = stg(id, name)
+  const rubricLine = criticConfig.rubric ? `RUBRIC = ${criticConfig.rubric}\n` : ''
+
+  for (let round = 0; round < maxRounds; round++) {
+    // One critic per round (single-critic, not parallel() — OQ2). The agent reads both
+    // paths itself and returns the schema'd { pass, findings } verdict.
+    const verdict = await agent(
+      `You are the qrspi-critic for ${id} artifact "${name}", round ${round + 1}/${maxRounds}.
+UPSTREAM_PATH = ${upstreamPath}
+ARTIFACT_PATH = ${artifactPath}
+${rubricLine}Read BOTH paths and judge ARTIFACT_PATH as a faithful derivation of UPSTREAM_PATH (review the EDGE, not the node). Return { pass, findings } per the schema.`,
+      { label: `critic:${id}:${name}#${round + 1}`, phase: 'Critic', agentType: 'qrspi-critic', schema: CRITIC_VERDICT_SCHEMA }
+    )
+    if (verdict === null) {
+      log(`  ${id}: ${name} critic round ${round + 1} failed/skipped — stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+    const passed = verdict.pass === true
+    const findings = Array.isArray(verdict.findings) ? verdict.findings : []
+    log(`  ${id}: ${name} critic round ${round + 1}/${maxRounds} → ${passed ? 'PASS' : `FAIL (${findings.length} finding(s))`}`)
+
+    // Delegate the converge/revise/cap decision to the tested pure module. The verdict is
+    // passed as a one-element list (single-critic). The script self-locates from __file__.
+    const decision = await criticDecision([verdict], round, maxRounds)
+    if (!decision) {
+      log(`  ${id}: ${name} critic-loop decision failed to compute — stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+    if (decision.action === 'converged') {
+      log(`  ${id}: ${name} critic CONVERGED at round ${round + 1}`)
+      return { ok: true, residualFindings: [] }
+    }
+    if (decision.action === 'cap_reached') {
+      log(`  ${id}: ${name} critic CAP-REACHED at round ${round + 1} — ${decision.residual_findings.length} residual finding(s) carried to PR body`)
+      return { ok: true, residualFindings: decision.residual_findings }
+    }
+    // action === 'revise': spawn a reviser to rewrite stg(id, name) in place addressing the
+    // findings, then re-critique on the next iteration. The reviser is the same typed phase
+    // PRODUCER agent re-prompted with the findings (it already knows how to write this
+    // artifact to the staging path; the findings are the only new input).
+    log(`  ${id}: ${name} critic REVISE at round ${round + 1} — rewriting artifact to address findings`)
+    const rev = await agent(
+      `You are the REVISER for ${id} artifact "${name}". A critic reviewed it as a derivation of its upstream input and found it does NOT yet faithfully preserve every upstream requirement.
+ARTIFACT_PATH = ${artifactPath}
+UPSTREAM_PATH = ${upstreamPath}
+FINDINGS (each names a specific upstream requirement the current artifact dropped/contradicted/distorted):
+${findings.map((f, i) => `  ${i + 1}. ${f}`).join('\n')}
+
+Read the current artifact at ARTIFACT_PATH and the upstream at UPSTREAM_PATH, then REWRITE the artifact IN PLACE at ARTIFACT_PATH so it resolves EVERY finding while keeping everything already correct. Write the full revised artifact to ARTIFACT_PATH (non-empty). Do not change any other file. Return a one-line summary.`,
+      { label: `revise:${id}:${name}#${round + 1}`, phase: 'Critic' }
+    )
+    if (rev === null) {
+      log(`  ${id}: ${name} reviser round ${round + 1} failed/skipped — stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+  }
+  // Loop exhausted without an explicit decision return (defensive — next_action's cap branch
+  // returns cap_reached at round == maxRounds-1, so we normally exit inside the loop). Treat
+  // as cap-reached with no captured findings rather than silently passing.
+  log(`  ${id}: ${name} critic loop exhausted ${maxRounds} round(s) without converging`)
+  return { ok: true, residualFindings: [] }
+}
+
+// Invoke the tested pure decision module qrspi_critic_loop.py via a worker (the JS sandbox
+// cannot run python). Returns { action, residual_findings } or null on failure. The verdicts
+// are serialized to a token-free staged JSON file the worker passes to the script on stdin,
+// so the fragile verdict text never round-trips through the worker's stdout echo.
+async function criticDecision(verdicts, round, maxRounds) {
+  const out = await agent(
+    `You are the CRITIC-DECISION worker. Your cwd is the main repo root. Run EXACTLY this one
+command verbatim (no path edits, no exploration) and return its JSON stdout verbatim:
+
+  printf '%s' ${JSON.stringify(JSON.stringify(verdicts))} | python3 ${engineCmd('scripts/qrspi_critic_loop.py')} --round ${round} --max-rounds ${maxRounds}
+
+It prints JSON { action, residual_findings }. Parse and return it verbatim. If it errors,
+return that as-is — HARD STOP, do NOT retry or improvise.`,
+    { label: `critic-decision#${round}`, phase: 'Critic', schema: LOOP_DECISION_SCHEMA }
+  )
+  if (!out || typeof out.action !== 'string') return null
+  if (!Array.isArray(out.residual_findings)) out.residual_findings = []
+  return out
+}
+
+// Build the finalize-prompt FRAGMENT that splices the critic's residual findings (cap-reached
+// only) into the phase commit message BEFORE `gt submit` — so Graphite seeds the PR body with
+// them at creation (a body amended AFTER submit would not update the PR, since gt seeds the
+// body from the commit message at creation only). No findings ⇒ '' (the finalize prompt is
+// byte-for-byte unchanged). Mirrors qrspi_pr_body.py's seam: the findings are written to a
+// token-free staged JSON file (the script owns the worktree path and reads the file) so the
+// fragile finding text never round-trips through heredoc quoting. `phase` is 'design'|'plan'.
+function criticBodyStep(id, phase, findings, wd) {
+  if (!Array.isArray(findings) || findings.length === 0) return ''
+  const stageFile = `/tmp/phase-stage/${id}/critic-findings-${phase}.json`
+  return ` Then surface the edge-critic's residual findings into the PR body BEFORE submitting: (a) write this EXACT JSON verbatim (a JSON array of strings) to ${stageFile}: ${JSON.stringify(findings)} ; (b) run EXACTLY this one command verbatim from ${wd}: \`python3 ${engineCmd('scripts/qrspi_critic_body.py')} --ticket ${id} --phase ${phase} --findings-file ${stageFile}\` — it amends the ${id}/${phase} commit message to append the residual findings (self-locating); if it reports ok:false, return ok:false (do NOT submit).`
+}
+
 // Run one phase agent, then deterministically persist its staged artifact. Reuses an
 // existing non-empty canonical artifact (resume). Returns true on success, false on
 // failure/skip.
-async function runPhase(name, agentType, prompt, existing, id, phaseLabel) {
+//
+// criticConfig (RUS-55, OPTIONAL trailing arg): when present, the edge-critic loop runs in
+// the pre-persist staging window — produce → critique → revise on stg(id, name) — before the
+// persist gate. Absent (undefined) ⇒ the guard is false ⇒ the four original statements run
+// VERBATIM (AC1, byte-for-byte unchanged no-critic behavior). On cap-reached the loop's
+// residual findings are written back onto the passed criticConfig object as
+// `criticConfig.residualFindings` so the caller (doDesign/doPlan) can splice them into the
+// finalize commit body; this keeps runPhase's existing boolean return contract intact.
+async function runPhase(name, agentType, prompt, existing, id, phaseLabel, criticConfig) {
   if (existing && existing[name]) {
     log(`  ${id}: reusing existing ${name}.md`)
     return true
@@ -464,6 +617,18 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel) {
   if (res === null) {
     log(`  ${id}: ${name} phase failed or was skipped — stopping this ticket`)
     return false
+  }
+  // Edge-critic loop (RUS-55): runs BETWEEN produce-success and the persist gate, on the
+  // still-staged artifact, so persist remains the single success gate. No-critic phases skip
+  // this block entirely and behave byte-for-byte as before.
+  if (criticConfig) {
+    const cr = await runCriticLoop(name, id, criticConfig)
+    if (!cr || !cr.ok) {
+      log(`  ${id}: ${name} critic loop did not complete — stopping this ticket`)
+      return false
+    }
+    // Hand the cap-reached residual findings back to the caller via the config object.
+    criticConfig.residualFindings = cr.residualFindings
   }
   // The agent wrote to a token-free staging path; move it to the canonical worktree
   // path deterministically. This is also the real success gate: an agent that
@@ -611,6 +776,10 @@ REPO_ROOT = ${wd}
 
 Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidden from you — do not seek it out.`, r.existing, t.id, 'Design')) return failTicket(t)
 
+  // Edge-critic on the design artifact, anchored on its upstream research.md (the rubric
+  // anchor). upstreamPath is resolved HERE (where `wd` is in scope) so runPhase/runCriticLoop
+  // need no `wd` (ref: structure §Unverified Assumptions). maxRounds defaults to 2 (OQ4).
+  const designCritic = { upstreamPath: art(wd, t.id, 'research.md'), maxRounds: 2 }
   if (!await runPhase('design', 'qrspi-design',
     `TICKET_ID = ${t.id}
 TICKET_CONTENT_PATH = ${r.ticketContentPath}
@@ -618,18 +787,26 @@ TICKET_CONTENT_PATH = ${r.ticketContentPath}
 QUESTIONS_PATH = ${art(wd, t.id, 'questions.md')}
 RESEARCH_PATH = ${art(wd, t.id, 'research.md')}
 OUTPUT_PATH = ${stg(t.id, 'design')}
-TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, r.existing, t.id, 'Design')) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, r.existing, t.id, 'Design', designCritic)) return failTicket(t)
 
   phase('Finalize')
+  // Residual critic findings (cap-reached only) to splice into the PR body. runPhase wrote
+  // them back onto the criticConfig object; absent ⇒ converged ⇒ nothing to surface.
+  const designFindings = designCritic.residualFindings ?? []
+  const designBodyStep = criticBodyStep(t.id, 'design', designFindings, wd)
   const fin = await agent(
     `You are the DESIGN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: run_design" commit+submit steps of ${SKILL}.
 1. Verify questions.md, research.md, design.md exist and are non-empty under ${wd}/.qrspi/${t.id}/. If any missing/empty, return ok:false (do NOT commit/transition).
-2. Stage ONLY those three artifacts; add them as the single commit (subject "${t.id} [QR]: Design — ${t.title}") on the pre-created ${t.id}/design branch with \`gt modify -c\` (the branch already exists from worktree setup — do NOT use \`gt create\`); submit the Design PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (the reviewer flag is required — it is what surfaces the PR in the reviewer\'s Graphite queue; submit it EXACTLY as written, do not drop or alter the reviewer)' : ''} (handle a stale closed-PR association per the SKILL "Resubmitting" steps).
+2. Stage ONLY those three artifacts; add them as the single commit (subject "${t.id} [QR]: Design — ${t.title}") on the pre-created ${t.id}/design branch with \`gt modify -c\` (the branch already exists from worktree setup — do NOT use \`gt create\`).${designBodyStep} Then submit the Design PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (the reviewer flag is required — it is what surfaces the PR in the reviewer\'s Graphite queue; submit it EXACTLY as written, do not drop or alter the reviewer)' : ''} (handle a stale closed-PR association per the SKILL "Resubmitting" steps).
 3. BEST-EFFORT project Linear → "Design Review" (a failed Linear write is a WARN, not a failure — still return ok:true with the PR created).
 Return: ok, prUrl, newStatus, summary (1-2 sentences).`,
     { label: `finalize-design:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
-  return finResult(t, fin, 'run_design')
+  const out = finResult(t, fin, 'run_design')
+  if (out.action === 'run_design' && fin && fin.ok && designFindings.length) {
+    out.summary = `${out.summary} [critic: ${designFindings.length} residual finding(s) in PR body]`
+  }
+  return out
 }
 
 // ===========================================================================
@@ -645,12 +822,14 @@ DESIGN_PATH = ${art(wd, t.id, 'design.md')}
 OUTPUT_PATH = ${stg(t.id, 'structure')}
 TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
 
+  // Edge-critic on the plan artifact, anchored on its upstream structure.md (OQ4, default 2).
+  const planCritic = { upstreamPath: art(wd, t.id, 'structure.md'), maxRounds: 2 }
   if (!await runPhase('plan', 'qrspi-plan',
     `TICKET_ID = ${t.id}
 STRUCTURE_PATH = ${art(wd, t.id, 'structure.md')}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
 OUTPUT_PATH = ${stg(t.id, 'plan')}
-TEMPLATE_PATH = ${tpl(wd, 'plan.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'plan.md')}`, r.existing, t.id, 'Plan', planCritic)) return failTicket(t)
 
   if (!await runPhase('worktree', 'qrspi-worktree',
     `TICKET_ID = ${t.id}
@@ -659,15 +838,21 @@ OUTPUT_PATH = ${stg(t.id, 'worktree')}
 TEMPLATE_PATH = ${tpl(wd, 'worktree.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
 
   phase('Finalize')
+  const planFindings = planCritic.residualFindings ?? []
+  const planBodyStep = criticBodyStep(t.id, 'plan', planFindings, wd)
   const fin = await agent(
     `You are the PLAN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: advance → nextPhase == plan" steps of ${SKILL}.
 1. Verify structure.md, plan.md, worktree.md exist and are non-empty under ${wd}/.qrspi/${t.id}/. If any missing/empty, return ok:false.
-2. gt checkout ${t.id}/design; stage ONLY those three artifacts; create the ${t.id}/plan branch STACKED on ${t.id}/design with \`gt create\` (single commit "${t.id} [SP]: Plan — ${t.title}"); submit the Plan PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (submit the reviewer flag EXACTLY as written — it is what surfaces the PR in the reviewer\'s Graphite queue)' : ''}.
+2. gt checkout ${t.id}/design; stage ONLY those three artifacts; create the ${t.id}/plan branch STACKED on ${t.id}/design with \`gt create\` (single commit "${t.id} [SP]: Plan — ${t.title}").${planBodyStep} Then submit the Plan PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (submit the reviewer flag EXACTLY as written — it is what surfaces the PR in the reviewer\'s Graphite queue)' : ''}.
 3. BEST-EFFORT project Linear → "Plan Review" (WARN on failure, still ok:true if the PR was created).
 Return: ok, prUrl, newStatus, summary.`,
     { label: `finalize-plan:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
-  return finResult(t, fin, 'advance:plan')
+  const out = finResult(t, fin, 'advance:plan')
+  if (out.action === 'advance:plan' && fin && fin.ok && planFindings.length) {
+    out.summary = `${out.summary} [critic: ${planFindings.length} residual finding(s) in PR body]`
+  }
+  return out
 }
 
 // ===========================================================================
