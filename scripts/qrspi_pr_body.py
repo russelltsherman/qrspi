@@ -39,14 +39,21 @@ import re
 import subprocess
 import sys
 
-# The script lives at <repo-root>/scripts/qrspi_pr_body.py, so the repo root is two
-# levels up. Deriving it from __file__ (not cwd, not an argument) removes the path a
-# weak worker model keeps corrupting. This is the FALLBACK root; main() prefers the
-# git-common-dir root (below) so the script is correct whether invoked from the main
-# checkout OR from inside a linked worktree (where __file__ would point at the worktree's
-# own copy and mis-resolve <worktree>/.worktrees/<ticket>).
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+# ENGINE_ROOT: the dir holding this engine's scripts/ (from __file__) — used ONLY for
+# sibling imports. REPO_ROOT: the HOST checkout root all host paths key off, resolved via
+# the shared qrspi_paths.resolve_repo_root() (git-common-dir first — the MAIN checkout even
+# from a worktree, where __file__ would point at the worktree's own copy and mis-resolve
+# <worktree>/.worktrees/<ticket>; __file__ parent last resort). validate=False keeps gh off
+# the import path. Decoupling the two collapses this script's former private git-common-dir
+# copy onto the shared resolver — behavior-preserving (ref: design.md Decision 2, §Delta).
+# REPO_ROOT stays a module-level name: it is the envelope's repoRoot fallback default and
+# the test imports it as the expected value.
+ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE_ROOT)
+
+import qrspi_paths  # noqa: E402
+
+REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 
 # A git trailer line: "Token: value" / "Co-Authored-By: ...". Used to keep the existing
 # trailer block (e.g. the Co-Authored-By line) at the BOTTOM of the message when we
@@ -151,20 +158,6 @@ def _run(cmd, cwd=None):
     return res.returncode, res.stdout, res.stderr
 
 
-def resolve_repo_root():
-    """The MAIN repo root, correct from any cwd inside the repo (including a linked
-    worktree). `git --git-common-dir` returns the shared .git dir (the MAIN repo's, even
-    when cwd is a worktree), whose parent is the main root — so worktree_path() always
-    points at <main>/.worktrees/<ticket>, never <worktree>/.worktrees/<ticket>. Falls
-    back to the __file__-derived REPO_ROOT if git can't answer (e.g. cwd outside a repo,
-    in which case the caller invoked us by absolute main path and __file__ is correct)."""
-    rc, out, _ = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
-    common = (out or "").strip()
-    if rc == 0 and common:
-        return os.path.dirname(common)
-    return REPO_ROOT
-
-
 def read_head_message(worktree):
     """Full commit message (%B) of the currently checked-out HEAD in the worktree."""
     rc, out, err = _run(["git", "log", "-1", "--format=%B"], cwd=worktree)
@@ -207,7 +200,7 @@ def main():
                              "ticket worktree. Default: <worktree>/.qrspi/<ticket>/pr-summary.md")
     args = parser.parse_args()
 
-    repo_root = resolve_repo_root()
+    repo_root = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
     worktree = worktree_path(repo_root, args.ticket)
     branch = slice_branch(args.ticket, args.slice)
 

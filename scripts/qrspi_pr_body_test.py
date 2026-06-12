@@ -125,6 +125,21 @@ check("envelope honors explicit repo_root (git-common-dir root from a worktree)"
                      ok=True, subject="s", bytes_=1, repo_root="/main")["repoRoot"],
       "/main")
 
+# --- resolver-backed root regression guard (RUS-60 Slice 3) -----------------
+# The private git-common-dir copy was collapsed onto the shared qrspi_paths resolver.
+# The alignment is behavior-PRESERVING: the module-level REPO_ROOT is still the envelope's
+# repoRoot fallback default (now resolved via qrspi_paths.resolve_repo_root(..., validate=
+# False) instead of a local __file__ derivation), and the canonical destination it produces
+# is unchanged. These two guards pin both invariants so a future resolver change cannot
+# silently move the default root or the dest layout out from under the body splice.
+check("envelope repoRoot default IS the (resolver-backed) module REPO_ROOT",
+      build_envelope("RUS-1", 1, "RUS-1/slice-1", "/wt", ok=True)["repoRoot"],
+      REPO_ROOT)
+
+check("resolver-backed root yields the same canonical slice worktree dest as before",
+      worktree_path(REPO_ROOT, "RUS-1"),
+      os.path.join(REPO_ROOT, ".worktrees", "RUS-1"))
+
 
 print("\n%d/%d checks passed" % (total - failures, total))
 sys.exit(1 if failures else 0)

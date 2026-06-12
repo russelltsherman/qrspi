@@ -41,12 +41,19 @@ import re
 import subprocess
 import sys
 
-# The script lives at <repo-root>/scripts/qrspi_revise_amend.py, so the repo root is two
-# levels up. This is the FALLBACK root; main() prefers the git-common-dir root so the
-# script is correct whether invoked from the main checkout OR from inside a linked
-# worktree (where __file__ would point at the worktree's own copy).
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(_SCRIPT_DIR)
+# ENGINE_ROOT: the dir holding this engine's scripts/ (from __file__) — used ONLY for
+# sibling imports. REPO_ROOT: the HOST checkout root all host paths key off, resolved via
+# the shared qrspi_paths.resolve_repo_root() (git-common-dir first — the MAIN checkout even
+# from a worktree, where __file__ would point at the worktree's own copy; __file__ parent
+# last resort). validate=False keeps gh off the import path. This collapses the script's
+# former private git-common-dir copy onto the shared resolver — behavior-preserving
+# (ref: design.md Decision 2, §Delta).
+ENGINE_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ENGINE_ROOT)
+
+import qrspi_paths  # noqa: E402
+
+REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 
 # Generated caches are never the deliverable and must not be staged into a phase commit
 # (matches the slice-commit worker's "never stage __pycache__/ or *.pyc" rule). They are
@@ -166,16 +173,6 @@ def _run(cmd, cwd=None):
     return res.returncode, res.stdout, res.stderr
 
 
-def resolve_repo_root():
-    """The MAIN repo root, correct from any cwd inside the repo (including a linked
-    worktree). Mirrors qrspi_pr_body.resolve_repo_root."""
-    rc, out, _ = _run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
-    common = (out or "").strip()
-    if rc == 0 and common:
-        return os.path.dirname(common)
-    return REPO_ROOT
-
-
 def head_oid(worktree):
     """Current HEAD commit OID in the worktree, or None on error."""
     rc, out, err = _run(["git", "rev-parse", "HEAD"], cwd=worktree)
@@ -258,7 +255,7 @@ def main():
                              "or RUS-53/slice-2")
     args = parser.parse_args()
 
-    repo_root = resolve_repo_root()
+    repo_root = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
     worktree = worktree_path(repo_root, args.ticket)
 
     if not os.path.isdir(worktree):
