@@ -13,6 +13,7 @@ from qrspi_pr_state import (
     slice_numbers,
     branch_set,
     real_branches,
+    branch_present,
     count_plan_slices,
     stack_merge_state,
     is_stack_fully_merged,
@@ -172,6 +173,31 @@ check("mixed: real design, empty plan placeholder",
 check("branch missing from ahead map is not real (defensive)",
       real_branches({"RUS-1/design"}, {}),
       set())
+
+
+# --- branch_present (RUS-67: landed-ancestor present, empty placeholder rejected) --
+# A branch ahead of trunk is present regardless of merge/local signals.
+check("branch ahead of trunk is present",
+      branch_present("RUS-1/design", 3, False, True), True)
+
+# 0 ahead because the work LANDED (merged PR) -> present (the RUS-67 fix: a
+# partially-landed stack must not read the landed design branch as absent).
+check("0-ahead landed-ancestor (merged PR) is present",
+      branch_present("RUS-1/design", 0, True, True), True)
+
+# 0 ahead, merged-PR signal, branch already ref-reaped locally -> still present
+# (presence rides the merged-PR signal, not local existence).
+check("0-ahead merged-PR with head ref deleted locally is present",
+      branch_present("RUS-1/design", 0, True, False), True)
+
+# 0 ahead because EMPTY placeholder (no merged PR, still exists locally) -> rejected.
+# Local existence alone must NOT re-admit the empty placeholder (the explicit Risk).
+check("0-ahead empty placeholder (no merged PR, exists locally) is rejected",
+      branch_present("RUS-1/design", 0, False, True), False)
+
+# 0 ahead, no merged PR, not local -> rejected (never-created / fully absent).
+check("0-ahead absent (no merged PR, not local) is rejected",
+      branch_present("RUS-1/design", 0, False, False), False)
 
 
 # --- count_plan_slices (mandatory-slice gate; optionality NOT honored) ------
@@ -432,6 +458,54 @@ check("not-in-flight ticket: design head never queried (gh calls bounded)",
       "RUS-1/design" not in _not_inflight_queried, True)
 check("not-in-flight ticket: stack-level merged False",
       _not_inflight_state["stack"]["merged"], False)
+
+# --- build_state: populated landed-ancestor branch (RUS-67) ------------------
+# Regression: a design branch whose commits LANDED in trunk is 0 ahead of trunk,
+# so the old `branchExists = head in real` (real excludes 0-ahead) read it as
+# absent and the resolver emitted a spurious entry_blocked "No design branch" on a
+# partially-landed stack. With the merged-PR signal, a 0-ahead landed-ancestor
+# design branch reports branchExists: true; an empty-placeholder design branch
+# (0 ahead, no merged PR) is still rejected.
+def _build_state_landed_ancestor(merged_pr):
+    """Stub every subprocess boundary so build_state is hermetic. The design branch
+    is 0 commits ahead of trunk; `merged_pr` controls whether GitHub reports a MERGED
+    PR for its head ref (landed ancestor) or no PR at all (empty placeholder)."""
+    saved = (qrspi_pr_state._git_branches,
+             qrspi_pr_state._commits_ahead,
+             qrspi_pr_state._query_pr,
+             qrspi_pr_state._bot_login,
+             qrspi_pr_state._git_show,
+             qrspi_pr_state._file_in_tree)
+    design = "RUS-1/design"
+    qrspi_pr_state._git_branches = lambda ticket: ["  %s" % design]
+    qrspi_pr_state._commits_ahead = lambda branch, trunk: 0  # landed / empty: 0 ahead
+    qrspi_pr_state._bot_login = lambda: ""
+    qrspi_pr_state._git_show = lambda ref_path: ""
+    qrspi_pr_state._file_in_tree = lambda ref, path: False
+    if merged_pr:
+        qrspi_pr_state._query_pr = lambda owner, repo, head: [
+            {"number": 700, "state": "MERGED", "merged": True,
+             "reviewDecision": "APPROVED", "reviewThreads": {"nodes": []}}]
+    else:
+        qrspi_pr_state._query_pr = lambda owner, repo, head: []
+    try:
+        return build_state("o", "r", "RUS-1", True, "Selected")
+    finally:
+        (qrspi_pr_state._git_branches,
+         qrspi_pr_state._commits_ahead,
+         qrspi_pr_state._query_pr,
+         qrspi_pr_state._bot_login,
+         qrspi_pr_state._git_show,
+         qrspi_pr_state._file_in_tree) = saved
+
+
+_landed = _build_state_landed_ancestor(merged_pr=True)
+check("populated landed-ancestor design branch (0 ahead, merged PR) -> branchExists True",
+      _landed["phases"]["design"]["branchExists"], True)
+
+_placeholder = _build_state_landed_ancestor(merged_pr=False)
+check("empty-placeholder design branch (0 ahead, no merged PR) -> branchExists False",
+      _placeholder["phases"]["design"]["branchExists"], False)
 
 
 # --- unaddressed_reviewer_comments (RUS-54: comment gather, AC5/AC6) --------

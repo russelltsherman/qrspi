@@ -305,6 +305,40 @@ def branch_set(branch_lines):
     return out
 
 
+def branch_present(branch, ahead, merged_pr, exists_locally):
+    """Whether a phase branch should report branchExists: true.
+
+    Distinguishes the two reasons a branch can be 0 commits ahead of trunk:
+
+      * 0 ahead because EMPTY placeholder — worktree setup created the branch at
+        trunk with no artifact commit yet (the regression real_branches() guards;
+        see its docstring). Still rejected: no real phase has run.
+      * 0 ahead because the work LANDED — the branch's commits merged into trunk,
+        so rev-list main..<branch> is now 0 even though a real phase ran. This is
+        the partially-landed-stack case (RUS-67): the resolver was emitting a
+        spurious entry_blocked "No design branch" because the landed design branch
+        read as absent. Now reported present (ref: design.md Decision 3A, OQ2).
+
+    A branch is present iff it carries real work (>=1 commit ahead of trunk) OR it
+    has a positive merged-PR signal — `merged_pr` is truthy when GitHub reports a
+    MERGED PR for the head ref (the merged-PR signal from stack_merge_state /
+    select_pr(prefer="merged"), the merged-ancestor source of truth). The merged-PR
+    signal is the discriminator between the two 0-ahead cases.
+
+    `exists_locally` (the branch is still in `git branch --list`) is accepted for
+    contract symmetry but is deliberately NOT a sufficient positive signal on its
+    own: the empty placeholder ALSO exists locally, so admitting a 0-ahead branch on
+    bare local existence would re-admit it (the explicit Risk "re-admits the
+    empty-placeholder design branch"). Presence therefore gates on real work or a
+    merged-PR signal only; exists_locally is retained as a documented no-op input so
+    a future caller can tighten the gate without a signature change."""
+    if ahead > 0:
+        return True
+    if merged_pr:
+        return True
+    return False
+
+
 def real_branches(branches, ahead_counts):
     """The branches that both exist AND carry real work — at least one commit ahead
     of trunk.
@@ -409,27 +443,46 @@ def build_state(owner, repo, ticket, assigned, linear_status, trunk="main",
 
     def phase_pr(name):
         head = "%s/%s" % (ticket, name)
-        exists = head in real
-        if exists:
-            pr = parse_pr_nodes(_query_pr(owner, repo, head), bot_login=bot)
-        elif looks_in_flight:
-            # Absent head + in-flight ticket: re-query the pruned head for merge state.
-            # The GraphQL query is by headRefName, so it still returns nodes for a
-            # deleted ref. select_pr(prefer="merged") ("any MERGED node wins") avoids the
-            # index-0 masking class, mirroring qrspi_cleanup.py (Decision 2 Option A,
-            # Risk row 5). If a MERGED PR exists, surface merged=True so the resolver's
-            # design_already_landed predicate sees it.
+        real_work = head in real          # >=1 commit ahead of trunk (a live phase)
+        local = head in branches          # still in `git branch --list`
+        # Query GitHub when the branch carries real work, still exists locally, or the
+        # ticket looks in-flight (a live slice implies an absent phase head was reaped
+        # after its PR merged — re-query it for merge state). A not-in-flight ticket
+        # with no local/real phase branch never queries, bounding gh calls.
+        # (RUS-67 landed-ancestor signal × RUS-69 pruned-head re-query.)
+        if real_work or local or looks_in_flight:
             nodes = _query_pr(owner, repo, head)
-            merged_node = select_pr(nodes, prefer="merged")
+        else:
+            nodes = []
+        merged_node = select_pr(nodes, prefer="merged")
+        merged_pr = bool(merged_node and merged_node.get("merged"))
+        if real_work or local:
+            # Branch is known to git. Parse its PR and let branch_present decide
+            # presence: real work OR a landed-ancestor merge signal marks it present,
+            # while a 0-ahead empty placeholder is rejected — so a partially-landed
+            # stack stops emitting a spurious entry_blocked "No design branch"
+            # (RUS-67, design.md Decision 3A, OQ2).
+            pr = parse_pr_nodes(nodes, bot_login=bot)
+            pr["branchExists"] = branch_present(
+                head, ahead.get(head, 0), merged_pr, local)
+        elif looks_in_flight:
+            # Absent/pruned head while slices are live: GitHub reaped it after its PR
+            # merged. The GraphQL query is by headRefName, so it still returns nodes
+            # for a deleted ref. Build from an empty parse and inject only the merged
+            # fields via select_pr(prefer="merged") ("any MERGED node wins") to avoid
+            # the index-0 masking class, mirroring qrspi_cleanup.py (RUS-69 Decision 2,
+            # Risk row 5). The head is gone from git, so branchExists stays False and
+            # the resolver reads the merge signal from phases.<phase>.merged instead.
             pr = parse_pr_nodes([], bot_login=bot)
             if merged_node is not None and merged_node.get("merged") is True:
                 pr["merged"] = True
                 pr["number"] = merged_node.get("number")
                 pr["state"] = merged_node.get("state")
                 pr["mergedAt"] = merged_node.get("mergedAt")
+            pr["branchExists"] = False
         else:
             pr = parse_pr_nodes([], bot_login=bot)
-        pr["branchExists"] = exists
+            pr["branchExists"] = False
         return pr
 
     slices = []
