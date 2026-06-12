@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Pure critic-loop decision core for the QRSPI edge-critic primitive.
+
+Why this exists
+---------------
+The edge-critic loop (`runCriticLoop` JS glue in `.claude/workflows/qrspi-batch.js`)
+spawns one critic agent per round against an upstream/produced artifact edge, then must
+decide whether the produced artifact has CONVERGED (latest critic passed), needs another
+REVISE round, or has hit its per-phase round CAP and must surface its residual findings
+into the finalize PR body. That decision is the one piece of the loop worth unit-testing,
+so it lives here as a pure stdlib-only module with no agent or IO coupling (ref: design.md
+Decision 3, Pattern 7, Q12/Q13). The JS glue keeps only the untestable agent-spawn
+mechanics and delegates the converge/continue/cap decision to `next_action` below.
+
+Two functions:
+  - `parse_critic_verdict(text)` — fail-closed parser. The critic verdict is contractually
+    a runner-validated `{pass: bool, findings: [...]}` (Decision 2 Option A, frontier model
+    + StructuredOutput schema), but this is retained as a DEFENSIVE backstop for the residual
+    weak-model-stall risk: an unreadable/empty/malformed verdict is treated as NOT-passed
+    (mirroring `parseLandVerdict` → `incomplete`). It never raises (ref: design Decision 2, Q11).
+  - `next_action(verdicts, round, max_rounds)` — given the already-parsed verdict(s) for the
+    current round plus the round index and the per-phase cap, returns the converge/revise/
+    cap_reached action and any residual findings to surface (ref: design §Delta, AC2, AC4).
+
+Both functions take already-parsed dicts / plain text; neither touches the filesystem,
+the agent runner, or git — so the whole decision is verifiable by the `_test.py` sibling
+with zero dependency on `agent()` or the JS orchestrator.
+"""
+
+import json
+import re
+
+
+def _coerce_verdict(obj):
+    """Coerce an arbitrary parsed object into the canonical `{pass: bool, findings: list}`
+    shape, failing closed. Pure helper shared by parse_critic_verdict and next_action's
+    latest-verdict read. A non-dict, or a dict missing/garbling the fields, yields a
+    NOT-passed verdict with whatever findings could be salvaged (else an empty list)."""
+    if not isinstance(obj, dict):
+        return {"pass": False, "findings": []}
+    passed = bool(obj.get("pass", False))
+    findings = obj.get("findings", [])
+    if not isinstance(findings, list):
+        # A scalar (e.g. a single string finding) is wrapped; anything else ⇒ empty.
+        findings = [findings] if findings else []
+    return {"pass": passed, "findings": findings}
+
+
+def parse_critic_verdict(text):
+    """Fail-closed parser: extract a JSON object from `text` and coerce it to the canonical
+    `{pass: bool, findings: list}` verdict. On malformed / empty / non-JSON / unreadable
+    input, return `{"pass": False, "findings": []}`. NEVER raises.
+
+    This is a defensive backstop only — the primary path is runner schema validation
+    (Decision 2 Option A). An unreadable verdict is treated as NOT-passed so a garbled
+    critic reply can never silently mark an artifact converged (ref: design Decision 2, Q11).
+
+    Signature: parse_critic_verdict(text: str) -> dict
+    """
+    if not isinstance(text, str) or not text.strip():
+        return {"pass": False, "findings": []}
+
+    # Try the whole string first; fall back to the first {...} object embedded in prose
+    # (the critic may wrap its JSON in commentary). Both attempts fail closed.
+    candidates = [text]
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except (ValueError, TypeError):
+            continue
+        return _coerce_verdict(obj)
+
+    return {"pass": False, "findings": []}
+
+
+def next_action(verdicts, round, max_rounds):
+    """Decide the loop's next move from the current round's parsed verdict(s).
+
+    `verdicts` is the list of already-parsed `{pass, findings}` verdict dicts produced this
+    round (a single-critic edge yields a one-element list — OQ2). The LATEST verdict (last
+    element) is authoritative for this round. Returns:
+
+        {"action": "converged"|"revise"|"cap_reached", "residual_findings": [...]}
+
+      - "converged"   when the latest verdict's `pass` is truthy. No residual findings.
+      - "cap_reached" when the latest verdict did NOT pass and this is the final allowed
+                      round (`round + 1 >= max_rounds`); the latest verdict's findings are
+                      surfaced as `residual_findings` for the finalize PR body.
+      - "revise"      otherwise (not passed, rounds remain). The latest findings are carried
+                      as `residual_findings` so the reviser has the critic's guidance.
+
+    Fails closed: an empty/garbled verdict list, or a non-dict latest verdict, reads as
+    NOT-passed (via _coerce_verdict), so a missing verdict can never report "converged"
+    (ref: design §Delta, AC2, AC4, Decision 2/3, Q11).
+
+    Signature: next_action(verdicts: list, round: int, max_rounds: int) -> dict
+    """
+    latest = _coerce_verdict(verdicts[-1]) if isinstance(verdicts, list) and verdicts else {
+        "pass": False, "findings": []}
+
+    if latest["pass"]:
+        return {"action": "converged", "residual_findings": []}
+
+    if int(round) + 1 >= int(max_rounds):
+        return {"action": "cap_reached", "residual_findings": list(latest["findings"])}
+
+    return {"action": "revise", "residual_findings": list(latest["findings"])}
