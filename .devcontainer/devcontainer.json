@@ -38,7 +38,7 @@
     "OLLAMA_API_KEY": "${localEnv:OLLAMA_API_KEY}"
   },
 
-  "initializeCommand": "bash .devcontainer/config/initialize.sh",
+  "initializeCommand": "bash .devcontainer/scripts/initialize.sh",
 
   "mounts": [
     // Mount host config repos for each AI coding tool so credentials
@@ -92,8 +92,8 @@
     "--add-host=host.docker.internal:host-gateway"
   ],
 
-  "postCreateCommand": "bash .devcontainer/config/post-create.sh",
-  "postStartCommand": "bash .devcontainer/config/post-start.sh",
+  "postCreateCommand": "bash .devcontainer/scripts/post-create.sh",
+  "postStartCommand": "bash .devcontainer/scripts/post-start.sh",
 
   "remoteUser": "vscode",
 
