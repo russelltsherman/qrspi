@@ -23,6 +23,19 @@ Linear (after the entry gate) to make any advancement decision.
 
 See `docs/qrspi-pr-gated-lifecycle-design.md` for the full design and rationale.
 
+## Engine scripts — `${CLAUDE_PLUGIN_ROOT}`-anchored
+
+Every `scripts/qrspi_*.py` helper this orchestrator runs is a **bundled engine file**, not a
+host-checkout file. Address each one through the literal `${CLAUDE_PLUGIN_ROOT}/scripts/...`
+form (shell-expanded), the SAME precedence root the `qrspi-batch` workflow uses for its
+`engineCmd(...)` calls: at run time the plugin runtime exports `CLAUDE_PLUGIN_ROOT` pointing at
+the installed plugin's root, so the script resolves inside the installed engine dir rather than
+assuming the engine is the current working directory. When `CLAUDE_PLUGIN_ROOT` is unset (a plain
+single-checkout dev run rather than an installed plugin), the shell leaves the token empty and the
+path degrades to a cwd-relative `scripts/...` — the same engine-root-fallback semantics the
+workflow's `ENGINE_ROOT` precedence (`CLAUDE_PLUGIN_ROOT` → cwd) already provides, so the dev case
+still works. All `${CLAUDE_PLUGIN_ROOT}/scripts/...` invocations below assume this contract.
+
 ## Lifecycle at a glance
 
 A single Graphite stack per ticket, built bottom-up and **held open** until the whole
@@ -43,7 +56,7 @@ trunk
   **autonomous**. It fires when the PR carries a formal **CHANGES_REQUESTED** and/or
   unaddressed reviewer **comments** (RUS-54, subsumed). In one pass it (1) engages each comment
   per-intent — answers / applies+amends / declines with a concrete rationale, posted as an
-  in-thread reply via `scripts/qrspi_comment_reply.py` (gh comment writes succeed with the bot's
+  in-thread reply via `${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_comment_reply.py` (gh comment writes succeed with the bot's
   classic PAT — the old cross-account write block is gone), then (2) **only when a formal change
   request is present** addresses the review summary, amends the phase commit, and re-requests
   review (which clears the change request). A comment-only PR (no change request, even when
@@ -65,10 +78,10 @@ trunk
    - Read `status` (name) and `assignee` (`assigned` = assignee is non-null).
 3. **Resolve everything in ONE deterministic command.** Worktree setup, GitHub
    `OWNER/REPO`, the PR-state gather, the tested decision, and artifact detection are all
-   folded into a single script (`scripts/qrspi_resolve.py`). Run it verbatim — do **not**
-   hand-derive paths, repo names, or the decision:
+   folded into a single script (`${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_resolve.py`). Run it
+   verbatim — do **not** hand-derive paths, repo names, or the decision:
    ```bash
-   python3 scripts/qrspi_resolve.py --ticket "<ticket-id>" \
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_resolve.py --ticket "<ticket-id>" \
      $( [ "<assigned>" = "true" ] && echo --assigned ) \
      --linear-status "<status>"
    ```
@@ -191,7 +204,7 @@ Then submit as a **published** PR — review gates need a reviewable (non-draft)
 `gt submit` defaults to draft in non-interactive mode. Clear any stale closed-PR association
 FIRST (see [Resubmitting](#resubmitting-when-the-prior-pr-was-closed-or-merged)):
 ```bash
-python3 <repo-root>/scripts/qrspi_clear_stale_pr.py --ticket <id>
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_clear_stale_pr.py --ticket <id>
 gt submit --publish --no-edit --no-interactive
 ```
 Capture the PR URL. **Project Linear** → `Design Review` (best-effort; see
@@ -264,7 +277,7 @@ slice commit as the durable artifact
 `pr-summary.md` into the **slice-1** commit *message* (so the slice-1 PR body is the full
 summary at creation) with the deterministic, self-locating helper — never hand-build this:
 ```bash
-python3 scripts/qrspi_pr_body.py --ticket <ticket-id> --slice 1 \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_pr_body.py --ticket <ticket-id> --slice 1 \
   --body-file .qrspi/<ticket-id>/pr-summary.md
 ```
 It preserves the slice-1 commit subject + trailer, splices the summary in between, amends
@@ -290,7 +303,7 @@ so for implementation seed the slice-1 body into its commit message first (the P
 authored at creation — see [Why PR bodies are authored at Graphite creation](#why-pr-bodies-are-authored-at-graphite-creation)):
 ```bash
 # implementation only: splice pr-summary into the slice-1 commit message before submit
-python3 scripts/qrspi_pr_body.py --ticket <ticket-id> --slice 1 \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_pr_body.py --ticket <ticket-id> --slice 1 \
   --body-file .qrspi/<ticket-id>/pr-summary.md
 gt submit --publish --no-edit --no-interactive   # add `--stack` if the active phase is implementation
 ```
@@ -342,7 +355,7 @@ exactly one reaction:
    artifacts, code, and PR state.
 2. **Apply** — the comment requests a sound, concrete change **within this phase only**; make
    the edit, then amend the phase commit in place via
-   `scripts/qrspi_revise_amend.py --ticket <id> --branch <branch>` (self-locating, verify-gated;
+   `${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_revise_amend.py --ticket <id> --branch <branch>` (self-locating, verify-gated;
    it FAILS if nothing was staged), and re-publish (`gt submit --publish --no-edit [--stack]
    --no-interactive`).
 3. **Decline** — the suggestion is wrong/out-of-scope/unsound; give a concrete, respectful
@@ -353,7 +366,7 @@ Post the answer/applied-note/decline-rationale as the **in-thread reply** — th
 Post it with the tested, self-locating helper (reply mode = the comment's `threadType`):
 
 ```bash
-python3 scripts/qrspi_comment_reply.py --ticket <ticket-id> --pr <number> \
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_comment_reply.py --ticket <ticket-id> --pr <number> \
   --comment-id <commentId> --reply-mode <inline|toplevel> --body-file <reply.md>
 ```
 
@@ -384,7 +397,7 @@ re-request review (the PR may be APPROVED; leave it undisturbed). Otherwise:
    first). **If Step 1 already applied every needed change and nothing remains, do not invent an
    edit** — skip to step 5.
 4. When you edited, amend the phase commit **in place, keeping its existing subject** via
-   `scripts/qrspi_revise_amend.py --ticket <id> --branch <branch>` (it stages, amends with
+   `${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_revise_amend.py --ticket <id> --branch <branch>` (it stages, amends with
    `gt modify` preserving the EXACT subject+trailers, and verify-gates the amend; never run a
    bare `gt modify` — without staging it silently drops your edits). If step 3 found nothing to
    change, **skip this step** (do not run the amend with no staged edits).
@@ -467,7 +480,7 @@ Every PR in the stack is approved + clean. Land the whole stack bottom-up and fi
    checkout** (never from inside the worktree) so it sees the real `.worktrees/<ticket-id>`:
    ```bash
    cd "$REPO_ROOT"
-   python3 scripts/qrspi_cleanup.py --ticket <ticket-id>
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_cleanup.py --ticket <ticket-id>
    ```
    It computes a classifier verdict (`blocked` > `destroy` > `skip`) and reaps **only** a
    fully-merged clean stack: it removes the worktree, deletes the merged local branches, and
@@ -597,7 +610,7 @@ This is a hard boundary. If the plan references files outside the project, repor
 - Never use `gt sync` mid-feature on a held stack except in `land` cleanup — it deletes
   branches whose PRs were closed (which is correct only after merge).
 - **Clear any stale PR association before every `gt submit`.** Run the idempotent
-  `python3 <repo-root>/scripts/qrspi_clear_stale_pr.py --ticket <id>` FIRST — no `gt info`
+  `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_clear_stale_pr.py --ticket <id>` FIRST — no `gt info`
   pre-check needed (the helper is a no-op when nothing is stale), and do not wait for the
   submit to fail. See [Resubmitting](#resubmitting-when-the-prior-pr-was-closed-or-merged).
   This happens routinely on reset→rerun: a reset closes a phase PR, and recreating the
@@ -624,7 +637,7 @@ selection.
 
 Recovery is a single idempotent command — run it before the submit:
 ```bash
-python3 <repo-root>/scripts/qrspi_clear_stale_pr.py --ticket <id>
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_clear_stale_pr.py --ticket <id>
 ```
 It removes ONLY this ticket's `(Closed)`/`(Merged)` entries from the cache (OPEN associations
 and other tickets are left untouched), so the branch resubmits as a brand-new PR under the
@@ -653,7 +666,7 @@ seed the PR title (subject line) and body (the rest) **when it creates the PR**.
 
 So: design/plan PRs carry their heredoc commit message as the body; implementation slice PRs
 get a focused "Part N/total" body from the slice commit, and slice 1's commit message is
-overwritten with the full `pr-summary.md` via `scripts/qrspi_pr_body.py` **before** the
+overwritten with the full `pr-summary.md` via `${CLAUDE_PLUGIN_ROOT}/scripts/qrspi_pr_body.py` **before** the
 creating `gt submit`. Bodies are seeded by the commit message at creation, so there is simply
 no `gh pr edit` step — do not add one back.
 

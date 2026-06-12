@@ -58,3 +58,33 @@
 - The version string `0.1.0` is now triplicated in lockstep: `plugin.json` (load-bearing compare source), `.qrspi-batch.version` (host marker seed), and `qrspi-batch.js` `meta.version` (self-describing). Any future bump must update all three.
 
 ---
+
+## Session 3 — Slice 3: Reconcile skill script references + install doc
+
+**Timestamp:** 2026-06-12T16:30:00Z
+**Tasks completed:** T17, T18, T19, T20, T21
+**Tasks failed:** none
+
+**Tests:**
+
+- `grep -rln 'scripts/' .claude/skills/ .claude/agents/` → 2 hits: `qrspi-work/SKILL.md` and `qrspi-batch/SKILL.md`. The `qrspi-batch` hit is a single line of **convention-describing prose** (line 41: "the workflow itself uses for its `scripts/...` calls"), the Slice 2 deliverable, already `${CLAUDE_PLUGIN_ROOT}`-anchored — NOT a bare cwd-relative engine-script invocation. `grep -nE 'python3 +scripts/|^scripts/|\`scripts/qrspi_[a-z_]+\.py'` over qrspi-batch → NONE. So no bare cwd-relative engine-script reference exists outside the agreed convention. (pass)
+- `grep -c 'CLAUDE_PLUGIN_ROOT}/scripts/' .claude/skills/qrspi-work/SKILL.md` → 15 (every converted invocation is `${CLAUDE_PLUGIN_ROOT}`-aware). (pass)
+- Install-doc cross-check (Python asserts vs implemented files): `plugin.json` (name=qrspi, version=0.1.0, skills=".claude/skills", mcpServers=".mcp.json", no `workflows`), `.mcp.json` (`linear`, type=http, url=https://mcp.linear.app/mcp), and `.qrspi-batch.version`=`0.1.0` all MATCH the doc's claims. Doc names both written host files (`qrspi-batch.js`, `.qrspi-batch.version`), the env contract, and the bundled `linear` server. (pass)
+- `python3 scripts/qrspi_batch_resolution_test.py` → 5/5 checks passed (no regression). (pass)
+- `python3 scripts/qrspi_paths_test.py` → 11/11 checks passed (no regression). (pass)
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- Plan step 22 literally expects "the only hit is qrspi-work/SKILL.md". Actual grep returns TWO files. This is not a real deviation: the second file (`qrspi-batch/SKILL.md`, a Slice 2 deliverable) has exactly one `scripts/` occurrence and it is convention-describing prose, already `${CLAUDE_PLUGIN_ROOT}`-anchored — it satisfies the **structure's** authoritative verification wording ("no bare cwd-relative engine-script reference *outside the agreed convention*", step-26 checkpoint). The plan's stricter phrasing predates Slice 2 introducing that prose mention. No bare cwd-relative invocation exists anywhere in `.claude/skills/` or `.claude/agents/`.
+- Step 25 (full skill-creator eval loop): the qrspi-work change is **not substantial** in the triggering sense — the front-matter (`name`/`description`/`command`/`argument-hint`/`allowed-tools`) is UNCHANGED (verified via `git diff` front-matter grep), so triggering accuracy is structurally unaffected. The body change is a mechanical engine-root-prefix of 13 concrete script references (same class of edit as RUS-60's `engineCmd` work) plus one 11-line explanatory convention section. The full skill-creator subagent eval loop (parallel with/without-skill runs + browser viewer + interactive human review) requires spawning subagents and user review — outside this scoped implement-phase agent's boundary, exactly as Session 2's impl-log noted for the analogous T17 case.
+
+**Notes for next session:**
+
+- Slice 3 artifacts: `.claude/skills/qrspi-work/SKILL.md` (every concrete `scripts/qrspi_*.py` reference — 13 in all: resolve, comment_reply×2, clear_stale_pr×3, pr_body×3, revise_amend×2, cleanup — converted to the literal `${CLAUDE_PLUGIN_ROOT}/scripts/...` form; new "Engine scripts — `${CLAUDE_PLUGIN_ROOT}`-anchored" section near the top documents the contract + cwd fallback) and `docs/qrspi-install.md` (new install doc).
+- The conversion includes the three former `<repo-root>/scripts/qrspi_clear_stale_pr.py` placeholder refs — that `<repo-root>` form was itself a single-checkout assumption; folded into the same `${CLAUDE_PLUGIN_ROOT}` convention per OQ3's "migrate all".
+- The four `scripts/` mentions left in qrspi-work (lines 28/29/35/37) are the new convention section's own prose (the `scripts/qrspi_*.py` glob, the `${CLAUDE_PLUGIN_ROOT}/scripts/...` form, and the cwd-fallback `scripts/...` description) — intentional, not bare invocations.
+- T22 (manual plugin-install e2e gate — confirm the runtime actually exports `CLAUDE_PLUGIN_ROOT` into the workflow's `process.env` and that `mcpServers` loads the bundled `linear` server) is the design's load-bearing OQ2/Risk-Register-row-1 assumption. It is explicitly OUTSIDE any automated step here (the JS resolution test only proves ENGINE_ROOT *uses* the var, not that the runtime *sets* it). The install doc records this verification-status caveat; the gate must be run by a human before declaring the acceptance criterion met.
