@@ -187,10 +187,13 @@ function parseRestackEnvelope(text, ticketId) {
 }
 
 // Parse + validate the cleanup worker's text into the qrspi_cleanup.py envelope
-// ({ ok, repoRoot, decision, reason, removed{worktree,branches[],remotes[]}, dryRun,
-// error? }). Same text-return + JS-parse shape as resolve/restack (no StructuredOutput,
-// which the weak local worker could not populate). A garbled echo becomes a clean
-// ok:false so the caller logs it and moves on rather than acting on a corrupt verdict.
+// ({ ok, repoRoot, decision, reason, removed{worktree,branches[],remotes[]},
+// failedRemotes[], dryRun, error? }). Same text-return + JS-parse shape as resolve/restack
+// (no StructuredOutput, which the weak local worker could not populate). A garbled echo
+// becomes a clean ok:false so the caller logs it and moves on rather than acting on a
+// corrupt verdict. `failedRemotes` (RUS-68) is an ADDITIVE field the parse passes through
+// untouched: it is NOT validated/required here, so an older producer envelope that omits it
+// parses cleanly (the consumer reads `env.failedRemotes` defensively as `?? []`).
 function parseCleanupEnvelope(text) {
   const raw = extractJsonObject(text)
   if (!raw) return { ok: false, decision: 'skip', error: 'cleanup: no JSON envelope in worker output' }
@@ -231,6 +234,14 @@ function parseConfigEnvelope(text, key) {
   if (env.key !== key) return { ok: false, error: `config: envelope key mismatch (want ${key}, got ${env.key})` }
   if (typeof env.value !== 'string') return { ok: false, error: `config: envelope value not a string (got ${env.value})` }
   return env
+}
+
+// Read the additive RUS-68 `failedRemotes` list off a parsed cleanup envelope, tolerating
+// its absence (older producers) and any non-array junk. Non-empty ⇒ the prune attempted but
+// some `<ticket>/*` origin refs are still present — a RETRIABLE partial failure (the run is
+// still ok:true), NOT a hard stop. The next Reconcile pass re-attempts the prune.
+function cleanupFailedRemotes(cl) {
+  return Array.isArray(cl?.failedRemotes) ? cl.failedRemotes : []
 }
 
 const WORKER_SCHEMA = {
@@ -929,14 +940,23 @@ Return: ok, prUrl, newStatus, summary.`,
   }
   res.landed = true
   const cl = await runCleanup(t.id, /* dryRun */ false, 'Finalize')
+  const stranded = cleanupFailedRemotes(cl)
   if (!cl.ok) {
+    // ok:false is the ONLY hard-stop (genuine infra error: gt/git/gh unreachable). The
+    // worktree is left for a later reconciliation pass — unchanged HARD-STOP semantics.
     log(`  ${t.id}: cleanup failed after land — ${cl.error ?? 'unknown'} (worktree left for a later reconciliation pass)`)
   } else if (cl.decision === 'destroy') {
-    log(`  ${t.id}: cleaned up — worktree ${cl.removed?.worktree ? 'removed' : 'absent'}, branches [${(cl.removed?.branches ?? []).join(', ')}], remotes [${(cl.removed?.remotes ?? []).join(', ')}]`)
+    log(`  ${t.id}: cleaned up — worktree ${cl.removed?.worktree ? 'removed' : 'absent'}, branches [${(cl.removed?.branches ?? []).join(', ')}], remotes [${(cl.removed?.remotes ?? []).join(', ')}]` +
+        (stranded.length ? `, STRANDED remotes [${stranded.join(', ')}] (still on origin — scheduling Reconcile retry)` : ''))
   } else {
     log(`  ${t.id}: cleanup decision=${cl.decision} — ${cl.reason ?? ''} (no reap)`)
   }
-  res.cleanup = { decision: cl.decision, ok: cl.ok, removed: cl.removed }
+  // RUS-68: a partial remote-prune failure (ok:true + non-empty failedRemotes) is RETRIABLE,
+  // not terminal. Flag the ticket so the main loop does NOT exclude it from this run's
+  // Reconcile pass (which re-attempts the prune via origin-driven discovery); the origin
+  // refs persist, so a later run's Reconcile pass would re-pick it up regardless.
+  res.cleanup = { decision: cl.decision, ok: cl.ok, removed: cl.removed, failedRemotes: stranded }
+  if (cl.ok && stranded.length) res.reconcileRetry = true
   return res
 }
 
@@ -1008,20 +1028,26 @@ async function runReconciliation(alreadyProcessed) {
   // Sequential: tickets share one .git index, so worktree/branch reaps must not race.
   for (const id of pending) {
     const cl = await runCleanup(id, RECONCILE_DRY_RUN, 'Reconcile')
+    const stranded = cleanupFailedRemotes(cl)
     if (!cl.ok) {
+      // ok:false is the ONLY hard-stop (genuine infra error) — logged and skipped, pass continues.
       log(`  ${id}: reconcile cleanup failed — ${cl.error ?? 'unknown'} (skipped; pass continues)`)
       reaped.push({ ticketId: id, decision: cl.decision ?? 'skip', ok: false, dryRun: RECONCILE_DRY_RUN, error: cl.error })
       continue
     }
     if (cl.decision === 'destroy') {
-      log(`  ${id}: ${RECONCILE_DRY_RUN ? 'WOULD reap' : 'reaped'} — worktree ${cl.removed?.worktree ? (RECONCILE_DRY_RUN ? 'present' : 'removed') : 'absent'}, branches [${(cl.removed?.branches ?? []).join(', ')}], remotes [${(cl.removed?.remotes ?? []).join(', ')}]`)
+      // RUS-68: surface still-present origin refs. A non-empty failedRemotes here means the
+      // prune ran but origin still holds the refs — the next Reconcile pass re-attempts it
+      // (the refs persist on origin), so it stays in the retriable backlog, not a hard stop.
+      log(`  ${id}: ${RECONCILE_DRY_RUN ? 'WOULD reap' : 'reaped'} — worktree ${cl.removed?.worktree ? (RECONCILE_DRY_RUN ? 'present' : 'removed') : 'absent'}, branches [${(cl.removed?.branches ?? []).join(', ')}], remotes [${(cl.removed?.remotes ?? []).join(', ')}]` +
+          (stranded.length ? `, STRANDED remotes [${stranded.join(', ')}] (still on origin — left for a later Reconcile retry)` : ''))
     } else if (cl.decision === 'blocked') {
       // A dirty worktree — logged and SKIPPED, never forced; the pass proceeds (OQ2).
       log(`  ${id}: BLOCKED — ${cl.reason ?? 'dirty worktree'} (left untouched for a human; pass continues)`)
     } else {
       log(`  ${id}: skip — ${cl.reason ?? 'not fully merged'} (in-flight; left untouched)`)
     }
-    reaped.push({ ticketId: id, decision: cl.decision, ok: cl.ok, dryRun: RECONCILE_DRY_RUN, removed: cl.removed })
+    reaped.push({ ticketId: id, decision: cl.decision, ok: cl.ok, dryRun: RECONCILE_DRY_RUN, removed: cl.removed, failedRemotes: stranded })
   }
   return reaped
 }
@@ -1191,8 +1217,13 @@ for (let i = 0; i < tickets.length; i++) {
         log(`  ${t.id}: skipped (${a})`)
     }
     results.push(res)
-    processed.add(t.id)
-    log(`[${i + 1}/${tickets.length}] ${t.id} → ${res.action}${res.newStatus ? ` (${res.newStatus})` : ''}`)
+    // RUS-68: a land whose cleanup left stranded origin refs (ok:true + non-empty
+    // failedRemotes) requests a Reconcile RETRY rather than a halt — so we DON'T mark it
+    // `processed`, which is the exact set runReconciliation excludes. Leaving it out lets
+    // this run's Reconcile pass (when enabled) re-attempt the prune; otherwise the
+    // (still-present) origin refs keep it in the backlog for a later run's pass.
+    if (!res.reconcileRetry) processed.add(t.id)
+    log(`[${i + 1}/${tickets.length}] ${t.id} → ${res.action}${res.newStatus ? ` (${res.newStatus})` : ''}${res.reconcileRetry ? ' (Reconcile retry scheduled — stranded remotes)' : ''}`)
   } catch (err) {
     const summary = err?.message ?? String(err)
     log(`  ${t.id}: ERRORED — ${summary} (side effects may have partially landed; resolver reconciles on re-run)`)
