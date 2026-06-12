@@ -1,3 +1,4 @@
+.devcontainer
 __pycache__
 .worktrees/
 .claude/scheduled_tasks.lock

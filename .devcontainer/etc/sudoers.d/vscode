@@ -1,3 +1,0 @@
-vscode ALL=(root) NOPASSWD: /usr/local/sbin/protect-egress
-vscode ALL=(root) NOPASSWD: /usr/local/sbin/protect-paths
-vscode ALL=(root) NOPASSWD: /usr/local/sbin/start-squid
