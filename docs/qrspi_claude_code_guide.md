@@ -51,7 +51,10 @@ your-project/
 ├── scripts/
 │   ├── qrspi_resolve_state.py             # Tested PR-gated decision logic (the resolver)
 │   ├── qrspi_pr_state.py                  # Gathers PR review state (gh GraphQL reviewThreads)
-│   └── test_qrspi_*.py                    # stdlib-only unit tests for the resolver + PR-state gatherer
+│   ├── qrspi_resolve.py                   # One-shot: worktree + gather + decision + artifact detection
+│   ├── qrspi_persist.py                   # Verifies a staged artifact and moves it to the canonical path
+│   ├── qrspi_pr_body.py                   # Splices pr-summary.md into the slice-1 commit message
+│   └── qrspi_*_test.py                    # stdlib-only unit tests (one _test.py sibling per script)
 ├── .qrspi/
 │   ├── templates/                         # Canonical output formats (reference only — single source of truth)
 │   │   ├── ticket.md
@@ -128,8 +131,11 @@ is approved, then landed bottom-up:
   unresolved review threads) builds the next phase on top.
 - **Reset** is automatic: a formal `CHANGES_REQUESTED` on an upstream phase PR discards every
   downstream phase (PRs closed, branches deleted, stale artifacts removed) and returns the
-  ticket to that phase. **Revise** (addressing review comments) is *manual* — only on an
-  explicit invocation.
+  ticket to that phase. **Revise** is also automatic and is the unified feedback action: a
+  *frontier* phase PR carrying a formal `CHANGES_REQUESTED` and/or unaddressed reviewer
+  comments is addressed in place (per-comment replies, plus — only when a change request is
+  present — amending the phase commit and re-requesting review). Unresolved review *threads*
+  alone resolve to `wait` (only the reviewer resolves a thread).
 - The `*Approved` Linear states were dropped — approval lives in the PR. Reporting statuses:
   `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.
 - The decision is computed by a tested resolver (`scripts/qrspi_resolve_state.py`); the
@@ -227,8 +233,8 @@ python3 scripts/qrspi_pr_state.py --owner <owner> --repo <repo> --ticket <ticket
 | `run_design` | Entry gate satisfied. Build the **design** phase (questions → research → design) on a fresh `<id>/design` branch off trunk; open the Design PR. Project Linear → `Design Review`. |
 | `advance` → plan | Design PR is **READY** (approved + zero unresolved threads). Build **structure → plan → worktree** on a `<id>/plan` branch stacked on `<id>/design`; open the Plan PR. Project Linear → `Plan Review`. |
 | `advance` → implementation | Plan PR is READY. Build the **slice PR stack** (`<id>/slice-1..N`, each stacked on the prior). Project Linear → `Code Review`. |
-| `wait` | The active phase PR exists and is awaiting review (not yet approved, no unresolved threads). Nothing to do autonomously — stop. |
-| `revise` | The active phase PR has unresolved review threads. **Manual only** — address feedback bounded to this phase, amend, re-submit, request re-review. |
+| `wait` | The active phase PR is awaiting the reviewer: not yet approved, OR its only outstanding signal is unresolved review threads with neither a formal change request nor an unaddressed reviewer comment. Nothing to do autonomously — stop. |
+| `revise` | The **frontier** phase PR carries a formal `CHANGES_REQUESTED` and/or unaddressed reviewer **comments**. **Automatically** engage each comment per-intent and post in-thread replies; when a change request is present, also address the review summary, amend the phase commit, and re-request review (which clears the change request). Unresolved review *threads alone* resolve to `wait`. |
 | `reset` | A formal `CHANGES_REQUESTED` landed on an **upstream** phase PR. **Automatically** discard every downstream phase (close PRs, delete branches, remove stale artifacts) and return the ticket to that phase for revision. |
 | `land` | Every PR in the stack is READY. Merge the whole stack **bottom-up**, clean up artifacts and the worktree. Project Linear → `Done`. |
 
@@ -236,7 +242,7 @@ python3 scripts/qrspi_pr_state.py --owner <owner> --repo <repo> --ticket <ticket
 
 **Two kinds of review feedback, handled differently:**
 
-- A plain comment or unresolved nit thread does **not** reset the stack; it blocks `advance`/`land` and is cleared by the **manual** `revise` action (address the threads, amend, re-submit). Revise is bounded to the affected phase's own artifacts.
+- An **unaddressed reviewer comment** on the frontier PR routes to the autonomous `revise` action: the comment is answered / applied+amended / declined with rationale in place via an in-thread reply, no reset; revise is bounded to the affected phase's own artifacts. An **unresolved review thread alone** (no comment, no change request) resolves to `wait` — left for the reviewer to resolve. Neither resets the stack.
 - A formal `CHANGES_REQUESTED` on an upstream PR is a **reset**. Reset is **symmetric** across phases: a change request on phase K discards every phase above K (slices before plan), automatically and without confirmation, because the skip-if-exists resume logic would otherwise treat a stale `plan.md` / `structure.md` (or slice code) as done and ship work derived from a superseded design. The discard is bounded to ticket-local branches and artifacts; nothing is merged, so trunk is never rewritten.
 
 Because the PR state is authoritative, `/qrspi-work` is **resumable** and idempotent: re-running it re-reads the stack's PR state and computes the same action until something changes (a human approves, comments, or requests changes).
@@ -296,7 +302,7 @@ A full run therefore looks like:
 > /qrspi-work RUS-42      # land → merges the whole stack bottom-up, cleans up → Done
 ```
 
-If a reviewer leaves unresolved comments instead of approving, the next `/qrspi-work` returns `wait` (and you invoke it again, explicitly, to `revise`). If a reviewer requests changes on an upstream PR, the next invocation `reset`s — discarding the downstream phases automatically and returning to that phase.
+If a reviewer leaves an unaddressed comment, the next `/qrspi-work` runs `revise` automatically — answering/addressing it in place, then re-requesting review only when a formal change request is present. If the only signal is an unresolved review thread, it returns `wait` until the reviewer resolves it. If a reviewer requests changes on an upstream PR, the next invocation `reset`s — discarding the downstream phases automatically and returning to that phase.
 
 Start a fresh `/clear` session between invocations, especially before implementation.
 
@@ -337,8 +343,9 @@ Manual runs do not create branches, submit PRs, or project Linear status on thei
 - `submit` — finish/open a phase PR left dangling by a crashed run
 - `land` — an all-green stack is merged bottom-up
 - automatic `reset` — an upstream change request discards the stale downstream phases
+- `revise` — a frontier PR with a change request and/or unaddressed comments is addressed in place, then review is re-requested
 
-It **deliberately leaves the human-dependent actions untouched**: `wait` (a PR still awaiting review) and the **manual** `revise` (addressing unresolved comments) are skipped, so a human reviews each PR on GitHub. Run the batch after assigning tickets and moving them to `Selected`, or after approving phase PRs; it processes each one to its next gate.
+It **deliberately leaves only `wait` untouched** — a PR not yet approved, or whose only outstanding signal is unresolved review threads (neither a change request nor an unaddressed comment), so a human reviews each PR on GitHub. Run the batch after assigning tickets and moving them to `Selected`, or after approving phase PRs; it processes each one to its next gate.
 
 ---
 
@@ -361,7 +368,7 @@ The workflow is designed so that a fresh session per phase (and per slice) is th
 
 Revisions are driven through **GitHub PR review**, not by typing "revise" in a session. How a piece of feedback is handled depends on its kind and which PR it lands on:
 
-- **Unresolved comments / nits on the active phase PR → `revise` (manual, in-phase).** Leave review comments without requesting changes. The PR can't `advance` until the threads are resolved. On an explicit `revise` invocation, the orchestrator reads the unresolved threads (via GraphQL `reviewThreads`), addresses them with the cascade bounded to *that phase's own artifacts*, amends the phase commit, and re-submits. For the implementation stack, comments are grouped by slice and addressed from the lowest-numbered affected slice (changes restack upward).
+- **An unaddressed reviewer comment and/or formal `CHANGES_REQUESTED` on the frontier phase PR → `revise` (autonomous, in-phase).** On any `/qrspi-work` or batch pass, the orchestrator engages each comment per-intent (answer / apply+amend / decline with rationale) and posts an in-thread reply via `scripts/qrspi_comment_reply.py`; only when a formal change request is present does it also address the review summary, amend the phase commit, and re-request review (which clears the change request — the loop-safe termination signal). The cascade is bounded to *that phase's own artifacts*; for the implementation stack, comments are grouped by slice and addressed from the lowest-numbered affected slice (changes restack upward). An **unresolved review thread alone** (no comment, no change request) is left for the reviewer and resolves to `wait` — threads can only be resolved by the reviewer.
 - **A formal change request on an upstream PR → `reset` (automatic, cross-phase).** Requesting changes on the Design PR after the Plan PR (or slice PRs) already exist discards every downstream phase — closing its PRs, deleting its branches, and removing the now-stale artifacts — and returns the ticket to the design phase. The downstream work is regenerated, not patched in place, when the upstream phase is re-approved. The same is true for a change request on the Plan PR relative to the slice stack.
 
 For substantial design redirects, the cleanest path is a `CHANGES_REQUESTED` on the Design PR: the reset discards plan/slice work cleanly and the orchestrator regenerates it from the corrected design. Avoid hand-editing a downstream artifact to "patch around" an upstream design change — the existence-detection resume logic would treat the stale artifact as done. Approval lives entirely in the PR; there is no separate Linear approval step.
@@ -422,4 +429,4 @@ Expected. A formal `CHANGES_REQUESTED` on an upstream PR triggers an **automatic
 This is a recognized Graphite stale-association state — common after a reset closes a phase PR — handled by the orchestrator's resubmit recovery (detach the dead PR by renaming the branch away and back, then submit with `--force`). It is not an infrastructure error.
 
 **"The resolver returned an action I don't understand / errored"**
-The decision comes from `scripts/qrspi_resolve_state.py` (fed by `scripts/qrspi_pr_state.py`). Both are stdlib-only and unit-tested (`scripts/test_qrspi_*.py`) — run the tests to confirm the logic, and check the PR-state JSON the gatherer produced. The orchestrator treats an unrecognized action as a hard stop rather than guessing.
+The decision comes from `scripts/qrspi_resolve_state.py` (fed by `scripts/qrspi_pr_state.py`). Both are stdlib-only and unit-tested (each script has a `_test.py` sibling, e.g. `scripts/qrspi_resolve_state_test.py`) — run the tests to confirm the logic, and check the PR-state JSON the gatherer produced. The orchestrator treats an unrecognized action as a hard stop rather than guessing.

@@ -108,13 +108,18 @@ trunk
 - **RESET is automatic.** A formal `CHANGES_REQUESTED` on an *upstream* phase PR discards
   every downstream phase (close PRs, delete branches, remove stale artifacts) and returns
   the ticket to that phase. Symmetric across phases.
-- **REVISE is manual.** Addressing review comments within a phase happens only on an
-  explicit invocation — never from passive automation.
+- **REVISE is automatic.** A *frontier* phase PR carrying a formal `CHANGES_REQUESTED`
+  and/or unaddressed reviewer comments is addressed in place — each comment engaged
+  per-intent (answer / apply+amend / decline with rationale) — then review is re-requested
+  (which clears the change request). Unresolved review *threads* alone do NOT trigger
+  revise; only the reviewer resolves a thread.
 - The single `<id>/planning` branch is GONE — there is no shared planning branch and no
   amended-commit-of-all-six-artifacts. Each phase is its own branch and PR.
 
-> A plain comment or unresolved nit thread does NOT reset — it only blocks approval and
-> must be resolved. Only a formal change request resets downstream phases.
+> A plain comment or unresolved thread does NOT reset downstream phases — only a formal
+> change request does. Unaddressed reviewer comments on the frontier PR are addressed
+> autonomously via `revise`; a PR whose only signal is unresolved threads is left for the
+> reviewer (`wait`).
 
 ---
 
@@ -135,11 +140,12 @@ advance       Active phase PR is approved + clean    AUTO-ADVANCE: build the nex
               and a next phase exists.               phase stacked on top, open its PR.
 submit        Phase branch exists but its PR was     Finish artifacts if needed,
               never opened (crashed run).            submit the PR.
-wait          Active phase PR open, awaiting         Nothing to do — a human must
-              review (not approved, no unresolved    approve. Re-run after review.
-              threads).
-revise        Active phase PR has unresolved         MANUAL: address feedback within
-              review threads.                        the phase, amend, re-submit.
+wait          Active phase PR awaiting first         Nothing to do — only the reviewer
+              review, OR its only outstanding        can approve/resolve threads.
+              signal is unresolved review threads.   Re-run after review.
+revise        Frontier phase PR has a formal         AUTOMATIC: address feedback in
+              CHANGES_REQUESTED and/or unaddressed   place, amend, re-request review.
+              reviewer comments.
 reset         Upstream phase PR is CHANGES_REQUESTED. AUTOMATIC: discard downstream
                                                      phases, return to that phase.
 land          EVERY PR in the stack is approved +    Merge the whole stack bottom-up,
@@ -195,7 +201,7 @@ approval lives in the PR.
                                     PR-gated step forward (autonomous actions only).
 scripts/qrspi_resolve_state.py      Tested resolver — computes the action from PR state.
 scripts/qrspi_pr_state.py           Gathers PR review state via gh GraphQL reviewThreads.
-scripts/test_qrspi_*.py             stdlib-only unit tests for the resolver/state.
+scripts/qrspi_*_test.py             stdlib-only unit tests (one _test.py sibling per script).
 .qrspi/<ticket-id>/                 Per-ticket local artifacts (committed per phase).
 .qrspi/templates/                   Canonical artifact formats (single source of truth).
 .worktrees/<ticket-id>/             Isolated git worktree per ticket (gitignored).
@@ -288,8 +294,10 @@ Are you in crisis mode?
    Fix: the stack is held OPEN. Nothing lands until EVERY PR is approved + clean,
    then the whole stack lands bottom-up.
 
-❌ Auto-revising review comments
-   Fix: revise is MANUAL (explicit invocation only). Only reset/advance are automatic.
+❌ Waiting to hand-address every review comment yourself
+   Fix: revise is AUTOMATIC — a frontier PR with a change request and/or unaddressed
+   comments is addressed in place, then review is re-requested. A PR whose only signal is
+   unresolved threads is left for the reviewer (wait).
 
 ❌ Confusing vertical slices with horizontal layers
    Fix: each slice is end-to-end testable, not "all DB" then "all API."
@@ -342,8 +350,8 @@ CODE REVIEW:
 /qrspi-pr         <ticket-id>
 
 # Drive many assigned tickets one PR-gated step forward. Runs the autonomous
-# actions (run_design, advance, submit, land, automatic reset); leaves `wait`
-# and the manual `revise` untouched.
+# actions (run_design, advance, submit, land, automatic reset, and revise);
+# leaves only `wait` (awaiting first review, or thread-only PRs) untouched.
 # → run the "qrspi-batch" workflow via Claude Code's Workflow tool
 #   (e.g. ask Claude to "run the qrspi-batch workflow"); it is not a shell command.
 ```
@@ -393,8 +401,8 @@ gt merge --no-interactive                    # merges the stack bottom-up (NOT -
 Claude Code CLI   The agent host.
 Graphite (gt)     Stacked PRs — one per phase (design, plan, each slice).
 GitHub CLI (gh)   PR operations + GraphQL reviewThreads (unresolved-thread check).
-Linear MCP        Entry gate + best-effort reporting status for the
-                  your Linear workspace (never a gate after entry).
+Linear MCP        Entry gate + best-effort reporting status in your
+                  Linear workspace (never a gate after entry).
 ```
 
 ---

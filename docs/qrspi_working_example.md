@@ -32,7 +32,7 @@ Two things shape everything below:
 
    A phase PR is **ready** when `reviewDecision == APPROVED` *and* it has zero unresolved review threads. Approving a phase PR **auto-advances**: the next phase is built stacked on top. A human approving each phase PR is what moves the ticket forward. The `*Approved` Linear statuses were **dropped** — approval lives in the PR. Reporting statuses are `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.
 
-   A formal `CHANGES_REQUESTED` on an **upstream** phase PR **resets**: every downstream phase is automatically discarded (PRs closed, branches deleted, stale artifacts removed) and the ticket returns to that phase. **Revise** — addressing review comments *within* a phase — is **manual**, on explicit re-invocation. The decision is computed by the tested resolver `scripts/qrspi_resolve_state.py`; `/qrspi-work` and the batch workflow both call it rather than re-deriving state logic.
+   A formal `CHANGES_REQUESTED` on an **upstream** phase PR **resets**: every downstream phase is automatically discarded (PRs closed, branches deleted, stale artifacts removed) and the ticket returns to that phase. **Revise** is automatic and is the unified feedback action: a frontier phase PR carrying a formal `CHANGES_REQUESTED` and/or unaddressed reviewer comments is addressed in place, then review is re-requested. (Unresolved review *threads* alone do not trigger revise — they resolve to `wait` for the reviewer.) The decision is computed by the tested resolver `scripts/qrspi_resolve_state.py`; `/qrspi-work` and the batch workflow both call it rather than re-deriving state logic.
 
 Each phase lives on its **own** branch (`RUS-42/design`, `RUS-42/plan`, `RUS-42/slice-N`) as a single commit, stacked on the phase below it. The design PR is opened at Design Review; the plan PR is stacked on it at Plan Review; the slice PRs are stacked on plan at Code Review. Nothing merges until the whole feature is approved.
 
@@ -618,7 +618,7 @@ This is a **human turn**. The engineer reviews the Design PR. Suppose they leave
 > "On Decision 1: confirm this matches the UserNotifications pattern — separate table, one
 > row per type. Looks right. Approving."
 
-The PR review state is the gate, not Linear. On the next `/qrspi-work RUS-42` invocation, the resolver reads the Design PR. If it had unresolved threads, the action would be `revise` — address the feedback bounded to the design-phase artifacts only (Questions → Research → Design), amend the `RUS-42/design` commit, and re-submit. Here the comment is approving with no unresolved threads, so the resolver returns `wait` and the orchestrator stops.
+The PR review state is the gate, not Linear. On the next `/qrspi-work RUS-42` invocation, the resolver reads the Design PR. If it carried a formal `CHANGES_REQUESTED` and/or an unaddressed reviewer comment, the action would be `revise` (automatic) — address it bounded to the design-phase artifacts only (Questions → Research → Design), amend the `RUS-42/design` commit, and re-request review. Unresolved review *threads alone* do not trigger revise; they resolve to `wait` for the reviewer. Here the comment is approving with no change request, so the resolver returns `wait` and the orchestrator stops.
 
 The engineer **approves the Design PR**. That approval (`reviewDecision == APPROVED`, zero unresolved threads) is the only thing that unblocks the plan phase — the next `/qrspi-work RUS-42` will resolve to `advance` and build the plan PR stacked on top.
 
@@ -1057,12 +1057,12 @@ Linear (best-effort): RUS-42 → Plan Review
 "Plan submitted. PR: <url>. → Plan Review."
 ```
 
-Second **human turn**. The engineer reviews the Plan PR. Suppose they leave one comment on `structure.md` (an unresolved thread, not a formal change request):
+Second **human turn**. The engineer reviews the Plan PR. Suppose they leave one comment on `structure.md` (an unaddressed reviewer comment, not a formal change request):
 
 > "Decision 1 is right, but call out explicitly in Slice 3 that we're removing the legacy
 > `newsletter` check from promotions.worker.ts so we don't double-suppress."
 
-Because this comment is on the **plan** PR (the active phase), it does not reset the design — it is a within-phase `revise`. On an explicit re-invocation, the orchestrator reads the unresolved thread, addresses it bounded to the plan-phase artifacts (Slice 3 in `structure.md` already lists the `promotions.worker.ts` change, so this is a one-line clarification), amends the `RUS-42/plan` commit, and re-submits the Plan PR. (If instead the reviewer had filed a formal `CHANGES_REQUESTED` on the **design** PR, that would `reset`: the plan branch and PR would be discarded automatically and the ticket would return to design.)
+Because this is an unaddressed comment on the **plan** PR (the active phase), it does not reset the design — it is a within-phase `revise`, and it runs automatically. On the next `/qrspi-work RUS-42` (or batch) pass, the orchestrator reads the comment, addresses it bounded to the plan-phase artifacts (Slice 3 in `structure.md` already lists the `promotions.worker.ts` change, so this is a one-line clarification), posts an in-thread reply, and — since this is a comment with no formal change request — amends the `RUS-42/plan` commit without re-requesting review. (A PR whose only signal is an unresolved review *thread* would instead resolve to `wait`, left for the reviewer. And if the reviewer had filed a formal `CHANGES_REQUESTED` on the **design** PR, that would `reset`: the plan branch and PR would be discarded automatically and the ticket would return to design.)
 
 The engineer **approves the Plan PR**. Approval (with zero unresolved threads) is the only thing that unblocks implementation — the next `/qrspi-work RUS-42` resolves to `advance` and builds the slice stack on top of `RUS-42/plan`.
 
@@ -1180,7 +1180,7 @@ Stacked PRs (Graphite): slice-1 → slice-2 → slice-3
 
 ### The Code Review gate
 
-Third **human turn**. The engineer reviews the stack. On an explicit `/qrspi-work RUS-42` re-invocation, the resolver reads review state across all slice PRs (and the upstream design/plan PRs). If a slice PR has unresolved threads, the action is `revise`: address them starting from the lowest-numbered affected slice (changes propagate upward through the stack via `gt modify`, which auto-restacks descendants), then re-submit the stack. Here, suppose the review is clean:
+Third **human turn**. The engineer reviews the stack. On the next `/qrspi-work RUS-42` (or batch) pass, the resolver reads review state across all slice PRs (and the upstream design/plan PRs). If a slice PR carries a formal change request and/or an unaddressed reviewer comment, the action is `revise` and runs automatically: address it starting from the lowest-numbered affected slice (changes propagate upward through the stack via `gt modify`, which auto-restacks descendants), then re-request review. (A slice PR whose only signal is unresolved threads resolves to `wait`, left for the reviewer.) Here, suppose the review is clean:
 
 > "Clean stack. Tests cover the suppress/send branches. Approving all three."
 
@@ -1230,7 +1230,7 @@ no rework needed.
 
 1. **PR review state is the authority, not Linear.** `/qrspi-work` resolves what to do from the PR stack (via the tested resolver `scripts/qrspi_resolve_state.py`); a phase is ready when its PR is `APPROVED` with zero unresolved threads. Linear plays exactly two roles: an **entry gate** (assigned + `Selected`) and a **best-effort reporting projection** that never blocks work. Local files under `.qrspi/RUS-42/` hold the artifacts.
 
-2. **Approving a phase PR auto-advances; a change request resets.** Approving the Design PR builds the Plan PR on top; approving the Plan PR builds the slice stack. A formal `CHANGES_REQUESTED` on an upstream PR automatically discards the downstream phases (PRs closed, branches deleted, stale artifacts removed) and returns the ticket there. Within-phase revision is manual. This is where design issues get caught early — at the design gate, not in code review.
+2. **Approving a phase PR auto-advances; a change request resets.** Approving the Design PR builds the Plan PR on top; approving the Plan PR builds the slice stack. A formal `CHANGES_REQUESTED` on an upstream PR automatically discards the downstream phases (PRs closed, branches deleted, stale artifacts removed) and returns the ticket there. Within-phase revision is automatic — a frontier PR's change request and/or unaddressed comments are addressed in place, then review is re-requested. This is where design issues get caught early — at the design gate, not in code review.
 
 3. **One PR per phase, stacked, held open.** `RUS-42/design` → `RUS-42/plan` → `RUS-42/slice-1..N`, each its own branch and PR, each a single commit. Nothing merges until the whole feature is approved, then the stack lands bottom-up. The old single `RUS-42/planning` branch is gone.
 
@@ -1240,6 +1240,6 @@ no rework needed.
 
 6. **Vertical slices ship as a stack.** Each slice is end-to-end testable and becomes its own Graphite PR stacked on the previous one. Slice 1 ships with no database but is fully testable.
 
-7. **Batch mode for many tickets.** `.claude/workflows/qrspi-batch.js` drives many assigned tickets one PR-gated step forward — the autonomously-runnable actions (`run_design`, `advance`, `submit`, `land`, and automatic `reset`) — by spawning the typed phase agents. It deliberately leaves `wait` (not yet approved) and the manual `revise` path untouched.
+7. **Batch mode for many tickets.** `.claude/workflows/qrspi-batch.js` drives many assigned tickets one PR-gated step forward — the autonomously-runnable actions (`run_design`, `advance`, `submit`, `land`, automatic `reset`, and `revise` — addressing a frontier `CHANGES_REQUESTED`/commented PR in place then re-requesting review) — by spawning the typed phase agents. It deliberately leaves only `wait` (not-yet-approved, or thread-only PRs awaiting the reviewer) untouched.
 
 This is what QRSPI looks like in practice. Not theoretical — actual artifacts, actual PR gates, actual stacked PRs.

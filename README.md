@@ -39,7 +39,7 @@ Most workflows require only two commands:
 
 **`/qrspi-feature <description>`** is the front door for any new feature. It elicits requirements, then proposes a *reviewed* decomposition — one ticket vs several, a dependency DAG, and an overlap scan against in-flight tickets — and **stops for your approval before any Linear write**, so a multi-ticket split is never an unreviewed side effect. On approval it creates the ticket(s) through the shared writer, setting `blockedBy` edges and a Linear parent issue. The bias is hard toward one ticket with slices. (For a single, already-scoped ticket you want filed directly, **`/qrspi-ticket <description>`** is the direct entry — it runs the same guided interview and the same writer, without the decomposition step.)
 
-**`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It reads the ticket's **PR review state** (not Linear status), determines the current phase, and executes the appropriate action — design, plan, implementation, advance, reset, or land — without manual phase-by-phase invocation. Use this to drive a ticket from `Selected` through to a landed stack.
+**`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It reads the ticket's **PR review state** (not Linear status), determines the current phase, and executes the appropriate action — design, plan, implementation, advance, revise, reset, or land — without manual phase-by-phase invocation. Use this to drive a ticket from `Selected` through to a landed stack.
 
 ```
 # Start a new feature (decompose + review gate + create tickets)
@@ -48,6 +48,23 @@ Most workflows require only two commands:
 # After the ticket(s) are created (e.g., RUS-42), drive forward
 /qrspi-work RUS-42
 ```
+
+### Batch orchestration
+
+Where `/qrspi-work` drives **one** ticket, the **`qrspi-batch`** workflow drives **every** assigned, in-flight ticket one PR-gated step forward in a single pass. It is a [Workflow](https://docs.claude.com/) script (`.claude/workflows/qrspi-batch.js`), not a slash command — run it via the `qrspi-batch` skill or the Workflow tool. Use it after assigning a batch of tickets to `Selected`, or after approving phase PRs, to fan the whole queue forward at once.
+
+It does **not** re-derive any decision logic: per ticket it runs the same tested resolver (`scripts/qrspi_resolve_state.py`) that `/qrspi-work` uses, then branches on the resulting action. The pass runs these phases:
+
+| Phase | What it does |
+|-------|--------------|
+| **Query** | List assigned `Selected` + in-flight (`Design Review`/`Plan Review`/`Code Review`) tickets, scoped to the mapped Linear project (`input.allProjects` > `input.project` > config `linearProject` > `QRSPI`). |
+| **Resolve** | Per ticket: set up the worktree, gather PR review state, run the resolver → a decision. |
+| **Restack** | Per ticket: restack onto current trunk so drift/conflicts surface early. |
+| **Design / Plan / Implementation** | Spawn the typed phase agents for `run_design`, `advance → plan`, and `advance → implementation`. |
+| **Finalize** | Commit / submit / reset / land + best-effort Linear projection. |
+| **Reconcile** | Opt-in: reap stranded already-merged worktrees via `qrspi_cleanup.py` (dry-run by default). |
+
+**One autonomous step per ticket per run.** Each step lands the ticket in a review-wait state, so the batch is meant to be re-run after each round of human review. The autonomously-runnable actions are: `run_design`, `advance` (plan / implementation), `submit`, `land`, automatic `reset`/discard of downstream phases, and `revise` — addressing a frontier PR carrying a formal `CHANGES_REQUESTED` and/or unaddressed reviewer comments in place, then re-requesting review (which flips `reviewDecision` back to `REVIEW_REQUIRED` — the loop-safe termination signal). It **skips** anything resolving to `wait`: a PR awaiting first review, or one whose only outstanding signal is unresolved review *threads* (only the reviewer can resolve a thread). Tickets blocked by an open Linear blocker are reported `entry_blocked` and held.
 
 ### Individual phase skills
 
@@ -93,14 +110,22 @@ Each phase has a standalone skill that can be invoked manually. These exist prim
     qrspi-worktree/
     qrspi-implement/
     qrspi-pr/
+    qrspi-feature/     # Front door — elicit, decompose, review gate, file ticket(s)
     qrspi-work/        # Autonomous orchestrator (PR-gated state machine)
   workflows/
     qrspi-batch.js     # Batch orchestrator — drives many tickets one PR-gated step forward
-scripts/
+scripts/                       # Deterministic helpers (stdlib-only; each has a _test.py sibling)
   qrspi_resolve_state.py       # Tested PR-gated decision logic (the resolver)
-  qrspi_resolve_state_test.py  # unit tests (alongside the module)
   qrspi_pr_state.py            # Gathers PR review state (gh GraphQL reviewThreads)
-  qrspi_pr_state_test.py       # unit tests (alongside the module)
+  qrspi_resolve.py             # One-shot: worktree + gather + decision + artifact detection
+  qrspi_persist.py             # Verifies a staged artifact and moves it to the canonical path
+  qrspi_pr_body.py             # Splices pr-summary.md into the slice-1 commit message
+  qrspi_revise_amend.py        # Stages + verifies a revise edit, then amends the phase commit
+  qrspi_restack.py             # Restacks a ticket's stack onto current trunk
+  qrspi_cleanup.py             # Reaps stranded already-merged worktrees/branches
+  qrspi_comment_reply.py       # Posts in-thread replies to reviewer comments
+  qrspi_config.py              # Reads .qrspi/config.json (reviewers, Linear team/project)
+  ...                          # plus *_test.py siblings and the evals/ placeholder harness
 .qrspi/
   templates/           # Canonical output formats (single source of truth)
     ticket.md
@@ -133,7 +158,10 @@ docs/                  # Guides and reference documentation
 
 ## Linear Integration
 
-Tickets are created and tracked as Linear issues in the Russelltsherman team, QRSPI project.
+Tickets are created and tracked as Linear issues. The Linear team and project are
+config-driven, not hard-coded: `.qrspi/config.json` (gitignored; see `.qrspi/config.example.json`)
+supplies `linearTeam` (the skill discovers/asks if unset) and `linearProject` (defaults to `QRSPI`).
+`linearProject` scopes both ticket creation and which tickets `qrspi-batch` sweeps.
 **Linear does not gate advancement — PR review state does.** Linear has two roles only:
 
 1. **Entry gate.** A ticket may only *begin* if it is assigned to a user and in the `Selected`
@@ -152,8 +180,8 @@ zero unresolved review threads. Each phase is its own stacked PR (`<id>/design` 
 | `run_design` | Entry gate satisfied; build the design PR (questions, research, design) |
 | `advance` → plan | Design PR approved; build the plan PR (structure, plan, work tree) stacked on it |
 | `advance` → implementation | Plan PR approved; build the slice PR stack |
-| `wait` | Active phase PR awaiting review — nothing to do until approved |
-| `revise` | Unresolved review threads on the active phase — address them (manual) |
+| `wait` | Active phase PR awaiting review, or whose only signal is unresolved review threads — nothing to do until the reviewer acts (threads can only be resolved by the reviewer) |
+| `revise` | Frontier phase PR carrying a formal change request and/or unaddressed reviewer comments — addressed in place, then review is re-requested (automatic) |
 | `reset` | Upstream PR change-requested — discard downstream phases, return to it (automatic) |
 | `land` | Every PR approved + clean — merge the whole stack bottom-up, then `Done` |
 

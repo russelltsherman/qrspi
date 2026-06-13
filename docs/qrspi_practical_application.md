@@ -235,10 +235,11 @@ Each command fetches the inputs it needs (the ticket from Linear, prior artifact
 forward. For each ticket it resolves the PR review state (via the same tested resolver
 `/qrspi-work` uses) and spawns the typed phase agents directly from the workflow script. It runs
 only the autonomously-runnable actions — `run_design` (entry gate satisfied), `advance` (a phase
-PR was approved), `submit`, `land`, and the automatic `reset`/discard — and deliberately leaves
-the human turns alone: it does not perform the manual `revise`, and it does nothing for a ticket
-whose active PR is still awaiting review (`wait`). Use it after assigning tickets and moving them
-to `Selected`, or after approving a batch of phase PRs.
+PR was approved), `submit`, `land`, the automatic `reset`/discard, and `revise` (addressing a
+frontier PR's formal `CHANGES_REQUESTED` and/or unaddressed reviewer comments in place, then
+re-requesting review). It skips only `wait` — a ticket whose active PR is not yet approved, or
+whose only outstanding signal is unresolved review threads awaiting the reviewer. Use it after
+assigning tickets and moving them to `Selected`, or after approving a batch of phase PRs.
 
 ### Step 4: Run Phase 1 (Questions)
 
@@ -409,10 +410,13 @@ Agent's response (bad): "But WebSocket is better for real-time..."
 
 **Important:** After feedback, agent rewrites design. This is the "brain surgery"—agent accepts your corrections cleanly without arguing. There are two distinct ways feedback flows back, and they behave differently:
 
-- **Unresolved comment threads / nit feedback on the Design PR** are addressed by the *manual*
-  `revise` path: on an explicit invocation, the orchestrator re-runs the affected design artifacts
-  (Questions → Research → Design), amends the `<id>/design` commit in place, and re-submits. This
-  is never automated — it only happens when you ask for it.
+- **A formal `CHANGES_REQUESTED` and/or unaddressed reviewer comments on the *frontier* Design PR**
+  are addressed by the autonomous `revise` path — the unified feedback action. On any `/qrspi-work`
+  or batch run, the worker engages each comment per-intent (answers / applies+amends / declines with
+  rationale) and posts an in-thread reply; and *only when a formal change request is present* it
+  also addresses the review summary, amends the `<id>/design` commit in place, and re-requests
+  review (which clears the change request). **Unresolved review *threads* alone** (no change request,
+  no unaddressed comment) are left for the reviewer and resolve to `wait`.
 - **A formal `CHANGES_REQUESTED` review** is the heavier signal. On any upstream phase PR it
   triggers an automatic *reset*: every downstream phase is discarded (PRs closed, branches deleted,
   stale artifacts removed) and the ticket returns to that phase. On the Design PR there is nothing
@@ -570,8 +574,10 @@ out at `.worktrees/<ticket-id>/` — same word, different thing.)
 
 **The Plan PR:** once the worktree artifact exists, the orchestrator submits the Plan PR
 (`<id>/plan`, carrying structure, plan, and worktree, stacked on the design PR) and reports **Plan
-Review**. Review it. Unresolved comment threads route through the manual `revise` path (re-run the
-affected plan artifacts, amend `<id>/plan`, re-submit). A formal `CHANGES_REQUESTED` on the
+Review**. Review it. A formal `CHANGES_REQUESTED` and/or unaddressed reviewer comments on the
+frontier Plan PR route through the autonomous `revise` path (engage each comment, and — only on a
+formal change request — amend `<id>/plan` and re-request review); unresolved review threads alone
+resolve to `wait` and are left for the reviewer. A formal `CHANGES_REQUESTED` on the
 *Design* PR at this point is an upstream change request: it automatically resets — the plan phase
 is discarded (PR closed, branch deleted, structure/plan/worktree removed) and the ticket returns to
 design. When satisfied, **approve the Plan PR**. That approval — not a Linear status — unlocks

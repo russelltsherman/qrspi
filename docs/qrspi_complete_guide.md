@@ -108,6 +108,24 @@ Step-by-step instructions for installing and running QRSPI using Claude Code age
 
 ---
 
+### 5. **Orientation Guide** (`qrspi-orientation.md`)
+
+The deepest single-document tour of the system — directory layout, the PR-gated lifecycle, the resolver action table, and a phase-by-phase reference.
+
+**Use this for:**
+
+- A thorough mental model of how the pieces fit together
+- The PR-state → action resolver table
+- Per-phase detail with links to each phase agent
+
+**Time to use:** 1 hour (thorough read)
+
+---
+
+> **Also see** the repository [`README.md`](../README.md) — the canonical top-level entry point, with the workflow phase table, primary/individual skills, the `qrspi-batch` orchestration overview, and the Linear integration model.
+
+---
+
 ## Learning Path
 
 ### For Beginners (First Time Using QRSPI)
@@ -153,7 +171,7 @@ Step-by-step instructions for installing and running QRSPI using Claude Code age
 2. **Build:** Custom CLAUDE.md additions for your codebase (1-2 hours)
    - Goal: Capture project-specific conventions so agents don't hallucinate them
 
-3. **Batch:** Use the `qrspi-batch` workflow to drive many assigned tickets one PR-gated step forward at once — it runs the autonomously-runnable actions (run_design, advance, submit, land, automatic reset) and leaves manual revise and not-yet-approved tickets untouched
+3. **Batch:** Use the `qrspi-batch` workflow to drive many assigned tickets one PR-gated step forward at once — it runs the autonomously-runnable actions (run_design, advance, submit, land, automatic reset, and revise — addressing a frontier `CHANGES_REQUESTED`/commented PR then re-requesting review) and leaves only not-yet-approved / thread-only (`wait`) tickets untouched
 
 4. **Establish:** Team standard (which features use QRSPI)
 
@@ -193,7 +211,7 @@ Know what's in each phase           → Quick Reference Card
 
 | Phase | Artifact |
 |-------|----------|
-| Ticket | A Linear issue (your Linear team, project QRSPI) — defines the problem |
+| Ticket | A Linear issue (your configured Linear team / project, default project QRSPI) — defines the problem |
 | Questions | `questions.md` — 8-15 technical questions from the ticket |
 | Research | `research.md` — answers from the codebase (ticket hidden to prevent anchoring) |
 | Design | `design.md` — pattern decisions, risk register, delta, open questions |
@@ -211,7 +229,7 @@ The ticket lives in Linear; all other artifacts are local files under `.qrspi/<t
 - **Plan PR** (`<id>/plan`, stacked on design) — structure, plan, work tree
 - **Slice PRs** (`<id>/slice-1..N`, stacked on plan) — implementation, one PR per slice
 
-The whole stack is **held open** until every PR is approved, then **landed bottom-up** — nothing merges mid-feature. Approving a phase PR (`reviewDecision == APPROVED` **and** zero unresolved review threads) **auto-advances**: the next phase is built stacked on top. A formal `CHANGES_REQUESTED` on an upstream PR **resets** — every downstream phase is discarded (PRs closed, branches deleted, stale artifacts removed) and the ticket returns to that phase. Addressing review comments within a phase (**revise**) is manual.
+The whole stack is **held open** until every PR is approved, then **landed bottom-up** — nothing merges mid-feature. Approving a phase PR (`reviewDecision == APPROVED` **and** zero unresolved review threads) **auto-advances**: the next phase is built stacked on top. A formal `CHANGES_REQUESTED` on an upstream PR **resets** — every downstream phase is discarded (PRs closed, branches deleted, stale artifacts removed) and the ticket returns to that phase. Addressing reviewer feedback within a phase (**revise**) is automatic: a frontier phase PR carrying a formal `CHANGES_REQUESTED` and/or unaddressed reviewer comments is addressed in place, then review is re-requested. Unresolved review threads alone (no change request, no unaddressed comment) are left for the reviewer and resolve to `wait`.
 
 **Why it works:**
 
@@ -227,9 +245,9 @@ The whole stack is **held open** until every PR is approved, then **landed botto
 
 - **`/qrspi-feature <description>`** is the **front door** for new feature work. It elicits requirements, proposes a *reviewed* ticket decomposition (one ticket vs. several, a dependency DAG, and an overlap scan against in-flight tickets) with a hard bias toward one ticket with slices, and **stops for human approval before any Linear write** — then creates the ticket(s) via the shared writer, setting `blockedBy` edges and a Linear parent issue for multi-ticket features.
 - **`/qrspi-ticket <description>`** is the **direct single-ticket entry**: it drafts and files ONE already-scoped ticket through the same guided interview and the same shared writer, *without* the decomposition/approval gate. (For a whole feature that might split or carry dependencies, use `/qrspi-feature`.)
-- **`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It gathers the ticket's PR review state, resolves the next action with the tested resolver (`scripts/qrspi_resolve_state.py`), and executes it — design, plan, implementation, advance, reset, or land. It auto-advances when a phase PR is approved and clean, waits while a PR is still in review, and never decides advancement from Linear status.
+- **`/qrspi-work <ticket-id>`** is the autonomous orchestrator. It gathers the ticket's PR review state, resolves the next action with the tested resolver (`scripts/qrspi_resolve_state.py`), and executes it — design, plan, implementation, advance, revise, reset, or land. It auto-advances when a phase PR is approved and clean, waits while a PR is still in review, and never decides advancement from Linear status.
 - Each phase's logic lives in a purpose-built agent at `.claude/agents/qrspi-<phase>.md` with per-phase tool lockdowns; the orchestrator spawns them by `subagent_type`. Slash-command wrappers live at `.claude/skills/qrspi-<phase>/SKILL.md`.
-- **`qrspi-batch`** (`.claude/workflows/qrspi-batch.js`) drives many assigned tickets one PR-gated step forward by resolving each ticket's PR state and spawning the typed phase agents. It runs the autonomously-runnable actions (run_design, advance, submit, land, and automatic reset/discard) and deliberately leaves manual revise and not-yet-approved (wait) tickets untouched.
+- **`qrspi-batch`** (`.claude/workflows/qrspi-batch.js`) drives many assigned tickets one PR-gated step forward by resolving each ticket's PR state and spawning the typed phase agents. It runs the autonomously-runnable actions (run_design, advance, submit, land, automatic reset/discard, and revise — addressing a frontier `CHANGES_REQUESTED`/commented PR then re-requesting review) and deliberately leaves only not-yet-approved / thread-only (`wait`) tickets untouched.
 
 ### The PR-gated lifecycle
 
@@ -243,8 +261,8 @@ The action is computed by the resolver from the live PR state, not a hand-coded 
 | `advance` → plan | Design PR approved + clean; build the plan PR (structure → plan → work tree) on `<id>/plan`, stacked on design | `Plan Review` |
 | `advance` → implementation | Plan PR approved + clean; build the slice PR stack `<id>/slice-1..N`, stacked on plan | `Code Review` |
 | `submit` | A phase branch exists but its PR was never opened; finish artifacts and submit | matching phase status |
-| `wait` | The active phase PR is awaiting review — nothing to do until a human approves it | unchanged |
-| `revise` | The active phase PR has unresolved threads — address them (manual, only on explicit invocation) | active phase status |
+| `wait` | The active phase PR is awaiting review — nothing to do until a human acts; this includes a PR whose only outstanding signal is unresolved review threads (no change request, no unaddressed comment) | unchanged |
+| `revise` | The frontier phase PR carries a formal `CHANGES_REQUESTED` and/or unaddressed reviewer comments — address them in place and re-request review (autonomous; the batch runs it too) | active phase status |
 | `reset` | A formal `CHANGES_REQUESTED` on an upstream PR — discard every downstream phase automatically and return to that phase | reset phase status |
 | `land` | Every PR in the stack is approved + clean — land the whole stack bottom-up, then clean up | `Done` |
 
