@@ -84,3 +84,67 @@
   call (T21) provided the JS glue concatenates both finding lists into the one findings file.
 
 ---
+
+## Session 3 — Slice 3a: Anchors + config reader + coherence pass (T11–T16)
+
+**Timestamp:** 2026-06-13T23:05:00Z
+**Tasks completed:** T11, T12, T13, T14, T15, T16
+**Tasks failed:** none
+**Tests:**
+
+- `node --check .claude/workflows/qrspi-batch.js` → SYNTAX_OK (the orchestrator is verified by
+  manual e2e per plan §3.24; an automated JS test does not exist).
+- `python3 scripts/qrspi_slice_critic_test.py` → 8 passed, 0 failed (no regression from the wiring).
+- `python3 scripts/qrspi_critic_body_test.py` → 41 passed, 0 failed (no regression from the wiring).
+
+**Deviations from structure.md:**
+
+- none.
+
+**Deviations from plan.md:**
+
+- T11 (anchor confirmation, plan §3.11): confirmed against the ACTUAL code, not the asserted
+  line numbers. `art(wd,id,name)` lives at qrspi-batch.js:636 (`${wd}/.qrspi/${id}/${name}`);
+  the doDesign panel-input resolution is at ~1414–1441 (NOT 1349–1360 — the design's cited
+  anchor had drifted); `r.ticketContentPath` is a first-class field of the RESOLVE envelope
+  (documented at qrspi-batch.js:177, always populated by qrspi_resolve.py). `next_action` is
+  reached via the existing `criticDecision(verdicts, round, maxRounds)` wrapper (qrspi-batch.js:1184),
+  which shells out to `qrspi_critic_loop.py` and returns `{ action, residual_findings }` with
+  actions `converged`/`revise`/`cap_reached` (confirmed in scripts/qrspi_critic_loop.py:108–113).
+- T14 (fail-closed guard, plan §3.14): the design/plan say "if any of the six resolved paths is
+  missing or empty → skip". The JS workflow has NO filesystem access (no `require('fs')`), so it
+  cannot stat files directly. The guard instead uses the RESOLVE envelope's authoritative
+  `r.existing.{questions,research,design,structure,plan}` presence booleans (qrspi-batch.js:178)
+  for the five planning artifacts, plus a truthiness check on `r.ticketContentPath` (the sixth
+  input, resolved by construction before any advance). This is the same presence source the
+  design phase already trusts; it is a mechanism choice within the contract, not a behavior
+  deviation — a missing/empty input still yields `skip(...)` with no critic spawn.
+
+**Notes for next session:**
+
+- The pre-existing helpers `readImplementationCriticConfig(wd, id)` (qrspi-batch.js:1163),
+  `resolveImplementationCritic` / `parseImplementationCriticConfig`, `runCoherenceCritic(id, paths, maxRounds)`
+  (~1529), and `runSliceCritic(t, r, wd, sliceN, dec, planSlice, structureSlice, maxRounds)` (~1583)
+  were already defined in the working tree from earlier slice-3 work but were NOT called by
+  `doImplementation`. Session 3 wired ONLY the config reader + coherence pass (T12–T16) into
+  `doImplementation` (the block sits right after `const wd = setup.worktreeDir`, before the slice
+  loop). `runSliceCritic` is still UNWIRED — that is Session 4 (Slice 3b, T17–T20).
+- `coherenceFindings` (a `let` in `doImplementation`, initialized to `[]`) now carries the
+  coherence pass's residual findings in memory. It is currently CONSUMED BY NOTHING — Session 5
+  (Slice 3c, T21) must surface it into the SLICE-1 PR body via
+  `qrspi_critic_body.py --phase slice --slice 1` (concatenated with slice-1's own per-slice
+  residual findings). Until T21 lands, `coherenceFindings` is a deliberately-carried but unread
+  variable (the T15 "carry in memory" deliverable); do not delete it.
+- `runCoherenceCritic` returns `{ ok, residualFindings }`. `ok:false` (critic spawn failure) is
+  already mapped to `skip(...)` in `doImplementation` (T16). The helper is surface-only at the
+  seam (no upstream reviser — Decision 3): both `revise` and `cap_reached` next_action actions
+  terminate by carrying the current findings; only `converged` clears them.
+- The coherence agentType `qrspi-coherence-critic` resolves to `.claude/agents/qrspi-coherence-critic.md`
+  (already present, `{pass, findings}` shape, tools: Read). The per-slice critic (Session 4) reuses
+  the EXISTING `qrspi-critic` agent — no new prompt.
+- The whole seam is gated on `implCriticCfg.coherence.enabled`; with `critics.implementation`
+  absent (the default in `.qrspi/config.example.json`, which already carries the block, OFF) the
+  reader returns disabled defaults and `doImplementation` runs its byte-for-byte-unchanged
+  no-critic path (the slice loop is untouched by Session 3).
+
+---
