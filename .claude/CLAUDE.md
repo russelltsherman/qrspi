@@ -132,14 +132,19 @@ stays on `main`; all ticket work happens in worktrees. `.worktrees/` is gitignor
   `.qrspi/config.json` (gitignored; see `.qrspi/config.example.json`), falling back to the `@me`
   default, which expands to the gh-authenticated user (set `"reviewers": []` to opt out). Requesting
   a reviewer is what surfaces a PR in that user's Graphite review queue.
-- PR **bodies are authored at Graphite creation**, never via `gh pr edit`: `gt submit` has no
-  body flag and seeds the PR description from the branch commit message *at creation only*, so the
-  commit message is the only non-interactive lever for the body — this is a `gt`/commit-message
-  constraint, independent of token capability (the bot's classic PAT can write PR comments fine;
-  see RUS-54 / the gh-cross-account note). Design/plan PRs use
-  their heredoc commit message as the body; for implementation, `scripts/qrspi_pr_body.py`
-  (self-locating, like the resolver) splices `pr-summary.md` into the slice-1 commit message before
-  `gt submit`, and slices 2..N carry a focused "Part N/total" body from their own commit messages.
+- PR **bodies default to Graphite-creation seeding**: `gt submit` has no body flag and seeds the
+  PR description from the branch commit message *at creation only*, so the commit message remains
+  the primary non-interactive lever and the orchestrator authors bodies that way. **A PR body MAY
+  now be set or corrected after creation via the GitHub REST API** — `gh api
+  repos/<owner>/<repo>/pulls/<N> -X PATCH -F body=@<file>` (the old "never edit a PR body with gh"
+  rule is lifted; the bot's classic PAT writes PR bodies fine — see RUS-54 / the gh-cross-account
+  note). Prefer the REST API PATCH over `gh pr edit`, which can abort on the Projects-classic
+  GraphQL deprecation (`repository.pullRequest.projectCards`) and leave the body unchanged. This
+  lifts only body/title editing; **publishing PRs still goes through `gt submit`, never `gh`**.
+  Design/plan PRs use their heredoc commit message as the body; for implementation,
+  `scripts/qrspi_pr_body.py` (self-locating, like the resolver) splices `pr-summary.md` into the
+  slice-1 commit message before `gt submit`, and slices 2..N carry a focused "Part N/total" body
+  from their own commit messages.
 - All of the above have stdlib-only unit tests as `_test.py` siblings (`scripts/qrspi_*_test.py`, run with `python3`).
 - Artifact templates live in `.qrspi/templates/` (reference only — not written locally)
 - The `evals/` + `scripts/run_eval.py` harness is a **non-functional placeholder** — verify

@@ -254,8 +254,11 @@ EOF
 The slice commit **message body is the PR description** — Graphite seeds each PR's body
 from its branch commit message when it *creates* the PR (this is also how the design/plan
 PRs get their bodies). So every slice from 2..N gets the focused "Part N/total" body above
-at creation; slice 1 gets the full `pr-summary.md` (next paragraph). **Do not** set PR
-bodies with `gh pr edit` — the gh PAT cannot write PRs on this repo (see
+at creation; slice 1 gets the full `pr-summary.md` (next paragraph). Bodies are seeded from the
+commit message at creation — the deterministic default. A post-hoc body correction, if needed,
+uses `gh api repos/<owner>/<repo>/pulls/<N> -X PATCH -F body=@<file>` (gh PR writes succeed with
+the bot's classic PAT; prefer the REST API over `gh pr edit`, which can abort on the
+Projects-classic bug — see
 [Why bodies are authored at creation](#why-pr-bodies-are-authored-at-graphite-creation)).
 
 After all slices: spawn `qrspi-pr` to produce `pr-summary.md`, amend it into the **last**
@@ -360,7 +363,7 @@ python3 scripts/qrspi_comment_reply.py --ticket <ticket-id> --pr <number> \
 It prints a `ReplyEnvelope` `{ ok, replyId, inReplyToId, error? }`. Read `ok` off **stdout** (do
 not infer success from exit code alone). gh comment writes **succeed** here with the bot's
 classic PAT — the old cross-account write block is gone (see the gh-cross-account note); if a
-write ever fails, report it honestly and do **not** fall back to `gh pr edit`.
+write ever fails, report it honestly rather than papering over it.
 
 **Idempotency is structural:** once the bot's reply is observed in the thread (or a newer bot
 top-level comment exists), the gather no longer reports that comment as unaddressed, so a later
@@ -637,9 +640,9 @@ state, not an infrastructure error — the HARD STOP rule does not apply.
 
 ### Why PR bodies are authored at Graphite creation
 
-PR descriptions are set **only** through the branch commit message, which Graphite uses to
-seed the PR title (subject line) and body (the rest) **when it creates the PR**. There is no
-`gh pr edit` step anywhere in this lifecycle, by design:
+PR descriptions are set through the branch commit message, which Graphite uses to
+seed the PR title (subject line) and body (the rest) **when it creates the PR**. The normal
+flow needs no gh body edit, by design (not by prohibition):
 
 - `gt submit` (1.8.x) has **no** `--body`/`--body-file` flag — the commit message is the
   only non-interactive lever for the description, and Graphite reads it **at creation only**
@@ -654,8 +657,11 @@ seed the PR title (subject line) and body (the rest) **when it creates the PR**.
 So: design/plan PRs carry their heredoc commit message as the body; implementation slice PRs
 get a focused "Part N/total" body from the slice commit, and slice 1's commit message is
 overwritten with the full `pr-summary.md` via `scripts/qrspi_pr_body.py` **before** the
-creating `gt submit`. Bodies are seeded by the commit message at creation, so there is simply
-no `gh pr edit` step — do not add one back.
+creating `gt submit`. Bodies are seeded by the commit message at creation, so the normal flow
+needs no gh body edit. A post-hoc body correction, when genuinely needed, IS allowed via
+`gh api repos/<owner>/<repo>/pulls/<N> -X PATCH -F body=@<file>` (not `gh pr edit`, which can
+abort on the Projects-classic GraphQL bug) — the commit-message path just stays the default
+because it is the single deterministic source.
 
 ---
 

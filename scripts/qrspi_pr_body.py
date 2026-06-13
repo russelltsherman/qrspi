@@ -10,14 +10,16 @@ seed it from the branch's commit message when it *creates* the PR. That is exact
 the design/plan PRs already get their bodies (their heredoc commit message becomes the
 PR body). The implementation phase was the lone exception — it created slice commits
 with a subject-only message and then tried to attach the body afterward with
-`gh pr edit ... --body`. That post-hoc edit fails: the gh-authenticated token is a
-fine-grained PAT owned by a *different* personal account than the repo owner, so it can
-READ the public repo but every authenticated PR write returns
-`403 Resource not accessible by personal access token`. (Graphite's own GitHub-App
-credential — a separate auth path — is what makes `gt submit` itself succeed.)
+`gh pr edit ... --body`. That post-hoc approach is the wrong default: Graphite seeds the PR
+body from the commit message at CREATION ONLY, so a body attached after `gt submit` does not
+update the PR. (Historical note: this originally ALSO 403'd, because the bot used a
+fine-grained PAT owned by a different account; the bot now uses a classic PAT and gh PR writes
+succeed — so a body MAY be corrected post-hoc via
+`gh api repos/<owner>/<repo>/pulls/<N> -X PATCH -F body=@<file>`. The commit-message path
+remains the default because it is the single deterministic source, not because gh is blocked.)
 
-So the fix is to stop writing PR bodies through gh entirely and author them at the one
-write path that works: the commit message Graphite reads at creation. This script sets
+So the body is authored at that deterministic single-source path: the commit message Graphite
+reads at creation. This script sets
 the slice commit's message to `<existing subject> + <body file contents> + <existing
 trailer>` and amends it via `gt modify -m` (which auto-restacks the slices above it).
 The caller's subsequent `gt submit --publish --stack` then creates each slice PR with
