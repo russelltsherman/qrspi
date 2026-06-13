@@ -334,7 +334,13 @@ function parseConfigEnvelope(text, key) {
 // non-object value (e.g. "" when the key is absent), or a non-object `.design` ⇒ undefined,
 // which leaves the opt-in panel seam OFF (doDesign falls back to its JS defaults). This never
 // throws and never gates the run — a garbled critics block silently disables the override.
-function parseCriticConfig(text) {
+// Parse the WHOLE `critics` object off the config worker's `--key critics` envelope. Returns
+// the parsed `value` object ({ design?, questions?, research?, structure?, plan? }) or undefined
+// on ANY of: no JSON, parse failure, ok:false, key mismatch, or a non-object value (e.g. "" when
+// the key is absent). Never throws and never gates the run. parseCriticConfig (the design-block
+// extractor) is layered on top of this so a single `--key critics` read feeds BOTH the design
+// panel and the per-phase edge-critic maxRounds resolver — no second config read (RUS-57 Q6/Q8).
+function parseCriticsObject(text) {
   const raw = extractJsonObject(text)
   if (!raw) return undefined
   let env
@@ -342,6 +348,12 @@ function parseCriticConfig(text) {
   if (!env || env.ok !== true || env.key !== 'critics') return undefined
   const value = env.value
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  return value
+}
+
+function parseCriticConfig(text) {
+  const value = parseCriticsObject(text)
+  if (!value) return undefined
   const design = value.design
   if (!design || typeof design !== 'object' || Array.isArray(design)) return undefined
   return design
@@ -388,6 +400,17 @@ function resolveDesignCritic(design) {
     if (requested > framingCap) log(`  config: clamping design-critic candidates ${requested} → ${framingCap} (max framings: [${DEFAULT_DESIGN_FRAMINGS.join(', ')}])`)
   }
   return { maxRounds, lenses, candidates }
+}
+
+// Resolve the per-phase edge-critic `maxRounds` for the single-critic planning phases
+// (questions/research/structure/plan) from the whole parsed `critics` object (RUS-57 Decision 5).
+// Returns `critics.<phase>.maxRounds` when it is a positive integer, else the JS default 2 —
+// mirroring resolveDesignCritic's `Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0 ? … : 2`.
+// `parsedCritics` undefined / missing the phase / a non-positive-int maxRounds all fall back to 2.
+// Reads from the already-parsed `critics` object (parseCriticsObject) — NO new config read (Q6/Q8).
+function resolveEdgeCriticMaxRounds(parsedCritics, phase) {
+  const cfg = parsedCritics && typeof parsedCritics === 'object' ? parsedCritics[phase] : undefined
+  return (cfg && Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0) ? cfg.maxRounds : 2
 }
 
 // Read the additive RUS-68 `failedRemotes` list off a parsed cleanup envelope, tolerating
@@ -469,6 +492,20 @@ const PERSIST_SCHEMA = {
     error: { type: 'string' },
     dest: { type: 'string' },
     bytes: { type: 'number' },
+  },
+}
+
+// The deterministic pre-critic node-check envelope (RUS-57 Decision 2). Today only the research
+// phase carries a nodeCheck — the citation validator (scripts/qrspi_verify_citations.py) printing
+// a single-line CitationCheckEnvelope { ok, unresolved, error? }. `ok:false` (an out-of-bounds
+// citation, or an I/O error) fails the phase BEFORE persist, so nothing is written.
+const NODECHECK_SCHEMA = {
+  type: 'object',
+  required: ['ok'],
+  properties: {
+    ok: { type: 'boolean' },
+    unresolved: { type: 'array', items: { type: 'string' } },
+    error: { type: 'string' },
   },
 }
 
@@ -630,6 +667,32 @@ verbatim. If it reports ok:false, return that as-is — HARD STOP, do NOT retry,
 improvise alternative commands or paths.`,
     { label: `persist:${id}:${name}`, phase: phaseLabel, schema: PERSIST_SCHEMA }
   )
+}
+
+// Deterministic pre-critic node-check (RUS-57 Decision 2 Option A). Runs INSIDE the pre-persist
+// staging window of runPhase — after the producer succeeds, before the edge-critic loop — on the
+// still-staged artifact. The only node-check today is research's citation validator. The command
+// is fully built at the call site (doDesign, where `wd`/`r` are in scope) and carried verbatim on
+// `nodeCheck.cmd`, so this function needs no path context. It spawns a worker to run that one
+// command and parse its single-line envelope. Returns { ok, unresolved } — ok:false (a broken
+// citation, an I/O error, or a worker/parse failure) makes runPhase return false so nothing
+// persists. A null worker result is treated as ok:false (fail-closed — the check could not run).
+async function runNodeCheck(id, name, nodeCheck) {
+  const env = await agent(
+    `You are the NODE-CHECK worker for ${id} artifact "${name}". Your cwd is the main repo root.
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives:
+
+  ${nodeCheck.cmd}
+
+It prints ONE single-line JSON envelope { ok, unresolved, error? } and exits 0 (ok) or 1
+(not ok). Parse that JSON and return it verbatim. If it reports ok:false or exits non-zero,
+return that JSON as-is — HARD STOP, do NOT retry, do NOT improvise alternative commands.`,
+    { label: `nodecheck:${id}:${name}`, phase: 'Critic', schema: NODECHECK_SCHEMA }
+  )
+  if (!env || typeof env.ok !== 'boolean') {
+    return { ok: false, unresolved: [] }
+  }
+  return { ok: env.ok === true, unresolved: Array.isArray(env.unresolved) ? env.unresolved : [] }
 }
 
 // Edge-critic loop (RUS-55). Runs ENTIRELY inside the pre-persist staging window of
@@ -1084,11 +1147,14 @@ Return its JSON stdout verbatim ({ ok }). HARD STOP — do NOT retry or improvis
   return !!(out && out.ok === true)
 }
 
-// Read the OPTIONAL `critics` config block via the config worker + parseCriticConfig, then
-// resolve the design-critic maxRounds + lens set (config > JS default — resolveDesignCritic).
-// Best-effort: any read/parse failure leaves the parsed block undefined ⇒ resolveDesignCritic
-// returns the JS defaults (the panel still runs with the default four lenses). Returns
-// { maxRounds, lenses }. Never throws and never gates the run (the override is opt-in).
+// Read the OPTIONAL `critics` config block via the config worker (ONE `--key critics` read),
+// then resolve the design-critic maxRounds + lens set (config > JS default — resolveDesignCritic)
+// AND surface the whole parsed `critics` object so the per-phase edge-critic maxRounds resolver
+// (resolveEdgeCriticMaxRounds) can read questions/research/structure/plan off the SAME read — no
+// second config read (RUS-57 Decision 5; Q6/Q8; the single-top-level-key constraint that bit
+// slice 3). Best-effort: any read/parse failure leaves the parsed block undefined ⇒
+// resolveDesignCritic returns the JS defaults AND every resolveEdgeCriticMaxRounds falls back to
+// 2. Returns { maxRounds, lenses, candidates, parsedCritics }. Never throws / never gates the run.
 async function readDesignCriticConfig() {
   const cfgOut = await agent(
     `You are the CONFIG worker for the QRSPI design critic. Your cwd is the main repo root.
@@ -1103,7 +1169,8 @@ surrounding prose, NO code fences, NO edits. Do NOT call any structured-output t
 printed ok:false, still output that JSON verbatim (do NOT retry or improvise).`,
     { label: 'config:critics', phase: 'Design' }
   )
-  return resolveDesignCritic(parseCriticConfig(cfgOut))
+  const parsedCritics = parseCriticsObject(cfgOut)
+  return { ...resolveDesignCritic(parseCriticConfig(cfgOut)), parsedCritics }
 }
 
 // Invoke the tested pure decision module qrspi_critic_loop.py via a worker (the JS sandbox
@@ -1174,6 +1241,20 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel, criti
       return false
     }
     if (sel.summary) criticConfig.selectSummary = sel.summary
+  }
+  // Deterministic pre-critic node-check (RUS-57 Decision 2 Option A): when criticConfig carries
+  // a nodeCheck (today only research's citation validator), run it on the still-staged artifact
+  // AFTER the producer succeeds and BEFORE the edge-critic loop. A non-ok result (a provably
+  // broken citation, an I/O error, or a worker/parse failure) returns false so NOTHING persists —
+  // the check lives entirely inside the pre-persist staging window. No-nodeCheck phases skip this
+  // block and behave byte-for-byte as before.
+  if (criticConfig && criticConfig.nodeCheck) {
+    const nc = await runNodeCheck(id, name, criticConfig.nodeCheck)
+    if (!nc.ok) {
+      log(`  ${id}: ${name} node-check FAILED${nc.unresolved.length ? ` — unresolved: [${nc.unresolved.join(', ')}]` : ''} — stopping this ticket (nothing persisted)`)
+      return false
+    }
+    log(`  ${id}: ${name} node-check passed`)
   }
   // Edge-critic loop (RUS-55): runs BETWEEN produce-success and the persist gate, on the
   // still-staged artifact, so persist remains the single success gate. No-critic phases skip
@@ -1324,13 +1405,39 @@ async function doDesign(t, r) {
   const wd = r.worktreeDir
   phase('Design')
 
+  // ONE `--key critics` read up front (RUS-57 Decision 5): it resolves the design-panel knobs
+  // AND surfaces the whole parsed `critics` object so each planning phase's edge-critic maxRounds
+  // (resolveEdgeCriticMaxRounds) reads off the SAME read — no second config read (Q6/Q8).
+  const { maxRounds: designMaxRounds, lenses: designLenses, candidates: designCandidates, parsedCritics } = await readDesignCriticConfig()
+
+  // Single edge-critic on questions (RUS-57), anchored on the TICKET (Q12 — questions are derived
+  // from the ticket). No `lenses` ⇒ runPhase routes to the single-critic runCriticLoop.
+  const questionsCritic = {
+    upstreamPath: r.ticketContentPath,
+    maxRounds: resolveEdgeCriticMaxRounds(parsedCritics, 'questions'),
+  }
   if (!await runPhase('questions', 'qrspi-questions',
     `TICKET_ID = ${t.id}
 TICKET_CONTENT_PATH = ${r.ticketContentPath}
 
 OUTPUT_PATH = ${stg(t.id, 'questions')}
-TEMPLATE_PATH = ${tpl(wd, 'questions.md')}`, r.existing, t.id, 'Design')) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'questions.md')}`, r.existing, t.id, 'Design', questionsCritic)) return failTicket(t)
 
+  // Single edge-critic on research (RUS-57). upstreamPath is questions.md and NEVER
+  // r.ticketContentPath — the research phase is firewalled from the ticket (Risk Register
+  // med/high; Q12). Research ALSO carries the citation node-check: runPhase runs the validator on
+  // the STAGED research.md before the critic, failing the phase on a provably-broken citation
+  // (out-of-bounds line/range) without persisting. The validator joins citations against `wd`
+  // (the worktree root) explicitly — never resolve_repo_root() (RUS-57 Decision 3; impl-log
+  // slice 1: pass --worktree-root wd). engineCmdFor(r,…) anchors the script on the host checkout
+  // root (not the worktree HEAD, which a relocating ticket may have moved).
+  const researchCritic = {
+    upstreamPath: art(wd, t.id, 'questions.md'),
+    maxRounds: resolveEdgeCriticMaxRounds(parsedCritics, 'research'),
+    nodeCheck: {
+      cmd: `python3 ${engineCmdFor(r, 'scripts/qrspi_verify_citations.py')} --artifact-path ${stg(t.id, 'research')} --worktree-root ${wd}`,
+    },
+  }
   if (!await runPhase('research', 'qrspi-research',
     `TICKET_ID = ${t.id}
 QUESTIONS_PATH = ${art(wd, t.id, 'questions.md')}
@@ -1338,15 +1445,14 @@ OUTPUT_PATH = ${stg(t.id, 'research')}
 TEMPLATE_PATH = ${tpl(wd, 'research.md')}
 REPO_ROOT = ${wd}
 
-Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidden from you — do not seek it out.`, r.existing, t.id, 'Design')) return failTicket(t)
+Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidden from you — do not seek it out.`, r.existing, t.id, 'Design', researchCritic)) return failTicket(t)
 
-  // Multi-lens edge-critic PANEL on the design artifact (RUS-56). The lens set + maxRounds are
-  // config-overridable (critics.design > JS default four lenses / 2 rounds); `lenses` is the
-  // panel switch runPhase dispatches on. The lens inputs are resolved HERE (where `wd`/`r` are
-  // in scope): research.md is upstreamPath (the rubric anchor, reused as RESEARCH_PATH) plus
-  // the ticket content + questions.md. The panel populates residualFindings exactly as the
-  // single critic did, so the criticBodyStep/PR-body flow below is unchanged.
-  const { maxRounds: designMaxRounds, lenses: designLenses, candidates: designCandidates } = await readDesignCriticConfig()
+  // Multi-lens edge-critic PANEL on the design artifact (RUS-56). The lens set + maxRounds were
+  // resolved from the single config read above (critics.design > JS default four lenses / 2
+  // rounds); `lenses` is the panel switch runPhase dispatches on. The lens inputs are resolved
+  // HERE (where `wd`/`r` are in scope): research.md is upstreamPath (the rubric anchor, reused as
+  // RESEARCH_PATH) plus the ticket content + questions.md. The panel populates residualFindings
+  // exactly as the single critic does, so the criticBodyStep/PR-body flow below is unchanged.
   const designCritic = {
     upstreamPath: art(wd, t.id, 'research.md'),
     maxRounds: designMaxRounds,
@@ -1370,9 +1476,19 @@ OUTPUT_PATH = ${stg(t.id, 'design')}
 TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, r.existing, t.id, 'Design', designCritic)) return failTicket(t)
 
   phase('Finalize')
-  // Residual critic findings (cap-reached only) to splice into the PR body. runPhase wrote
-  // them back onto the criticConfig object; absent ⇒ converged ⇒ nothing to surface.
-  const designFindings = designCritic.residualFindings ?? []
+  // Residual critic findings (cap-reached only) to splice into the Design PR body. runPhase wrote
+  // each phase's findings back onto its criticConfig object; absent ⇒ converged ⇒ nothing. All
+  // three phases (questions/research/design) land on the SAME ${t.id}/design branch + PR, so their
+  // residual findings are AGGREGATED into the one design-commit splice (RUS-57 T16). qrspi_critic_
+  // body.py only knows the design/plan branch suffixes — there is no questions/research branch —
+  // so questions/research findings ride the design phase, each tagged with its source phase.
+  const tagFindings = (phaseName, cfg) =>
+    (cfg.residualFindings ?? []).map(f => `[${phaseName}] ${f}`)
+  const designFindings = [
+    ...tagFindings('questions', questionsCritic),
+    ...tagFindings('research', researchCritic),
+    ...(designCritic.residualFindings ?? []),
+  ]
   const designBodyStep = criticBodyStep(t.id, 'design', designFindings, wd)
   const fin = await agent(
     `You are the DESIGN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: run_design" commit+submit steps of ${SKILL}.
@@ -1401,14 +1517,30 @@ async function doPlan(t, r) {
   const wd = r.worktreeDir
   phase('Plan')
 
+  // ONE `--key critics` read for the plan phase, surfacing the whole parsed `critics` object so
+  // structure's and plan's edge-critic maxRounds resolve off the same read (RUS-57 Decision 5;
+  // Q6/Q8). doPlan is a SEPARATE batch action from doDesign, so reading here is the single read
+  // for this invocation — not a duplicate of doDesign's.
+  const { parsedCritics } = await readDesignCriticConfig()
+
+  // Single edge-critic on structure (RUS-57), anchored on its upstream design.md. No `lenses` ⇒
+  // runPhase routes to the single-critic runCriticLoop.
+  const structureCritic = {
+    upstreamPath: art(wd, t.id, 'design.md'),
+    maxRounds: resolveEdgeCriticMaxRounds(parsedCritics, 'structure'),
+  }
   if (!await runPhase('structure', 'qrspi-structure',
     `TICKET_ID = ${t.id}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
 OUTPUT_PATH = ${stg(t.id, 'structure')}
-TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, r.existing, t.id, 'Plan', structureCritic)) return failTicket(t)
 
-  // Edge-critic on the plan artifact, anchored on its upstream structure.md (OQ4, default 2).
-  const planCritic = { upstreamPath: art(wd, t.id, 'structure.md'), maxRounds: 2 }
+  // Edge-critic on the plan artifact, anchored on its upstream structure.md (OQ4). maxRounds is
+  // now config-overridable per-phase (RUS-57 — was a literal 2; falls back to 2).
+  const planCritic = {
+    upstreamPath: art(wd, t.id, 'structure.md'),
+    maxRounds: resolveEdgeCriticMaxRounds(parsedCritics, 'plan'),
+  }
   if (!await runPhase('plan', 'qrspi-plan',
     `TICKET_ID = ${t.id}
 STRUCTURE_PATH = ${art(wd, t.id, 'structure.md')}
@@ -1423,7 +1555,13 @@ OUTPUT_PATH = ${stg(t.id, 'worktree')}
 TEMPLATE_PATH = ${tpl(wd, 'worktree.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
 
   phase('Finalize')
-  const planFindings = planCritic.residualFindings ?? []
+  // structure + plan both land on the SAME ${t.id}/plan branch + PR (qrspi_critic_body.py only
+  // knows the design/plan branch suffixes — there is no structure branch), so structure's residual
+  // findings are AGGREGATED into the one plan-commit splice, tagged with their source phase (T16).
+  const planFindings = [
+    ...((structureCritic.residualFindings ?? []).map(f => `[structure] ${f}`)),
+    ...(planCritic.residualFindings ?? []),
+  ]
   const planBodyStep = criticBodyStep(t.id, 'plan', planFindings, wd)
   const fin = await agent(
     `You are the PLAN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: advance → nextPhase == plan" steps of ${SKILL}.
