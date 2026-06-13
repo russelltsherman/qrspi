@@ -347,14 +347,19 @@ function parseCriticConfig(text) {
   return design
 }
 
-// Resolve the design-critic maxRounds + lens set from an optional parsed `critics.design` block
-// (the output of parseCriticConfig), applying config-value > JS-default precedence (RUS-56,
-// OQ3). Returns { maxRounds, lenses }:
-//   - maxRounds: a positive integer from config.maxRounds, else the JS default 2.
-//   - lenses:    config.lenses filtered to KNOWN_DESIGN_LENSES (unknown names dropped with a
-//                warning); if config omits lenses OR every supplied name is unknown/empty, the
-//                DEFAULT_DESIGN_LENSES four. Always a non-empty list of known lens ids.
-// `design` undefined (no critics.design config) ⇒ pure JS defaults. Pure except the log() warn.
+// Resolve the design-critic maxRounds + lens set + N-select candidate count from an optional
+// parsed `critics.design` block (the output of parseCriticConfig), applying config-value >
+// JS-default precedence (RUS-56 OQ3, RUS-59 AC3/OQ3). Returns { maxRounds, lenses, candidates }:
+//   - maxRounds:  a positive integer from config.maxRounds, else the JS default 2.
+//   - lenses:     config.lenses filtered to KNOWN_DESIGN_LENSES (unknown names dropped with a
+//                 warning); if config omits lenses OR every supplied name is unknown/empty, the
+//                 DEFAULT_DESIGN_LENSES four. Always a non-empty list of known lens ids.
+//   - candidates: the N-select fan-out count (RUS-59). Absent / non-numeric / ≤1 ⇒ 1 (the
+//                 N-select stage is OFF — the design phase runs the single produce agent as
+//                 today). ≥2 ⇒ clamped to [2, DEFAULT_DESIGN_FRAMINGS.length] (= [2, 3]); a
+//                 value above the cap is clamped DOWN to the framing count with a log line
+//                 (mirroring the unknown-lens log-and-drop idiom). Always an integer ≥1.
+// `design` undefined (no critics.design config) ⇒ pure JS defaults. Pure except the log() warns.
 function resolveDesignCritic(design) {
   const cfg = design && typeof design === 'object' ? design : {}
   const maxRounds = Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0 ? cfg.maxRounds : 2
@@ -372,7 +377,17 @@ function resolveDesignCritic(design) {
     // rather than disabling the panel silently (OQ3).
     lenses = known.length ? known : DEFAULT_DESIGN_LENSES
   }
-  return { maxRounds, lenses }
+
+  // N-select candidate count (RUS-59). Absent / non-numeric / ≤1 ⇒ 1 (OFF). A finite numeric
+  // ≥2 is clamped to [2, framingCap]; a value above the cap is clamped down WITH a log line.
+  const framingCap = DEFAULT_DESIGN_FRAMINGS.length
+  let candidates = 1
+  if (typeof cfg.candidates === 'number' && Number.isFinite(cfg.candidates) && cfg.candidates > 1) {
+    const requested = Math.floor(cfg.candidates)
+    candidates = Math.min(requested, framingCap)
+    if (requested > framingCap) log(`  config: clamping design-critic candidates ${requested} → ${framingCap} (max framings: [${DEFAULT_DESIGN_FRAMINGS.join(', ')}])`)
+  }
+  return { maxRounds, lenses, candidates }
 }
 
 // Read the additive RUS-68 `failedRemotes` list off a parsed cleanup envelope, tolerating
@@ -472,6 +487,51 @@ const CRITIC_VERDICT_SCHEMA = {
   },
 }
 
+// The qrspi-design-judge agent's comparative verdict (RUS-59 — the design-phase N-select
+// stage). The judge scores N candidate designs on the four RUS-56 lenses (equal weight) and
+// names, per non-winning candidate, the strong `graft_ideas` worth merging into the winner.
+// Distinct from CRITIC_VERDICT_SCHEMA (binary {pass, findings}, no ranking, no graft dimension):
+// this carries a per-candidate numeric ranking. The `winner` field is ADVISORY — the tested
+// pure selector (scripts/qrspi_design_select.py) recomputes the authoritative winner from
+// `scores` (highest score, lowest-index tie-break) and ignores this field.
+const DESIGN_JUDGE_SCHEMA = {
+  type: 'object',
+  required: ['scores', 'winner'],
+  properties: {
+    scores: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['candidate', 'score', 'rationale', 'graft_ideas'],
+        properties: {
+          candidate: { type: 'string' },
+          score: { type: 'number' },
+          rationale: { type: 'string' },
+          graft_ideas: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+    winner: { type: 'string' },
+  },
+}
+
+// The tested pure selector's output (scripts/qrspi_design_select.py, RUS-59 Slice 1). Reduces a
+// DESIGN_JUDGE_SCHEMA judge verdict to the authoritative selection: `winner` is the highest-score
+// candidate (lowest-index tie-break, recomputed deterministically — the judge's own winner field
+// is ignored), `scores` is echoed through for logging, and `graftDirectives` is the first-seen-
+// deduped union of all NON-winning candidates' graft_ideas (winner's own excluded; empty ⇒ the
+// graft step is a no-op). The JS glue never re-derives this — the python module is the source of
+// truth (it fails closed with a non-zero exit on empty/malformed input).
+const DESIGN_SELECT_SCHEMA = {
+  type: 'object',
+  required: ['winner', 'scores', 'graftDirectives'],
+  properties: {
+    winner: { type: 'string' },
+    scores: { type: 'array' },
+    graftDirectives: { type: 'array', items: { type: 'string' } },
+  },
+}
+
 // The decision returned by scripts/qrspi_critic_loop.py's CLI shim (next_action): the
 // converge/revise/cap_reached action plus any residual findings to surface into the PR body
 // on cap-reached. The JS glue (criticDecision) never re-derives this — it is the tested
@@ -519,6 +579,13 @@ const SYNTHESIZED_VERDICT_SCHEMA = {
 // not in it are dropped with a warning (an unknown agentType would fail to spawn).
 const DEFAULT_DESIGN_LENSES = ['completeness', 'internal-consistency', 'edge-alignment', 'simplicity']
 const KNOWN_DESIGN_LENSES = new Set(DEFAULT_DESIGN_LENSES)
+
+// The default design-phase N-select framing axes (RUS-59). When `critics.design.candidates`
+// N > 1, runDesignSelectLoop fans out the first N of these framings as orthogonal produce runs
+// (analogous to DEFAULT_DESIGN_LENSES for the critic panel). Each framing is passed to the
+// SAME qrspi-design agentType as a per-framing instruction line (Decision 2 Option A: framings
+// as data, no per-framing agent files). The list length (3) is the hard upper clamp on N.
+const DEFAULT_DESIGN_FRAMINGS = ['mvp-first', 'risk-first', 'extensibility-first']
 
 // --- helpers ---------------------------------------------------------------
 
@@ -792,6 +859,231 @@ as-is — HARD STOP, do NOT retry or improvise.`,
   return out
 }
 
+// Invoke the tested pure selector qrspi_design_select.py via a worker (the JS sandbox cannot run
+// python). Reduces the judge verdict to { winner, scores, graftDirectives }. The judge output is
+// passed on stdin (so the fragile rationale/graft text never round-trips through the worker's
+// stdout echo), exactly as synthesizeVerdicts/criticDecision do. The script fails CLOSED with a
+// non-zero exit + error envelope on empty/malformed input; a worker failure (null / no winner)
+// surfaces as null here, which the caller treats as a fail-closed abort.
+async function selectDesignWinner(judgeOutput) {
+  const out = await agent(
+    `You are the DESIGN-SELECT worker. Your cwd is the main repo root. Run EXACTLY this one
+command verbatim (no path edits, no exploration) and return its JSON stdout verbatim:
+
+  printf '%s' ${JSON.stringify(JSON.stringify(judgeOutput))} | python3 ${engineCmd('scripts/qrspi_design_select.py')}
+
+It prints JSON { winner, scores, graftDirectives } on success (exit 0) or { error } on a non-zero
+exit (empty/malformed input — fail-closed). Parse and return whatever JSON it printed verbatim.
+HARD STOP — do NOT retry or improvise.`,
+    { label: 'design-select', phase: 'Design', schema: DESIGN_SELECT_SCHEMA }
+  )
+  if (!out || typeof out.winner !== 'string' || !out.winner) return null
+  if (!Array.isArray(out.scores)) out.scores = []
+  if (!Array.isArray(out.graftDirectives)) out.graftDirectives = []
+  return out
+}
+
+// Copy the winning candidate's staged design over the canonical staged slot stg(id,'design')
+// and re-check the result is non-empty, via a deterministic worker (the JS sandbox cannot touch
+// the filesystem). Mirrors the persist worker's verbatim-one-command discipline. Returns true
+// iff the copy landed a non-empty stg(id,'design'); false (caller aborts fail-closed) otherwise.
+async function stageDesignWinner(id, winnerPath) {
+  const dest = stg(id, 'design')
+  const out = await agent(
+    `You are the DESIGN-STAGE-WINNER worker for ${id}. Your cwd is the main repo root. Run EXACTLY
+this one command verbatim — no path edits, no exploration, no alternatives:
+
+  cp ${winnerPath} ${dest} && test -s ${dest} && printf '{"ok":true}\\n' || printf '{"ok":false}\\n'
+
+It copies the winning candidate design over the canonical staged slot and verifies it is
+non-empty. Return its JSON stdout verbatim ({ ok }). HARD STOP — do NOT retry or improvise.`,
+    { label: `design-stage-winner:${id}`, phase: 'Design', schema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } } }
+  )
+  return !!(out && out.ok === true)
+}
+
+// Spawn the qrspi-design-graft agent to rewrite stg(id,'design') IN PLACE merging the named
+// runner-up ideas, then re-check the file is still non-empty (graft-empties-file mitigation,
+// Risk Register). Returns true iff the graft ran AND left a non-empty file. Only called when
+// graftDirectives is non-empty (empty ⇒ the caller skips the graft as a no-op).
+async function graftDesignWinner(id, graftDirectives) {
+  const dest = stg(id, 'design')
+  const rev = await agent(
+    `You are the qrspi-design-graft agent for ${id}.
+DESIGN_PATH = ${dest}
+GRAFT_DIRECTIVES (runner-up ideas to merge into the winning design):
+${graftDirectives.map((g, i) => `  ${i + 1}. ${g}`).join('\n')}
+
+Read DESIGN_PATH, merge the directives into it preserving its structure, and write the full
+revised design back to DESIGN_PATH (non-empty). Return a one-line summary.`,
+    { label: `design-graft:${id}`, phase: 'Design', agentType: 'qrspi-design-graft' }
+  )
+  if (rev === null) {
+    log(`  ${id}: design graft failed/skipped — stopping this ticket`)
+    return false
+  }
+  // Re-verify the graft left a non-empty file (mirrors stageDesignWinner's non-empty gate).
+  const out = await agent(
+    `You are the DESIGN-GRAFT-VERIFY worker for ${id}. Your cwd is the main repo root. Run EXACTLY
+this one command verbatim — no path edits, no exploration:
+
+  test -s ${dest} && printf '{"ok":true}\\n' || printf '{"ok":false}\\n'
+
+Return its JSON stdout verbatim ({ ok }). HARD STOP — do NOT retry or improvise.`,
+    { label: `design-graft-verify:${id}`, phase: 'Design', schema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } } }
+  )
+  return !!(out && out.ok === true)
+}
+
+// Design-phase N-select stage (RUS-59). Runs ENTIRELY inside the pre-persist staging window of
+// runPhase, AFTER the single produce agent and BEFORE the critic panel — but only when the
+// resolved candidates count N > 1 (runPhase guards the call; N=1 never reaches here, leaving the
+// single-produce path byte-for-byte unchanged). It:
+//   1. Fans out the first N of DEFAULT_DESIGN_FRAMINGS as parallel candidate produce runs, each
+//      the SAME qrspi-design agentType with a per-framing FRAMING line, written to a distinct
+//      per-candidate slot stg(id,'design-cand-K'). Any null/empty candidate aborts fail-closed
+//      (Decision 4 Option A) — no partial winner.
+//   2. Judges the N candidates (qrspi-design-judge → DESIGN_JUDGE_SCHEMA).
+//   3. Selects the winner deterministically via the tested pure selector (selectDesignWinner →
+//      qrspi_design_select.py), obtaining { winner, scores, graftDirectives }.
+//   4. Copies the winner over the canonical staged slot stg(id,'design') and re-checks non-empty.
+//   5. When graftDirectives is non-empty, grafts the runner-up ideas in place (re-checking
+//      non-empty); when empty, skips the graft (no-op).
+// Lands the final synthesized design at exactly stg(id,'design') for the unchanged critic panel
+// + persist to consume. Returns { ok, summary? }: ok:false on any candidate/judge/select/stage/
+// graft failure (the caller aborts the ticket). summary folds the per-candidate judge scores for
+// the doDesign result line (AC2 scores half).
+//
+// criticConfig fields consumed here (resolved in doDesign where wd/r are in scope):
+//   candidates        : N (already clamped to [2, framings] by resolveDesignCritic).
+//   ticketContentPath : the ticket content path (candidate + judge input).
+//   questionsPath     : questions.md path (candidate + judge input).
+//   upstreamPath      : research.md path (candidate + judge input — reused as RESEARCH_PATH).
+//   templatePath      : the design template path (candidate produce input).
+async function runDesignSelectLoop(name, id, config) {
+  const n = config.candidates
+  const framings = DEFAULT_DESIGN_FRAMINGS.slice(0, n)
+  const ticketContentPath = config.ticketContentPath
+  const researchPath = config.upstreamPath
+  const questionsPath = config.questionsPath
+  const templatePath = config.templatePath
+
+  log(`  ${id}: design N-select — fanning out ${n} candidate(s) [${framings.join(', ')}]`)
+
+  // 1. Fan out N framing candidate produce runs in parallel, each to a distinct staged slot.
+  const candidates = await parallel(
+    framings.map((framing, k) => async () => {
+      const candId = `design-cand-${k}`
+      const candPath = stg(id, candId)
+      const res = await agent(
+        `TICKET_ID = ${id}
+TICKET_CONTENT_PATH = ${ticketContentPath}
+
+QUESTIONS_PATH = ${questionsPath}
+RESEARCH_PATH = ${researchPath}
+OUTPUT_PATH = ${candPath}
+TEMPLATE_PATH = ${templatePath}
+FRAMING = ${framing}`,
+        { label: `design-cand:${id}:${framing}`, phase: 'Design', agentType: 'qrspi-design' }
+      )
+      return { candId, candPath, framing, res }
+    })
+  )
+
+  // Verify each candidate ran AND left a non-empty staged file. A null result is a spawn miss;
+  // a present-but-empty file is caught by a single batched non-empty check below. Either aborts
+  // the whole stage fail-closed (Decision 4 Option A) — no partial winner is ever selected.
+  const failedSpawn = candidates.find(c => !c || c.res === null)
+  if (failedSpawn) {
+    log(`  ${id}: design candidate "${failedSpawn?.framing ?? '?'}" failed/skipped — aborting N-select (fail-closed)`)
+    return { ok: false }
+  }
+  const nonEmpty = await candidatesNonEmpty(id, candidates.map(c => c.candPath))
+  if (!nonEmpty) {
+    log(`  ${id}: a design candidate staged empty/missing — aborting N-select (fail-closed)`)
+    return { ok: false }
+  }
+
+  // 2. Judge the N candidates.
+  const candidateLines = candidates
+    .map(c => `${c.candId} (${c.framing}) = ${c.candPath}`)
+    .join('\n')
+  const judge = await agent(
+    `You are the qrspi-design-judge for ${id}, comparing ${n} candidate designs.
+CANDIDATE_PATHS:
+${candidateLines}
+TICKET_CONTENT_PATH = ${ticketContentPath}
+RESEARCH_PATH = ${researchPath}
+QUESTIONS_PATH = ${questionsPath}
+Read all candidate paths and the upstream inputs, score each candidate on the four lenses
+(equal weight), name per-non-winner graft_ideas, and return { scores, winner } per the schema.`,
+    { label: `design-judge:${id}`, phase: 'Design', agentType: 'qrspi-design-judge', schema: DESIGN_JUDGE_SCHEMA }
+  )
+  if (judge === null) {
+    log(`  ${id}: design judge failed/skipped — aborting N-select (fail-closed)`)
+    return { ok: false }
+  }
+
+  // 3. Select the winner deterministically via the tested pure selector.
+  const sel = await selectDesignWinner(judge)
+  if (!sel) {
+    log(`  ${id}: design selector failed/fail-closed — aborting N-select`)
+    return { ok: false }
+  }
+  const winner = candidates.find(c => c.candId === sel.winner)
+  if (!winner) {
+    log(`  ${id}: design selector winner "${sel.winner}" not among candidates — aborting N-select (fail-closed)`)
+    return { ok: false }
+  }
+  log(`  ${id}: design winner = ${sel.winner} (${winner.framing})`)
+
+  // 4. Copy the winner over the canonical staged slot; re-check non-empty.
+  if (!await stageDesignWinner(id, winner.candPath)) {
+    log(`  ${id}: staging the design winner left an empty/missing file — aborting N-select (fail-closed)`)
+    return { ok: false }
+  }
+
+  // 5. Conditionally graft runner-up ideas in place (skip as a no-op when none).
+  let graftSummary = 'no graft'
+  if (sel.graftDirectives.length) {
+    log(`  ${id}: grafting ${sel.graftDirectives.length} runner-up idea(s) into the winner`)
+    if (!await graftDesignWinner(id, sel.graftDirectives)) {
+      log(`  ${id}: design graft did not complete / emptied the file — aborting N-select (fail-closed)`)
+      return { ok: false }
+    }
+    graftSummary = `grafted ${sel.graftDirectives.length} idea(s)`
+  } else {
+    log(`  ${id}: no runner-up graft directives — skipping graft (no-op)`)
+  }
+
+  // Fold the per-candidate judge scores into the returned summary (AC2 scores half).
+  const scoreParts = Array.isArray(sel.scores)
+    ? sel.scores
+        .filter(s => s && typeof s === 'object')
+        .map(s => `${s.candidate}:${s.score}`)
+    : []
+  const summary = `N-select N=${n} winner=${sel.winner}(${winner.framing}) scores[${scoreParts.join(' ')}] ${graftSummary}`
+  log(`  ${id}: design ${summary}`)
+  return { ok: true, summary }
+}
+
+// Verify a list of staged candidate paths are ALL present and non-empty, via one deterministic
+// worker command (the JS sandbox cannot touch the filesystem). Returns true iff every path is a
+// non-empty file. Mirrors the persist worker's verbatim-one-command discipline.
+async function candidatesNonEmpty(id, paths) {
+  const test = paths.map(p => `test -s ${p}`).join(' && ')
+  const out = await agent(
+    `You are the DESIGN-CANDIDATES-CHECK worker for ${id}. Your cwd is the main repo root. Run
+EXACTLY this one command verbatim — no path edits, no exploration:
+
+  ${test} && printf '{"ok":true}\\n' || printf '{"ok":false}\\n'
+
+Return its JSON stdout verbatim ({ ok }). HARD STOP — do NOT retry or improvise.`,
+    { label: `design-candidates-check:${id}`, phase: 'Design', schema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } } }
+  )
+  return !!(out && out.ok === true)
+}
+
 // Read the OPTIONAL `critics` config block via the config worker + parseCriticConfig, then
 // resolve the design-critic maxRounds + lens set (config > JS default — resolveDesignCritic).
 // Best-effort: any read/parse failure leaves the parsed block undefined ⇒ resolveDesignCritic
@@ -867,6 +1159,21 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel, criti
   if (res === null) {
     log(`  ${id}: ${name} phase failed or was skipped — stopping this ticket`)
     return false
+  }
+  // Design-phase N-select stage (RUS-59): runs BETWEEN the single produce-success and the critic
+  // block, guarded by the resolved candidates count N > 1 (Decision 1 Option A). When N≤1 (the
+  // default, OFF) this guard is false ⇒ ZERO extra spawns and the single-produce path is
+  // byte-for-byte unchanged. When N>1 it fans out N framing candidates, judges + selects + grafts,
+  // and lands the synthesized winner at stg(id, name) — exactly what the critic panel + persist
+  // gate below already consume. A failed stage aborts the ticket (fail-closed). The N-select
+  // summary is handed back on criticConfig.selectSummary for doDesign to fold into its result.
+  if (criticConfig && criticConfig.candidates > 1) {
+    const sel = await runDesignSelectLoop(name, id, criticConfig)
+    if (!sel || !sel.ok) {
+      log(`  ${id}: ${name} N-select stage did not complete — stopping this ticket`)
+      return false
+    }
+    if (sel.summary) criticConfig.selectSummary = sel.summary
   }
   // Edge-critic loop (RUS-55): runs BETWEEN produce-success and the persist gate, on the
   // still-staged artifact, so persist remains the single success gate. No-critic phases skip
@@ -1039,15 +1346,20 @@ Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidde
   // in scope): research.md is upstreamPath (the rubric anchor, reused as RESEARCH_PATH) plus
   // the ticket content + questions.md. The panel populates residualFindings exactly as the
   // single critic did, so the criticBodyStep/PR-body flow below is unchanged.
-  const { maxRounds: designMaxRounds, lenses: designLenses } = await readDesignCriticConfig()
+  const { maxRounds: designMaxRounds, lenses: designLenses, candidates: designCandidates } = await readDesignCriticConfig()
   const designCritic = {
     upstreamPath: art(wd, t.id, 'research.md'),
     maxRounds: designMaxRounds,
     lenses: designLenses,
     ticketContentPath: r.ticketContentPath,
     questionsPath: art(wd, t.id, 'questions.md'),
+    // RUS-59 N-select: candidates (clamped [1,3]) gates the pre-critic N-select stage in
+    // runPhase (N>1 only); templatePath is the candidate produce input it needs.
+    candidates: designCandidates,
+    templatePath: tpl(wd, 'design.md'),
   }
   log(`  ${t.id}: design critic panel — ${designLenses.length} lens(es) [${designLenses.join(', ')}], maxRounds ${designMaxRounds}`)
+  if (designCandidates > 1) log(`  ${t.id}: design N-select ENABLED — N=${designCandidates} candidate framings`)
   if (!await runPhase('design', 'qrspi-design',
     `TICKET_ID = ${t.id}
 TICKET_CONTENT_PATH = ${r.ticketContentPath}
@@ -1072,8 +1384,10 @@ Return: ok, prUrl, newStatus, summary (1-2 sentences).`,
   )
   const out = finResult(t, fin, 'run_design')
   if (out.action === 'run_design' && fin && fin.ok) {
-    // Fold the panel's per-round pass/fail summary (and any residual-finding count) into the
-    // result summary so a batch run surfaces what the design critic panel did.
+    // Fold the N-select stage summary (per-candidate judge scores + winner + graft) and the
+    // panel's per-round pass/fail summary (and any residual-finding count) into the result
+    // summary so a batch run surfaces what the design phase did (AC2 scores half).
+    if (designCritic.selectSummary) out.summary = `${out.summary} [${designCritic.selectSummary}]`
     if (designCritic.criticSummary) out.summary = `${out.summary} [${designCritic.criticSummary}]`
     if (designFindings.length) out.summary = `${out.summary} [critic: ${designFindings.length} residual finding(s) in PR body]`
   }
