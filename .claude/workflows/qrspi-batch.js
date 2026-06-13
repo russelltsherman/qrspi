@@ -407,6 +407,24 @@ const PERSIST_SCHEMA = {
   },
 }
 
+// The required output contract for a single critic lens agent: a {pass, findings}
+// verdict. `pass` is the lens's all-or-nothing judgement for its rubric; `findings` is
+// one self-contained string per problem the lens found (empty when pass is true). The
+// panel loop ingests each lens reply through scripts/qrspi_critic_loop.py's fail-closed
+// parse_critic_verdict (a garbled reply coerces to {pass:false, findings:[]}), then folds
+// the M lens verdicts into one authoritative verdict via scripts/qrspi_critic_synthesize.py
+// (synthesize: pass only if EVERY lens passed; findings = exact-string-deduped union). The
+// lens prompt files (.claude/agents/qrspi-design-critic-*.md) reference this shape as their
+// required output. No panel-loop wiring is attached to this constant yet — Slice 3 adds it.
+const CRITIC_VERDICT_SCHEMA = {
+  type: 'object',
+  required: ['pass', 'findings'],
+  properties: {
+    pass: { type: 'boolean' },
+    findings: { type: 'array', items: { type: 'string' } },
+  },
+}
+
 // --- helpers ---------------------------------------------------------------
 
 const tpl = (wd, name) => `${wd}/.qrspi/templates/${name}`

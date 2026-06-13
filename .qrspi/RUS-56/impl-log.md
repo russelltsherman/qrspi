@@ -50,3 +50,35 @@
   `scripts/qrspi_critic_*.py` files). Rollback = `rm` those four files.
 
 ---
+
+## Session 2 — Slice 2
+
+**Timestamp:** 2026-06-13T03:05:00Z
+**Tasks completed:** T11, T12, T13, T14, T15, T16, T17, T18
+**Tasks failed:** none
+**Tests:**
+
+- `python3 -c "... parse_critic_verdict('{\"pass\": true, \"findings\": []}')"` → prints `{'pass': True, 'findings': []}` (valid lens reply NOT coerced to not-passed) — Step 17
+- prose-wrapped non-pass probe `parse_critic_verdict('Here is my verdict:\n{...pass:false, findings:[...]...}')` → `{'pass': False, 'findings': ['AC2 ...']}` (embedded-JSON ingest works)
+- `node --check .claude/workflows/qrspi-batch.js` → SYNTAX_OK
+- input-wiring grep: each of the four lens prompts references `TICKET_CONTENT_PATH`, `RESEARCH_PATH`, `QUESTIONS_PATH`, `DESIGN_PATH`, and `CRITIC_VERDICT_SCHEMA`
+- scope grep: `CRITIC_VERDICT_SCHEMA` present (1 decl) in qrspi-batch.js; `runCriticPanelLoop`/`runCriticLoop` occurrences = 0 (no panel-loop wiring added, per Step 15)
+
+**Deviations from structure.md:**
+
+- none. The structure left lens-file packaging open ("`qrspi-design-critic.md` (or four per-lens prompt files)"); the plan (Steps 11–14) resolved it to **four separate per-lens prompt files**, which is what was built.
+
+**Deviations from plan.md:**
+
+- Input path arg named `DESIGN_PATH` (not the staged `stg(id,'design')` literal). The plan/structure phrase the rubric input as "staged `stg(id,'design')`"; that is the runner-side value Slice 3 will splice into the spawn prompt. Each lens prompt exposes it under the prompt-variable name `DESIGN_PATH`, matching the existing RUS-55 critic agent's `ARTIFACT_PATH` convention (a named path variable supplied by the spawner). The lens reads whatever absolute path the runner binds to `DESIGN_PATH`; Slice 3 binds it to `stg(id,'design')`. No behavioral deviation.
+
+**Notes for next session (Slice 3 — panel loop + doDesign wiring):**
+
+- **Four lens prompt files exist** at `.claude/agents/qrspi-design-critic-<lens>.md` for the four lens names the plan defaults to: `completeness`, `internal-consistency`, `edge-alignment`, `simplicity`. So Slice 3's default lens set `['completeness','internal-consistency','edge-alignment','simplicity']` maps 1:1 to filenames via `qrspi-design-critic-${lens}.md`. Keep that naming when building the `agent()` thunks so the lens-name → agent-file mapping stays mechanical.
+- **Each lens prompt's input contract (the spawn-prompt variables Slice 3 must bind):**
+  `TICKET_CONTENT_PATH`, `RESEARCH_PATH`, `QUESTIONS_PATH` → the persisted upstream `art(wd, id, ...)` paths (`research.md`, `questions.md`; the ticket content is the fetched ticket body); and `DESIGN_PATH` → the staged `stg(id,'design')` rubric being judged. Each lens emits a `{pass, findings}` reply; ingest it through `parse_critic_verdict` (qrspi_critic_loop.py:49), attach the lens name (see Slice 1's lens-tag note), then `synthesize` the M verdicts.
+- **`CRITIC_VERDICT_SCHEMA` is declared** in `.claude/workflows/qrspi-batch.js` (module-level, right after `PERSIST_SCHEMA`, ~line 419) as a JSON-schema `{ pass: boolean, findings: array<string> }`. It matches the runner schema-constant convention (cf. `WORKER_SCHEMA`/`TICKETS_SCHEMA`). It is declared-but-unused this slice **by design** (Step 15: schema only, no loop) — Slice 3's `runCriticPanelLoop` is where it gets passed as each lens `agent()`'s output schema. Do NOT re-declare it; reference the existing constant.
+- **STILL UNVERIFIED for Slice 3 (carry-forward from Slice 1, no JS runner primitives touched this slice):** the `parallel()` / `agent()` call shape and `runPhase`'s real 6-param signature `runPhase(name, agentType, prompt, existing, id, phaseLabel)` (plan §Pre-build cites qrspi-batch.js:458). Slice 3 must confirm these before wiring the fan-out (plan Steps 19–20) and the `criticConfig` 7th param.
+- Both Slice 1 modules and the RUS-55 landed siblings remain green; no shared module was mutated this slice (qrspi-batch.js change is the additive schema constant only).
+
+---
