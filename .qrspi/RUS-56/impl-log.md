@@ -54,3 +54,39 @@
 - No JS, config, or Python files were touched in this slice — Markdown agent definitions only. `CRITIC_VERDICT_SCHEMA` was referenced (the landed constant), not re-added.
 
 ---
+
+## Session 3 — Slice 3: Panel loop + doDesign rewiring + config
+
+**Timestamp:** 2026-06-13T00:00:00Z
+**Tasks completed:** T11, T12, T13, T14, T15, T16, T18 (logic+regression+dispatch verification), T19, T20
+**Tasks failed:** none
+**Tasks deferred:** T17 (document the eval before/after procedure) — this is a `pr-summary.md` deliverable produced in the PR phase (`/qrspi-pr`), not an implementation artifact; not fabricated here. T18's true e2e (live design run) is manual/non-automatable per Q12 — the runnable portions (JS logic, regression, dispatch-by-inspection) are verified below.
+
+**Tests:**
+
+- `node --check .claude/workflows/qrspi-batch.js` → OK (syntax clean after all edits)
+- Node logic harness for `parseCriticConfig` + `resolveDesignCritic` (verbatim copies of the two new source functions, exercised against config envelopes + override matrices) → 17/17 passed (no-config⇒undefined, ok:false/key-mismatch/garbage⇒undefined, nested design returned; maxRounds override + invalid⇒default 2; lens subset/unknown-dropped/all-unknown⇒four/empty⇒four/non-array⇒four)
+- `python3 scripts/qrspi_critic_synthesize_test.py` → 24 passed, 0 failed (exit 0) — the new CLI shim did NOT regress the pure reducer
+- New `qrspi_critic_synthesize.py` CLI shim verified: tagged-verdict stdin (the shape the JS fan-out sends) → `{"pass": false, "findings": [{"text": "dropped AC3", "lens": "edge-alignment"}]}`; empty/garbage stdin → `{"pass": false, "findings": []}` (fail-closed)
+- `python3 -c json.load(.qrspi/config.example.json)` → OK (valid JSON after the `critics.design` block)
+- Dispatch-by-inspection (T19): `planCritic` (line 1097) has NO `lenses` field ⇒ `criticConfig.lenses?.length` falsy ⇒ routes to the landed single-critic `runCriticLoop`; only `designCritic` sets `lenses` ⇒ routes to `runCriticPanelLoop`. Plan phase untouched.
+- Lens id↔agentType mapping (T11): all four default lenses resolve `qrspi-design-critic-<id>` to a landed agent whose `name:` field MATCHES; all four lens prompts declare the identical `DESIGN_PATH/TICKET_CONTENT_PATH/RESEARCH_PATH/QUESTIONS_PATH` input set the fan-out splices.
+- Regression (T20): `python3 scripts/qrspi_critic_loop_test.py` → 33/33 (exit 0); `python3 scripts/qrspi_pr_body_test.py` → 23/23 (exit 0) — landed RUS-55 reused contracts intact.
+
+**Deviations from structure.md:**
+
+- **Added a thin CLI shim to `scripts/qrspi_critic_synthesize.py`.** Slice 1 created the pure `synthesize` function but NO CLI entry point. Slice 3's `runCriticPanelLoop` must invoke `synthesize` from the JS sandbox, which cannot run Python — exactly the constraint `criticDecision`→`qrspi_critic_loop.py`'s CLI solves. I added a `main()` stdin→stdout shim (`printf '%s' '<json array>' | python3 qrspi_critic_synthesize.py` → `{pass, findings}`) mirroring `qrspi_critic_loop.py`'s landed shim verbatim. The pure `synthesize` function is UNCHANGED (its 24-check test still passes); this is additive wiring, squarely in Slice 3's "panel loop wiring" scope. Structure §Contracts described "call `synthesize`" without specifying the invocation mechanism — this is the mechanism, not a contract change.
+
+**Deviations from plan.md:**
+
+- Plan step 15 says "fold a panel summary into `res.summary`". In `doDesign` the result object is `out` (from `finResult`), not `res` (`res` is a land-action local at line ~1281). I folded the panel's per-round pass/fail summary into `out.summary` alongside the existing residual-finding fold (mirroring the landed line 1041 pattern). `runCriticPanelLoop` returns a `summary` string, `runPhase` writes it back as `criticConfig.criticSummary`, and `doDesign` appends it to `out.summary`. Same intent, correct variable.
+- Plan step 14 keeps `upstreamPath: art(wd,id,'research.md')` and adds `lenses`. I ALSO added `ticketContentPath` + `questionsPath` to the `designCritic` object, because the lens prompts (Slice 2) require all four inputs (`DESIGN_PATH/TICKET_CONTENT_PATH/RESEARCH_PATH/QUESTIONS_PATH`) and `runCriticPanelLoop` needs the upstream paths on `criticConfig` (it has no `wd`/`r` in scope, per the deferred-context pattern). The single-critic `runCriticLoop` ignores these extra fields, so the plan-phase path is unaffected.
+
+**Notes for next session:**
+
+- This is the final implementation slice. Remaining for the PR phase (`/qrspi-pr`): write `pr-summary.md` INCLUDING the documented design-phase eval before/after procedure (plan T17 / AC5 — inject a live `model` into `evals/suite.json` `defaults`, run design cases `case_005/006/014` through `eval_all.py`→`run_eval.py`+`grade.py` before/after, record the delta; the eval harness is a non-functional placeholder so no measured score is produced — the procedure is documentation only).
+- **Files changed this slice:** `.claude/workflows/qrspi-batch.js` (added `SYNTHESIZED_VERDICT_SCHEMA`, `DEFAULT_DESIGN_LENSES`/`KNOWN_DESIGN_LENSES`, `parseCriticConfig`, `resolveDesignCritic`, `runCriticPanelLoop`, `synthesizeVerdicts`, `readDesignCriticConfig`; rewired `runPhase` dispatch + `doDesign` designCritic build + `out.summary` fold), `.qrspi/config.example.json` (added optional `critics.design` block + `$comment` doc), `scripts/qrspi_critic_synthesize.py` (added CLI shim — see structure deviation).
+- **The panel is opt-in and the single-critic path is byte-for-byte unchanged.** With no `critics.design` config, `doDesign` still runs the panel with the DEFAULT four lenses (this is the design phase's new always-on behavior, replacing today's single design edge-critic). Every OTHER `runPhase` caller (questions/research/structure/worktree) passes no `criticConfig`; the plan phase passes a `planCritic` WITHOUT `lenses` and routes to `runCriticLoop`. Only the design phase gets the panel.
+- True end-to-end verification (a live design run producing real lens spawns + a revise round) was NOT run — the JS orchestration glue is not unit-testable in this sandbox (no `agent()`/`parallel()` runtime; per Q12 it is manual-e2e only). The logic, regression, dispatch, and mapping are all verified above; the e2e checkpoint (flawed design ⇒ ≥1 revise then converge/cap; clean design ⇒ 0 revise spawns; cap ⇒ residuals in PR body; config override) remains a manual reviewer step on a real batch run.
+
+---

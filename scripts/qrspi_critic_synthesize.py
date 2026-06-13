@@ -27,6 +27,8 @@ reads as NOT-passed and contributes no findings, so a garbled lens reply can nev
 pass the round (ref: Q11, structure Slice 1).
 """
 
+import argparse
+import json
 import os
 import sys
 
@@ -114,3 +116,36 @@ def synthesize(verdicts):
                 findings.append(finding)
 
     return {"pass": all_passed, "findings": findings}
+
+
+# --- thin CLI (RUS-56 Slice 3) ---------------------------------------------
+# A deterministic stdin->stdout shim so the JS orchestrator (which cannot run python in its
+# sandbox) can invoke the pure `synthesize` reducer via a worker, exactly like
+# qrspi_critic_loop.py exposes `next_action`. The pure function above is unchanged; this only
+# exposes it.
+#
+#   printf '%s' '<json verdicts array>' | python3 qrspi_critic_synthesize.py
+#
+# Reads a JSON ARRAY of per-lens verdict entries from stdin (each entry is coerced fail-closed
+# inside `synthesize`, never raising), then prints the synthesized round verdict as JSON:
+# { pass, findings }. A non-array / unparseable stdin reduces to the empty list ⇒ fail-closed
+# { "pass": false, "findings": [] } (no lens attested the design).
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Reduce M per-lens verdicts (stdin JSON array) to one round verdict (self-contained CLI)")
+    parser.parse_args(argv)
+
+    raw = sys.stdin.read()
+    try:
+        verdicts = json.loads(raw) if raw.strip() else []
+    except (ValueError, TypeError):
+        verdicts = []
+
+    result = synthesize(verdicts)
+    json.dump(result, sys.stdout)
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
