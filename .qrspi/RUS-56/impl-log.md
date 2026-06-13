@@ -26,3 +26,31 @@
 - `synthesize` never raises (battery of garbage inputs tested). Empty verdict list ⇒ `pass:false` (fail closed: no lens attested).
 
 ---
+
+## Session 2 — Slice 2: Lens agent prompts
+
+**Timestamp:** 2026-06-13T13:45:44Z
+**Tasks completed:** T6, T7, T8, T9, T10
+**Tasks failed:** none
+**Tests:**
+
+- `python3 -c "...parse_critic_verdict('{\"pass\": true, \"findings\": []}')..."` ingest probe → returns `{'pass': True, 'findings': []}` (valid reply, not coerced to not-passed). A fail-with-findings reply `{"pass": false, "findings": ["AC2 ... never addressed"]}` also parses unchanged. → pass
+- `grep -rn CRITIC_VERDICT_SCHEMA .claude/workflows/qrspi-batch.js` → only the landed definition (line 416) + its landed reference (line 515); no new schema const in any new `.md` (grep over the four lens files matches nothing). → confirms no `CRITIC_VERDICT_SCHEMA` added.
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- Plan step 6 names the staged design input only as "staged `stg(id,'design')`" without a fixed prompt variable name. The four prompts standardize on `DESIGN_PATH` for the staged design (alongside the explicitly-named `TICKET_CONTENT_PATH`/`RESEARCH_PATH`/`QUESTIONS_PATH`). Slice 3's `runCriticPanelLoop` must pass the staged design path under `DESIGN_PATH` in the lens spawn prompts. This is a naming choice, not a contract change — the verdict output contract `{pass, findings}` is unchanged.
+
+**Notes for next session:**
+
+- Four lens prompt files created under `.claude/agents/`: `qrspi-design-critic-completeness.md`, `qrspi-design-critic-internal-consistency.md`, `qrspi-design-critic-edge-alignment.md`, `qrspi-design-critic-simplicity.md`. Each declares `name:` matching its filename and `claude: tools: Read` (read-only, mirroring the landed `qrspi-critic.md`).
+- **Lens id ↔ agent name mapping for Slice 3's DEFAULT_FOUR / agentType:** the structure/plan default lens set is `["completeness","internal-consistency","edge-alignment","simplicity"]`; each lens id maps to agent `qrspi-design-critic-<id>` (e.g. lens `edge-alignment` → agentType `qrspi-design-critic-edge-alignment`). `runCriticPanelLoop` will need to derive the agentType from the lens id this way (prefix `qrspi-design-critic-`).
+- **Spawn-prompt inputs each lens expects** (Slice 3 must splice these absolute paths into each lens `agent()` thunk's prompt): `DESIGN_PATH` = staged `stg(id,'design')`; `TICKET_CONTENT_PATH`, `RESEARCH_PATH`, `QUESTIONS_PATH` = persisted `art(...)` paths for ticket content / research.md / questions.md. All four lenses take the identical input set.
+- Each lens emits a `{pass, findings}` reply only (no `lens` field) — confirmed against the landed `parse_critic_verdict` and the per Session-1 note that the panel adds the `lens` tag at fan-out time. So Slice 3 should spawn each lens with `schema: CRITIC_VERDICT_SCHEMA` (the landed constant at qrspi-batch.js:416, mirroring how `runCriticLoop` spawns `qrspi-critic` at qrspi-batch.js:515) and tag each reply with its lens id before handing the list to `synthesize`.
+- No JS, config, or Python files were touched in this slice — Markdown agent definitions only. `CRITIC_VERDICT_SCHEMA` was referenced (the landed constant), not re-added.
+
+---
