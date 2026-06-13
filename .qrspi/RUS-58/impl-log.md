@@ -39,3 +39,48 @@
   stdin.
 
 ---
+
+## Session 2 — Slice 2: Extend `qrspi_critic_body.py` with the `slice` branch
+
+**Timestamp:** 2026-06-13T22:25:00Z
+**Tasks completed:** T6, T7, T8, T9, T10
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/qrspi_critic_body_test.py` → 41 passed, 0 failed (exit 0). 28 pre-existing
+  checks unchanged (design/plan regression guard) + 13 new `slice`-branch checks.
+- CLI smoke check (no gt invoked): `--phase slice` without `--slice` exits 2 with
+  `--slice N is required when --phase slice`; `--help` lists `slice` in the `--phase` choices
+  and documents `--slice`.
+
+**Deviations from structure.md:**
+
+- none. `_PHASE_BRANCH` gains a `"slice"` entry (per Modified Types); `phase_branch` resolves
+  `--phase slice --slice N` to `${id}/slice-N` (per Contracts). design/plan paths unchanged.
+
+**Deviations from plan.md:**
+
+- none. Plan §2.7 left "add to `_PHASE_BRANCH` (or its resolver function)" open: I did BOTH —
+  registered `"slice"` in `_PHASE_BRANCH` (so it appears in the `sorted(_PHASE_BRANCH)`
+  argparse `choices` and design/plan stay table-driven) AND added the parametric `slice-{N}`
+  computation in `phase_branch(ticket, phase, slice_index=None)`. The dict value for `slice`
+  is a placeholder marker; the real suffix is computed from the index.
+
+**Notes for next session:**
+
+- `scripts/qrspi_critic_body.py` now accepts `--phase slice --slice N`, resolving the target
+  branch to `${ticket}/slice-N`. Invocation for Slice 3 (Session 5, T21):
+  `python3 scripts/qrspi_critic_body.py --ticket <id> --phase slice --slice N
+  --findings-file <path-to-json-array>`.
+- `phase_branch(ticket, phase, slice_index=None)` gained a third positional/keyword arg. The
+  arg is REQUIRED (ValueError) only when `phase == "slice"`; design/plan ignore it (so any
+  existing two-arg calls remain valid). N must be a 1-based int >= 1 (string ints are coerced).
+- The CLI enforces `--slice` is required when `--phase slice` (via `parser.error`), and is
+  optional/ignored for design/plan — so the existing design/plan finalize calls are unaffected.
+- The findings rendering/amend mechanics (`render_findings_section`, `compose_message`,
+  `set_findings` → `gt checkout`/`gt modify`) are REUSED VERBATIM and are phase-agnostic; the
+  `slice` path only changes which branch is targeted, not how findings are spliced. So the
+  slice-1 PR body can carry BOTH per-slice + carried-coherence findings via one `--slice 1`
+  call (T21) provided the JS glue concatenates both finding lists into the one findings file.
+
+---

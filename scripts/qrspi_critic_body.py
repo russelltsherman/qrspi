@@ -40,9 +40,12 @@ REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 # trailer block at the BOTTOM of the message when we splice the findings section above it.
 _TRAILER_RE = re.compile(r"^[A-Za-z][A-Za-z-]*:\s+\S")
 
-# The phase whose commit receives the findings -> its branch suffix. design/plan are the
-# only critic-enabled phases (RUS-55 Slice 3).
-_PHASE_BRANCH = {"design": "design", "plan": "plan"}
+# The phase whose commit receives the findings -> its branch suffix. design/plan carry a
+# fixed suffix; `slice` is parametric (the suffix is `slice-<N>`, resolved from --slice N)
+# so the per-slice and whole-stack-coherence critic findings (RUS-58 Slice 2) can target
+# `<ticket>/slice-N`. The `slice` value here is a placeholder marker; phase_branch() computes
+# the real `slice-<N>` suffix from the slice index.
+_PHASE_BRANCH = {"design": "design", "plan": "plan", "slice": "slice"}
 
 
 # --- pure helpers (unit-tested) --------------------------------------------
@@ -52,11 +55,26 @@ def worktree_path(repo_root, ticket):
     return os.path.join(repo_root, ".worktrees", ticket)
 
 
-def phase_branch(ticket, phase):
-    """Branch name for a ticket's design/plan phase (`<ticket>/<phase>`). Pure."""
+def phase_branch(ticket, phase, slice_index=None):
+    """Branch name for a ticket's critic phase. Pure.
+
+    design/plan -> `<ticket>/design` | `<ticket>/plan` (slice_index ignored).
+    slice       -> `<ticket>/slice-<N>`, where N is the 1-based slice_index; a missing or
+                   non-positive slice_index for the `slice` phase is a ValueError (the CLI
+                   makes --slice required when --phase slice, but the pure helper guards too).
+    """
     suffix = _PHASE_BRANCH.get(phase)
     if suffix is None:
         raise ValueError("unsupported critic phase: %r" % (phase,))
+    if phase == "slice":
+        try:
+            n = int(slice_index)
+        except (TypeError, ValueError):
+            raise ValueError("phase 'slice' requires an integer --slice N, got %r"
+                             % (slice_index,))
+        if n < 1:
+            raise ValueError("phase 'slice' requires a 1-based slice index >= 1, got %d" % n)
+        return "%s/slice-%d" % (ticket, n)
     return "%s/%s" % (ticket, suffix)
 
 
@@ -200,15 +218,22 @@ def main(argv=None):
         description="Splice residual critic findings into a QRSPI design/plan commit message")
     parser.add_argument("--ticket", required=True, help="Ticket id, e.g. RUS-21")
     parser.add_argument("--phase", required=True, choices=sorted(_PHASE_BRANCH),
-                        help="Critic phase whose commit receives the findings (design|plan)")
+                        help="Critic phase whose commit receives the findings "
+                             "(design|plan|slice)")
+    parser.add_argument("--slice", dest="slice_index", type=int, default=None,
+                        help="1-based slice index, REQUIRED when --phase slice "
+                             "(targets <ticket>/slice-N); ignored for design/plan.")
     parser.add_argument("--findings-file", required=True,
                         help="Path to a JSON file holding the residual findings (a JSON array "
                              "of strings). Relative paths resolve against the ticket worktree.")
     args = parser.parse_args(argv)
 
+    if args.phase == "slice" and args.slice_index is None:
+        parser.error("--slice N is required when --phase slice")
+
     repo_root = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
     worktree = worktree_path(repo_root, args.ticket)
-    branch = phase_branch(args.ticket, args.phase)
+    branch = phase_branch(args.ticket, args.phase, args.slice_index)
 
     if not os.path.isdir(worktree):
         env = build_envelope(args.ticket, args.phase, branch, worktree, ok=False,

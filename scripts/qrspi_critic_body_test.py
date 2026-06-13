@@ -24,6 +24,7 @@ from qrspi_critic_body import (  # noqa: E402
     classify_modify,
     build_envelope,
     REPO_ROOT,
+    _PHASE_BRANCH,
 )
 
 failures = 0
@@ -67,6 +68,28 @@ check("phase_branch design", phase_branch("RUS-9", "design"), "RUS-9/design")
 check("phase_branch plan", phase_branch("RUS-9", "plan"), "RUS-9/plan")
 check_raises("phase_branch rejects unsupported phase",
              lambda: phase_branch("RUS-9", "implementation"), ValueError)
+
+# --- phase_branch: slice branch (RUS-58 Slice 2) ---------------------------
+# Regression guard: design/plan ignore a passed slice_index and keep their fixed suffix.
+check("phase_branch design ignores slice_index",
+      phase_branch("RUS-9", "design", 3), "RUS-9/design")
+check("phase_branch plan ignores slice_index",
+      phase_branch("RUS-9", "plan", 3), "RUS-9/plan")
+# slice resolves to <ticket>/slice-N for N=1 and N>1.
+check("phase_branch slice N=1", phase_branch("RUS-9", "slice", 1), "RUS-9/slice-1")
+check("phase_branch slice N>1", phase_branch("RUS-9", "slice", 7), "RUS-9/slice-7")
+# String index is coerced (the CLI parses --slice as int, but the helper guards too).
+check("phase_branch slice coerces str index",
+      phase_branch("RUS-9", "slice", "2"), "RUS-9/slice-2")
+# A missing or non-positive slice index for the slice phase is a ValueError.
+check_raises("phase_branch slice requires index",
+             lambda: phase_branch("RUS-9", "slice", None), ValueError)
+check_raises("phase_branch slice rejects 0",
+             lambda: phase_branch("RUS-9", "slice", 0), ValueError)
+check_raises("phase_branch slice rejects non-int",
+             lambda: phase_branch("RUS-9", "slice", "x"), ValueError)
+# The `slice` phase is registered in the CLI choice set (sorted(_PHASE_BRANCH)).
+check_true("slice is a registered phase choice", "slice" in _PHASE_BRANCH)
 
 # --- split_subject_trailers (preserves existing body, unlike qrspi_pr_body) -
 
