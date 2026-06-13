@@ -18,7 +18,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 
-from qrspi_critic_synthesize import synthesize  # noqa: E402
+from qrspi_critic_synthesize import decide_round, synthesize  # noqa: E402
 
 failures = 0
 total = 0
@@ -132,6 +132,44 @@ check("lens order does not change pass outcome (no privilege) — fail first",
       synthesize([{"pass": False, "findings": ["a"]},
                   {"pass": True, "findings": []}]),
       {"pass": False, "findings": ["a"]})
+
+
+# --- decide_round: synthesize + next_action in one (the panel-worker entry) -
+# All lenses pass on a non-final round ⇒ converged, no residuals.
+check("decide_round: all pass, round 0 of 2 ⇒ converged",
+      decide_round([{"pass": True, "findings": []},
+                    {"pass": True, "findings": []}], 0, 2),
+      {"action": "converged", "pass": True,
+       "synthesized_findings": [], "residual_findings": []})
+
+# A failing lens with rounds remaining ⇒ revise, findings carried as residual.
+check("decide_round: one fail, round 0 of 2 ⇒ revise with carried findings",
+      decide_round([{"pass": True, "findings": []},
+                    {"pass": False, "findings": ["dropped AC3"]}], 0, 2),
+      {"action": "revise", "pass": False,
+       "synthesized_findings": ["dropped AC3"],
+       "residual_findings": ["dropped AC3"]})
+
+# A failing lens on the FINAL allowed round ⇒ cap_reached, residual surfaced.
+check("decide_round: fail on final round (round 1 of 2) ⇒ cap_reached",
+      decide_round([{"pass": False, "findings": ["still missing rollback"]}], 1, 2),
+      {"action": "cap_reached", "pass": False,
+       "synthesized_findings": ["still missing rollback"],
+       "residual_findings": ["still missing rollback"]})
+
+# Lens-tagged findings flow through decide_round into synthesized + residual.
+check("decide_round: lens-tagged findings carried into residual on revise",
+      decide_round([{"pass": False, "lens": "completeness",
+                     "findings": ["missing AC2"]}], 0, 2),
+      {"action": "revise", "pass": False,
+       "synthesized_findings": [{"text": "missing AC2", "lens": "completeness"}],
+       "residual_findings": [{"text": "missing AC2", "lens": "completeness"}]})
+
+# Empty verdict list fails closed ⇒ never converged (revise while rounds remain).
+check("decide_round: empty verdicts fails closed ⇒ revise (not converged)",
+      decide_round([], 0, 2),
+      {"action": "revise", "pass": False,
+       "synthesized_findings": [], "residual_findings": []})
 
 
 print("\n%d/%d checks passed" % (total - failures, total))

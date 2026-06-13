@@ -325,6 +325,70 @@ function parseConfigEnvelope(text, key) {
   return env
 }
 
+// The default design critic panel: the four lenses and the per-phase round cap. Each lens
+// name maps 1:1 to a registered agent type `qrspi-design-critic-<lens>` (the prompt files in
+// .claude/agents/), so the lens-name → agent mapping stays mechanical. A `critics.design`
+// config block can override these (config value > default); see parseCriticConfig.
+const DEFAULT_DESIGN_LENSES =
+  ['completeness', 'internal-consistency', 'edge-alignment', 'simplicity']
+const DEFAULT_CRITIC_MAX_ROUNDS = 2
+
+// Lenient parser for the OPTIONAL `critics.design` config block (RUS-56). This is SEPARATE
+// from parseConfigEnvelope on purpose: that consumer hard-rejects any non-string value
+// (its string-only contract is relied on elsewhere and must stay untouched), but the
+// critic block's value is a nested OBJECT. We read the TOP-LEVEL `critics` key (whose value
+// round-trips as an object through scripts/qrspi_config.py — no qrspi_config.py change), and
+// return its `.design` sub-object (or undefined).
+//
+// Fail-OPEN-to-OFF: a missing / garbled / ok:false envelope, a non-object value, or an
+// absent `.design` ⇒ undefined (the opt-in seam simply stays off, reproducing today's
+// behavior). It NEVER throws and NEVER fabricates a config — an unreadable config can only
+// DISABLE the panel, never mis-enable it.
+function parseCriticConfig(text) {
+  const raw = extractJsonObject(text)
+  if (!raw) return undefined
+  let env
+  try { env = JSON.parse(raw) } catch { return undefined }
+  if (!env || env.ok !== true) return undefined
+  if (env.key !== 'critics') return undefined
+  const value = env.value
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const design = value.design
+  if (!design || typeof design !== 'object' || Array.isArray(design)) return undefined
+  return design
+}
+
+// Build the resolved CriticConfig {lenses, maxRounds, upstream} for the design phase from
+// the (possibly undefined) parsed `critics.design` block, applying config-value > JS-default
+// precedence (RUS-56, OQ3). Unknown lens names are dropped with a warning; an empty resolved
+// lens set falls back to the default four. `upstream` is fixed to 'research' for design.
+// Returns a CriticConfig object — the panel is always built for design (the opt-in gate is
+// at the caller: doDesign only passes a criticConfig when it elects to run the panel).
+function buildDesignCriticConfig(design, logFn) {
+  const warn = typeof logFn === 'function' ? logFn : () => {}
+  let lenses = DEFAULT_DESIGN_LENSES
+  let maxRounds = DEFAULT_CRITIC_MAX_ROUNDS
+  if (design && typeof design === 'object') {
+    if (Array.isArray(design.lenses)) {
+      const known = new Set(DEFAULT_DESIGN_LENSES)
+      const accepted = []
+      for (const l of design.lenses) {
+        if (typeof l === 'string' && known.has(l)) accepted.push(l)
+        else warn(`  critics.design: dropping unknown lens "${l}"`)
+      }
+      // Dedup, preserve order. Empty resolved set ⇒ fall back to the default four (OQ3).
+      const deduped = [...new Set(accepted)]
+      lenses = deduped.length ? deduped : DEFAULT_DESIGN_LENSES
+    }
+    if (Number.isInteger(design.maxRounds) && design.maxRounds >= 1) {
+      maxRounds = design.maxRounds
+    } else if (design.maxRounds !== undefined) {
+      warn(`  critics.design: ignoring invalid maxRounds "${design.maxRounds}" (using ${maxRounds})`)
+    }
+  }
+  return { lenses, maxRounds, upstream: 'research' }
+}
+
 // Read the additive RUS-68 `failedRemotes` list off a parsed cleanup envelope, tolerating
 // its absence (older producers) and any non-array junk. Non-empty ⇒ the prune attempted but
 // some `<ticket>/*` origin refs are still present — a RETRIABLE partial failure (the run is
@@ -470,10 +534,149 @@ improvise alternative commands or paths.`,
   )
 }
 
+// ===========================================================================
+// CRITIC PANEL LOOP (RUS-56) — produce→critique→revise for the design phase, run
+// INSIDE the produce→persist window of runPhase (before the single persistArtifact).
+// ===========================================================================
+//
+// Per round it fans out the M lens agents (`qrspi-design-critic-<lens>`) in PARALLEL
+// against the staged design + persisted upstream artifacts, ingests each {pass, findings}
+// reply (the StructuredOutput schema CRITIC_VERDICT_SCHEMA already fail-validates the
+// shape), then delegates the reduction+decision to scripts/qrspi_critic_synthesize.py's
+// decide_round (synthesize + next_action, the LANDED pure functions — never re-derived in
+// JS). On `revise` it re-spawns the design agent with the synthesized findings to REWRITE
+// the staged design in place (never emptying it); on `converged` it breaks; on `cap_reached`
+// it stages the residual findings (for the finalize PR-body splice) and returns success.
+//
+// Returns { ok, residualFindings, summary } — ok:false only when a structural step failed
+// (a lens fan-out returning no usable verdicts and the synthesize worker failing, or a
+// revise re-spawn failing). residualFindings is the JSON-encoded synthesize findings to
+// stage; the caller writes it to the residual-findings file consumed by qrspi_critic_body.py.
+const CRITIC_DECISION_SCHEMA = {
+  type: 'object',
+  required: ['action', 'pass', 'synthesized_findings', 'residual_findings'],
+  properties: {
+    action: { type: 'string' },
+    pass: { type: 'boolean' },
+    synthesized_findings: { type: 'array' },
+    residual_findings: { type: 'array' },
+  },
+}
+
+// Spawn one lens agent; returns its parsed {pass, findings} verdict with the lens name
+// attached, or a fail-closed not-passed verdict when the agent returns null. The lens name
+// rides along so synthesize can lens-tag the findings for the residual PR body.
+async function runLens(lens, id, wd, r, phaseLabel) {
+  const v = await agent(
+    `You are the ${lens} design-critic lens for ${id}.
+TICKET_CONTENT_PATH = ${r.ticketContentPath}
+QUESTIONS_PATH = ${art(wd, id, 'questions.md')}
+RESEARCH_PATH = ${art(wd, id, 'research.md')}
+DESIGN_PATH = ${stg(id, 'design')}
+
+Read the four input paths, judge ONLY your lens's rubric, and return your {pass, findings} verdict.`,
+    { label: `critic-${lens}:${id}`, phase: phaseLabel, agentType: `qrspi-design-critic-${lens}`, schema: CRITIC_VERDICT_SCHEMA }
+  )
+  if (v === null || typeof v !== 'object') return { pass: false, findings: [], lens }
+  return { pass: v.pass === true, findings: Array.isArray(v.findings) ? v.findings : [], lens }
+}
+
+async function runCriticPanelLoop(name, id, criticConfig, wd, r, phaseLabel) {
+  const { lenses, maxRounds } = criticConfig
+  const summary = []
+  let residualFindings = '[]'
+
+  for (let round = 0; round < maxRounds; round++) {
+    // 1. Fan out the M lens agents in parallel against the staged design + upstream.
+    const verdicts = await parallel(
+      lenses.map(lens => () => runLens(lens, id, wd, r, phaseLabel))
+    )
+
+    // 2. Reduce + decide via the landed pure functions (delegated to a python worker, since
+    //    the JS sandbox cannot run python). Pipe the round envelope to decide_round.
+    const envelope = JSON.stringify({ verdicts, round, max_rounds: maxRounds })
+    const decision = await agent(
+      `You are the CRITIC-SYNTHESIS worker for ${id} round ${round}. Your cwd is the main repo root.
+Run EXACTLY this command, verbatim — no path edits, no exploration, no alternatives. Pipe the
+JSON envelope below to its stdin on a single invocation:
+
+  cat <<'QRSPI_CRITIC_EOF' | python3 ${engineCmd('scripts/qrspi_critic_synthesize.py')}
+${envelope}
+QRSPI_CRITIC_EOF
+
+It reduces the M lens verdicts to one authoritative verdict and decides the loop's next move,
+printing JSON { action, pass, synthesized_findings, residual_findings }. Return that JSON
+verbatim as your final message — NO prose, NO code fences, NO edits.`,
+      { label: `critic-synth:${id}:r${round}`, phase: phaseLabel, schema: CRITIC_DECISION_SCHEMA }
+    )
+
+    if (decision === null) {
+      log(`  ${id}: critic round ${round} — synthesis worker failed (stopping panel, persisting current design)`)
+      summary.push(`r${round}:synth-failed`)
+      return { ok: true, residualFindings: '[]', summary: summary.join(' ') }
+    }
+
+    const action = decision.action
+    const findings = Array.isArray(decision.synthesized_findings) ? decision.synthesized_findings : []
+    log(`  ${id}: critic round ${round} — ${decision.pass ? 'PASS' : 'FAIL'} (${findings.length} finding(s)) → ${action}`)
+    summary.push(`r${round}:${decision.pass ? 'pass' : 'fail'}(${findings.length})`)
+
+    if (action === 'converged') {
+      return { ok: true, residualFindings: '[]', summary: summary.join(' ') }
+    }
+
+    // residual carries the synthesized findings (revise/cap_reached) for the PR body.
+    residualFindings = JSON.stringify(
+      Array.isArray(decision.residual_findings) ? decision.residual_findings : findings)
+
+    if (action === 'cap_reached') {
+      log(`  ${id}: critic panel hit round cap (${maxRounds}) — surfacing ${findings.length} residual finding(s) in the PR body`)
+      summary.push('cap_reached')
+      return { ok: true, residualFindings, summary: summary.join(' ') }
+    }
+
+    // action === 'revise' (rounds remain): re-spawn the design agent to REWRITE the staged
+    // design in place, addressing the synthesized findings. Never empty the staged file.
+    const findingsText = findings.map(f =>
+      (f && typeof f === 'object' && typeof f.text === 'string')
+        ? `- ${f.text}${f.lens ? ` (${f.lens})` : ''}`
+        : `- ${f}`).join('\n')
+    const revised = await agent(
+      `TICKET_ID = ${id}
+TICKET_CONTENT_PATH = ${r.ticketContentPath}
+
+QUESTIONS_PATH = ${art(wd, id, 'questions.md')}
+RESEARCH_PATH = ${art(wd, id, 'research.md')}
+OUTPUT_PATH = ${stg(id, 'design')}
+TEMPLATE_PATH = ${tpl(wd, 'design.md')}
+
+REVISION ROUND ${round + 1}: a critic panel reviewed your prior design (already at OUTPUT_PATH) and found the issues below. Read your prior design at OUTPUT_PATH, then REWRITE it in full to OUTPUT_PATH addressing every finding. Do NOT empty the file; produce a complete, improved design.
+
+Critic findings to address:
+${findingsText}`,
+      { label: `design-revise:${id}:r${round}`, phase: phaseLabel, agentType: 'qrspi-design' }
+    )
+    if (revised === null) {
+      log(`  ${id}: critic revise round ${round} — design re-spawn failed (stopping panel, persisting prior design)`)
+      summary.push(`r${round}:revise-failed`)
+      return { ok: true, residualFindings, summary: summary.join(' ') }
+    }
+  }
+
+  // Loop exhausted without an explicit converged/cap return (defensive — decide_round
+  // returns cap_reached on the final round, so this is unreachable in practice).
+  return { ok: true, residualFindings, summary: summary.join(' ') }
+}
+
 // Run one phase agent, then deterministically persist its staged artifact. Reuses an
 // existing non-empty canonical artifact (resume). Returns true on success, false on
 // failure/skip.
-async function runPhase(name, agentType, prompt, existing, id, phaseLabel) {
+//
+// `criticConfig` (RUS-56, OPTIONAL 7th param) is passed ONLY by doDesign's design call: when
+// present, the critic panel loop runs inside the produce→persist window (after the agent
+// produces the staged artifact, before persistArtifact). When absent (every other caller),
+// behavior is byte-for-byte today's. `criticCtx` carries {wd, r} the panel needs for paths.
+async function runPhase(name, agentType, prompt, existing, id, phaseLabel, criticConfig, criticCtx) {
   if (existing && existing[name]) {
     log(`  ${id}: reusing existing ${name}.md`)
     return true
@@ -482,6 +685,21 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel) {
   if (res === null) {
     log(`  ${id}: ${name} phase failed or was skipped — stopping this ticket`)
     return false
+  }
+  // RUS-56: opt-in design critic panel, between produce and persist. An absent criticConfig
+  // skips it entirely (today's behavior). The panel rewrites the staged artifact in place on
+  // revise and stages residual findings on cap; persistArtifact below then moves the (final)
+  // staged artifact to its canonical path exactly as before.
+  if (criticConfig && criticCtx) {
+    const panel = await runCriticPanelLoop(name, id, criticConfig, criticCtx.wd, criticCtx.r, phaseLabel)
+    if (!panel.ok) {
+      log(`  ${id}: ${name} critic panel failed — stopping this ticket`)
+      return false
+    }
+    // Stage the residual findings for the finalize PR-body splice (empty "[]" when converged).
+    criticCtx.residualFindings = panel.residualFindings
+    criticCtx.panelSummary = panel.summary
+    log(`  ${id}: ${name} critic panel → ${panel.summary || '(no rounds)'}`)
   }
   // The agent wrote to a token-free staging path; move it to the canonical worktree
   // path deterministically. This is also the real success gate: an agent that
@@ -629,6 +847,37 @@ REPO_ROOT = ${wd}
 
 Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidden from you — do not seek it out.`, r.existing, t.id, 'Design')) return failTicket(t)
 
+  // RUS-56: build the OPT-IN design critic panel config from the `critics.design` block.
+  // Read the TOP-LEVEL `critics` key (its value round-trips as a nested object through
+  // qrspi_config.py — no qrspi_config.py change); a missing/garbled block ⇒ criticConfig
+  // undefined ⇒ runPhase reproduces today's single-persist behavior (the opt-in seam stays
+  // off). The config read is best-effort: a failed worker simply leaves the panel off.
+  let criticConfig
+  if (!(r.existing && r.existing['design'])) {
+    const cfgOut = await agent(
+      `You are the CRITIC-CONFIG worker for ${t.id}. Your cwd is the main repo root.
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives:
+
+  python3 ${engineCmd('scripts/qrspi_config.py')} --key critics
+
+It prints a JSON envelope { ok, key, value, error? } reading the OPTIONAL top-level "critics"
+block from .qrspi/config.json. Output that JSON as your FINAL message, exactly and verbatim —
+NO surrounding prose, NO code fences, NO edits. Do NOT call any structured-output tool. If it
+printed ok:false (e.g. the key is absent), still output that JSON verbatim — that is a normal
+"panel off" signal, NOT an error to retry.`,
+      { label: `critic-config:${t.id}`, phase: 'Design' }
+    )
+    const designBlock = parseCriticConfig(cfgOut)
+    if (designBlock !== undefined) {
+      criticConfig = buildDesignCriticConfig(designBlock, log)
+      log(`  ${t.id}: design critic panel ENABLED — lenses [${criticConfig.lenses.join(', ')}], maxRounds ${criticConfig.maxRounds}`)
+    } else {
+      log(`  ${t.id}: no critics.design config — design critic panel off (today's behavior)`)
+    }
+  }
+  // The mutable side-channel runPhase fills with the panel's residual findings + summary.
+  const criticCtx = criticConfig ? { wd, r, residualFindings: '[]', panelSummary: '' } : undefined
+
   if (!await runPhase('design', 'qrspi-design',
     `TICKET_ID = ${t.id}
 TICKET_CONTENT_PATH = ${r.ticketContentPath}
@@ -636,18 +885,38 @@ TICKET_CONTENT_PATH = ${r.ticketContentPath}
 QUESTIONS_PATH = ${art(wd, t.id, 'questions.md')}
 RESEARCH_PATH = ${art(wd, t.id, 'research.md')}
 OUTPUT_PATH = ${stg(t.id, 'design')}
-TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, r.existing, t.id, 'Design')) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, r.existing, t.id, 'Design', criticConfig, criticCtx)) return failTicket(t)
 
   phase('Finalize')
+  // RUS-56: when the panel hit its round cap, its residual findings ride into the design PR
+  // body. The ONLY non-interactive PR-body lever is the branch commit message gt reads at
+  // creation (no gt body flag), so the finalize worker splices the staged residual-findings
+  // file into the design commit message via qrspi_critic_body.py before `gt modify -c`. When
+  // there are no residuals (converged, or the panel was off), the splice is an idempotent
+  // no-op and the commit message is unchanged (today's behavior).
+  const residual = criticCtx ? criticCtx.residualFindings : '[]'
+  const hasResidual = residual && residual !== '[]'
+  const findingsFile = `/tmp/phase-stage/${t.id}/critic-residual.json`
+  const bodyStep = hasResidual
+    ? `0. FIRST splice the critic panel's residual findings into the design commit BODY (RUS-56). The PR body is authored from the commit message at creation (there is NO gt body flag, NO gh pr edit). Run EXACTLY, verbatim:
+   a. \`mkdir -p /tmp/phase-stage/${t.id}\` then use the Write tool to write this EXACT JSON to ${findingsFile} (the residual findings the panel could not resolve):
+${residual}
+   b. Build the commit message into a file: write the subject line "${t.id} [QR]: Design — ${t.title}" to /tmp/phase-stage/${t.id}/design-msg.txt, then run \`python3 ${engineCmdFor(r, 'scripts/qrspi_critic_body.py')} --findings-file ${findingsFile} --message-file /tmp/phase-stage/${t.id}/design-msg.txt > /tmp/phase-stage/${t.id}/design-msg-final.txt\` (if it errors, return ok:false — HARD STOP). Use the contents of /tmp/phase-stage/${t.id}/design-msg-final.txt as the commit message in step 2 (pass it via \`gt modify -c -m\` reading that file, or \`gt modify -c\` with that message), so the residual-findings block lands in the PR body.\n`
+    : ''
   const fin = await agent(
     `You are the DESIGN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: run_design" commit+submit steps of ${SKILL}.
-1. Verify questions.md, research.md, design.md exist and are non-empty under ${wd}/.qrspi/${t.id}/. If any missing/empty, return ok:false (do NOT commit/transition).
-2. Stage ONLY those three artifacts; add them as the single commit (subject "${t.id} [QR]: Design — ${t.title}") on the pre-created ${t.id}/design branch with \`gt modify -c\` (the branch already exists from worktree setup — do NOT use \`gt create\`); submit the Design PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (the reviewer flag is required — it is what surfaces the PR in the reviewer\'s Graphite queue; submit it EXACTLY as written, do not drop or alter the reviewer)' : ''} (handle a stale closed-PR association per the SKILL "Resubmitting" steps).
+${bodyStep}1. Verify questions.md, research.md, design.md exist and are non-empty under ${wd}/.qrspi/${t.id}/. If any missing/empty, return ok:false (do NOT commit/transition).
+2. Stage ONLY those three artifacts; add them as the single commit (subject "${t.id} [QR]: Design — ${t.title}"${hasResidual ? ', using the spliced message from step 0 as the FULL commit message so the residual-findings block becomes the PR body' : ''}) on the pre-created ${t.id}/design branch with \`gt modify -c\` (the branch already exists from worktree setup — do NOT use \`gt create\`); submit the Design PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (the reviewer flag is required — it is what surfaces the PR in the reviewer\'s Graphite queue; submit it EXACTLY as written, do not drop or alter the reviewer)' : ''} (handle a stale closed-PR association per the SKILL "Resubmitting" steps).
 3. BEST-EFFORT project Linear → "Design Review" (a failed Linear write is a WARN, not a failure — still return ok:true with the PR created).
 Return: ok, prUrl, newStatus, summary (1-2 sentences).`,
     { label: `finalize-design:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
-  return finResult(t, fin, 'run_design')
+  const out = finResult(t, fin, 'run_design')
+  // Fold the panel summary into the ticket result so the run log shows per-round pass/fail.
+  if (out && criticCtx && criticCtx.panelSummary) {
+    out.summary = `${out.summary || ''} [critic: ${criticCtx.panelSummary}]`.trim()
+  }
+  return out
 }
 
 // ===========================================================================

@@ -82,3 +82,39 @@
 - Both Slice 1 modules and the RUS-55 landed siblings remain green; no shared module was mutated this slice (qrspi-batch.js change is the additive schema constant only).
 
 ---
+
+## Session 3 — Slice 3
+
+**Timestamp:** 2026-06-13T03:45:00Z
+**Tasks completed:** T19, T20, T21, T22, T23, T24, T25 (partial — see deviations)
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/qrspi_critic_synthesize_test.py` → 23 passed, 0 failed (added 5 `decide_round` checks)
+- `python3 scripts/qrspi_critic_body_test.py` → 20 passed, 0 failed
+- `python3 scripts/qrspi_critic_loop_test.py` → 33 passed, 0 failed (RUS-55 regression, Step 27)
+- `python3 scripts/qrspi_pr_body_test.py` → 23 passed, 0 failed (RUS-55 regression, Step 27)
+- `node --check .claude/workflows/qrspi-batch.js` → SYNTAX_OK
+- JS helper probe (extracted `parseCriticConfig` + `buildDesignCriticConfig` over 12 fixtures) → ALL PASS
+- Config round-trip: `qrspi_config.py --key critics` with a block → `value` is the nested object; absent block → `value:""` (→ `parseCriticConfig` returns `undefined` → panel off, today's behavior)
+- End-to-end residual splice: `qrspi_critic_body.py` with a `[{text,lens},"bare"]` residual JSON → "## Residual critic findings" block in the design commit body; `[]` → message unchanged (no-op)
+
+**Deviations from structure.md:**
+
+- `runPhase` gains a **7th `criticConfig` param AND an 8th `criticCtx` param** (not just the single trailing param structure/plan named). `criticConfig` is the immutable `{lenses, maxRounds, upstream}`; `criticCtx` `{wd, r, residualFindings, panelSummary}` is the mutable side-channel the panel writes its residual-findings JSON + summary back into (the panel needs `wd`/`r` for the `art()`/`stg()`/`ticketContentPath` paths, and must hand its residuals back to the finalize splice). Both are optional and guarded by `if (criticConfig && criticCtx)`; absent → byte-for-byte today's produce→persist. No other `runPhase` caller passes them.
+
+**Deviations from plan.md:**
+
+- **Added a `decide_round` CLI to `scripts/qrspi_critic_synthesize.py` (additive, `__main__`-guarded).** Step 20 says "call `synthesize` (via `scripts/qrspi_critic_synthesize.py`)" and "call `next_action`", but the Slice-1 `synthesize` module was a pure LIBRARY with NO CLI, and the JS sandbox cannot run python. Rather than re-implement the reduction/decision in JS (forbidden — it would drift from the tested helpers) or embed a fragile inline `python3 -c`, I added `decide_round(verdicts, round, max_rounds)` + a stdin/stdout `__main__` that reuses BOTH landed pure functions (`synthesize` here + `next_action` imported from `qrspi_critic_loop`) in one deterministic invocation. The panel worker pipes `{verdicts, round, max_rounds}` to it and gets back `{action, pass, synthesized_findings, residual_findings}`. The Slice-1 `synthesize` function and its tests are untouched (the `__main__` guard never fires under import); 5 new `decide_round` unit tests added to the existing test file.
+- **T25 (eval before/after procedure doc) is deferred to the PR-summary phase**, per plan Step 25 / structure §Unverified-Assumptions item 4 (the eval harness is a non-functional placeholder; no code slice produces a measured score). The repeatable procedure belongs in `pr-summary.md`, authored by the `/qrspi-pr` phase, not in this implementation slice.
+- **T26 end-to-end batch run is NOT executed here** (manual e2e, JS glue is not unit-tested per Q12). It requires a live Linear ticket + Graphite stack + reviewer, which is the finalize/submit path the orchestrator drives — outside this slice's verifiable scope. The panel's pure decision logic (`decide_round`), the config seam (`parseCriticConfig`/`buildDesignCriticConfig`), and the residual-splice (`qrspi_critic_body.py`) are each independently verified above; the JS fan-out wiring is syntax-checked and its helper logic probed.
+
+**Notes for next session (Slice 3 is the final slice; these are for PR / review):**
+
+- **`runCriticPanelLoop(name, id, criticConfig, wd, r, phaseLabel)`** runs inside `runPhase`'s produce→persist window (after the design agent stages `stg(id,'design')`, before `persistArtifact`). Per round: `parallel()`-fan-out `runLens(lens, ...)` for each `criticConfig.lenses` (agentType `qrspi-design-critic-${lens}`, schema `CRITIC_VERDICT_SCHEMA`); attach the lens name; pipe `{verdicts, round, max_rounds}` to `scripts/qrspi_critic_synthesize.py` (`decide_round`); on `converged` → return (residual `[]`); on `cap_reached` → stage residual findings JSON + return; on `revise` → re-spawn the `qrspi-design` agent to REWRITE `stg(id,'design')` in place with the synthesized findings, then next round. A null lens reply fails closed (not-passed). A null synth-worker or null revise re-spawn ends the panel gracefully (`ok:true`, persist the current staged design) rather than failing the ticket — the panel is an opt-in quality gate, not a hard blocker.
+- **Opt-in seam:** `doDesign` reads the top-level `critics` key via a config worker (`qrspi_config.py --key critics`), `parseCriticConfig` extracts `.design`, `buildDesignCriticConfig` resolves `{lenses, maxRounds:2, upstream:'research'}` with **config > JS default** precedence (unknown lenses dropped + warned; empty resolved set falls back to the four; invalid `maxRounds` ignored). Absent/garbled config ⇒ `criticConfig` undefined ⇒ `runPhase` reproduces today's single-persist behavior. The panel is also skipped entirely when resuming an already-persisted `design.md` (`r.existing['design']`).
+- **PR-body splice:** when the panel caps, `criticCtx.residualFindings` (JSON of synthesize's findings) rides into the design finalize worker, which writes it to `/tmp/phase-stage/<id>/critic-residual.json` and runs `qrspi_critic_body.py --findings-file ... --message-file ...` to splice a "Residual critic findings" block into the design commit message BEFORE `gt modify -c` (the only non-interactive PR-body lever — no `gt` body flag, no `gh pr edit`). Converged/panel-off ⇒ no splice step emitted (the commit message is unchanged).
+- **`res.summary` fold:** the per-round `r<N>:pass/fail(<k>)` + `cap_reached` summary is logged per round and appended to the ticket result summary as `[critic: ...]`.
+- **Config example:** `.qrspi/config.example.json` documents the optional `critics.design` `{maxRounds, lenses}` block. The live override is the gitignored `.qrspi/config.json`; deleting the block disables the panel at runtime.
+
+---

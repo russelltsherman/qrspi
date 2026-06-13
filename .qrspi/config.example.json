@@ -1,5 +1,12 @@
 {
   "$comment": "Optional QRSPI local config. Copy to .qrspi/config.json (gitignored) to use it. REVIEWERS: by default — with no config file — the qrspi-batch finalizer requests review from '@me' (the gh-authenticated user running the harness), so a fresh clone needs zero setup and ships no hard-coded username. 'reviewers' are GitHub logins (the literal '@me' expands to the authenticated user; set [] to request no reviewer); 'teamReviewers' are Graphite/GitHub team slugs ('org/team' or 'team'). LINEAR: 'linearTeam' is the Linear team /qrspi-ticket files new issues under (if unset, the skill discovers/asks); 'linearProject' is the Linear project, defaulting to 'QRSPI' — it scopes BOTH ticket creation (/qrspi-ticket files new issues under it) AND batch runs (qrspi-batch sweeps only this project's assigned tickets by default; pass {\"project\":\"...\"} to override for one run, or {\"allProjects\":true} to sweep every project).",
+  "$comment_critics": "Optional design critic panel (RUS-56). When present, the qrspi-batch design phase runs a multi-lens critic panel (produce -> critique -> revise) inside the design produce->persist window before submitting the Design PR. ABSENT block => panel off (today's single-pass behavior). 'critics.design.lenses' is the lens set (each maps 1:1 to a .claude/agents/qrspi-design-critic-<lens>.md agent; unknown names are dropped, an empty resolved set falls back to the four defaults); 'critics.design.maxRounds' is the per-phase revise cap (integer >= 1, default 2). Config values override the JS defaults. When the panel hits its round cap without converging, the residual findings are spliced into the Design PR body.",
+  "critics": {
+    "design": {
+      "maxRounds": 2,
+      "lenses": ["completeness", "internal-consistency", "edge-alignment", "simplicity"]
+    }
+  },
   "reviewers": ["@me"],
   "teamReviewers": [],
   "linearTeam": "Your Linear Team",
