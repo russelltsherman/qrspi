@@ -325,6 +325,56 @@ function parseConfigEnvelope(text, key) {
   return env
 }
 
+// Lenient parser for the OPTIONAL `critics` config block (RUS-56), separate from the
+// string-only parseConfigEnvelope. The design-phase panel reads the TOP-LEVEL `critics` key
+// (qrspi_config.py is single-top-level-key only — `--key critics.design` returns the default;
+// `--key critics` round-trips the whole object as {"ok":true,"key":"critics","value":{...}}),
+// so this parser extracts that envelope, accepts an OBJECT `value`, and returns `value.design`
+// (an object) or undefined. ANY of: no JSON, parse failure, ok:false, key mismatch, a
+// non-object value (e.g. "" when the key is absent), or a non-object `.design` ⇒ undefined,
+// which leaves the opt-in panel seam OFF (doDesign falls back to its JS defaults). This never
+// throws and never gates the run — a garbled critics block silently disables the override.
+function parseCriticConfig(text) {
+  const raw = extractJsonObject(text)
+  if (!raw) return undefined
+  let env
+  try { env = JSON.parse(raw) } catch { return undefined }
+  if (!env || env.ok !== true || env.key !== 'critics') return undefined
+  const value = env.value
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const design = value.design
+  if (!design || typeof design !== 'object' || Array.isArray(design)) return undefined
+  return design
+}
+
+// Resolve the design-critic maxRounds + lens set from an optional parsed `critics.design` block
+// (the output of parseCriticConfig), applying config-value > JS-default precedence (RUS-56,
+// OQ3). Returns { maxRounds, lenses }:
+//   - maxRounds: a positive integer from config.maxRounds, else the JS default 2.
+//   - lenses:    config.lenses filtered to KNOWN_DESIGN_LENSES (unknown names dropped with a
+//                warning); if config omits lenses OR every supplied name is unknown/empty, the
+//                DEFAULT_DESIGN_LENSES four. Always a non-empty list of known lens ids.
+// `design` undefined (no critics.design config) ⇒ pure JS defaults. Pure except the log() warn.
+function resolveDesignCritic(design) {
+  const cfg = design && typeof design === 'object' ? design : {}
+  const maxRounds = Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0 ? cfg.maxRounds : 2
+
+  let lenses = DEFAULT_DESIGN_LENSES
+  if (Array.isArray(cfg.lenses)) {
+    const known = []
+    const unknown = []
+    for (const l of cfg.lenses) {
+      if (typeof l === 'string' && KNOWN_DESIGN_LENSES.has(l)) known.push(l)
+      else unknown.push(l)
+    }
+    if (unknown.length) log(`  config: dropping unknown design-critic lens(es) [${unknown.join(', ')}] — known: [${DEFAULT_DESIGN_LENSES.join(', ')}]`)
+    // An empty resolved set (lenses present but all unknown) falls back to the default four
+    // rather than disabling the panel silently (OQ3).
+    lenses = known.length ? known : DEFAULT_DESIGN_LENSES
+  }
+  return { maxRounds, lenses }
+}
+
 // Read the additive RUS-68 `failedRemotes` list off a parsed cleanup envelope, tolerating
 // its absence (older producers) and any non-array junk. Non-empty ⇒ the prune attempted but
 // some `<ticket>/*` origin refs are still present — a RETRIABLE partial failure (the run is
@@ -434,6 +484,41 @@ const LOOP_DECISION_SCHEMA = {
     residual_findings: { type: 'array', items: { type: 'string' } },
   },
 }
+
+// The synthesized round verdict the qrspi_critic_synthesize.py worker emits (RUS-56): the M
+// per-lens { pass, findings } replies reduced to one authoritative { pass, findings } for the
+// round (pass only if every lens passed; findings is the exact-string-deduped union, each
+// optionally lens-tagged as { text, lens }). findings items may therefore be a bare string OR
+// a { text, lens } object — both are accepted. The JS glue never re-derives this reduction; it
+// is the tested pure module (scripts/qrspi_critic_synthesize.py) single source of truth.
+const SYNTHESIZED_VERDICT_SCHEMA = {
+  type: 'object',
+  required: ['pass', 'findings'],
+  properties: {
+    pass: { type: 'boolean' },
+    findings: {
+      type: 'array',
+      items: {
+        oneOf: [
+          { type: 'string' },
+          {
+            type: 'object',
+            required: ['text'],
+            properties: { text: { type: 'string' }, lens: { type: 'string' } },
+          },
+        ],
+      },
+    },
+  },
+}
+
+// The default design-critic lens set (RUS-56) — used when no `critics.design.lenses` config is
+// present, and as the fallback when a config lens set resolves empty (every name unknown). Each
+// id maps to the landed agentType `qrspi-design-critic-<id>` and its prompt file under
+// .claude/agents/. KNOWN_DESIGN_LENSES is the validation allow-list: config-supplied lens names
+// not in it are dropped with a warning (an unknown agentType would fail to spawn).
+const DEFAULT_DESIGN_LENSES = ['completeness', 'internal-consistency', 'edge-alignment', 'simplicity']
+const KNOWN_DESIGN_LENSES = new Set(DEFAULT_DESIGN_LENSES)
 
 // --- helpers ---------------------------------------------------------------
 
@@ -564,6 +649,171 @@ Read the current artifact at ARTIFACT_PATH and the upstream at UPSTREAM_PATH, th
   return { ok: true, residualFindings: [] }
 }
 
+// Multi-lens edge-critic PANEL loop (RUS-56) — the design-phase peer to the single-critic
+// runCriticLoop. Same pre-persist staging window, same { ok, residualFindings } return shape,
+// so runPhase's existing write-back (criticConfig.residualFindings) is unchanged. The ONLY
+// difference is the round body: instead of one critic, it fans out criticConfig.lenses lens
+// agents in PARALLEL, reduces their M { pass, findings } replies to one authoritative round
+// verdict via the tested pure synthesize reducer (scripts/qrspi_critic_synthesize.py — the JS
+// never re-derives the reduction), then delegates the converge/revise/cap decision to the SAME
+// tested next_action (via criticDecision) the single critic uses. On `revise` it re-spawns the
+// design producer with the synthesized findings, rewriting stg(id, name) IN PLACE (never
+// emptying it). On `cap_reached` it returns the residual findings for the PR-body splice; on a
+// round-0 all-lens pass it converges with zero revise spawns.
+//
+// Each lens id maps to agentType `qrspi-design-critic-<lens-id>` (the landed lens prompt
+// files), and is spawned with CRITIC_VERDICT_SCHEMA — the same { pass, findings } contract the
+// single critic returns. Every lens receives the identical input set: the staged design plus
+// the persisted upstream ticket/research/questions paths (resolved at the call site, passed on
+// criticConfig).
+//
+// criticConfig fields consumed here:
+//   lenses        : non-empty list of lens ids (the panel switch — runPhase routes here only
+//                   when lenses?.length). Each id => agentType qrspi-design-critic-<id>.
+//   maxRounds     : cap, default 2 when omitted.
+//   upstreamPath  : absolute path to research.md (the RESEARCH_PATH lens input).
+//   ticketContentPath, questionsPath : absolute paths to the ticket content / questions.md
+//                   lens inputs (resolved in doDesign where `wd`/`r` are in scope).
+async function runCriticPanelLoop(name, id, criticConfig) {
+  const maxRounds = criticConfig.maxRounds ?? 2
+  const lenses = criticConfig.lenses
+  const artifactPath = stg(id, name)
+  const researchPath = criticConfig.upstreamPath
+  const ticketContentPath = criticConfig.ticketContentPath
+  const questionsPath = criticConfig.questionsPath
+  const summaryRounds = []
+
+  for (let round = 0; round < maxRounds; round++) {
+    // Fan out one agent PER LENS in parallel. Each returns the schema'd { pass, findings }
+    // verdict; we tag each reply with its lens id so synthesize can audit-tag findings.
+    const replies = await parallel(
+      lenses.map(lens => async () => {
+        const agentType = `qrspi-design-critic-${lens}`
+        const verdict = await agent(
+          `You are the ${lens} lens of the qrspi design-phase critic panel for ${id}, round ${round + 1}/${maxRounds}.
+DESIGN_PATH = ${artifactPath}
+TICKET_CONTENT_PATH = ${ticketContentPath}
+RESEARCH_PATH = ${researchPath}
+QUESTIONS_PATH = ${questionsPath}
+Read all four paths and judge DESIGN_PATH through your lens. Return { pass, findings } per the schema.`,
+          { label: `critic:${id}:${name}:${lens}#${round + 1}`, phase: 'Critic', agentType, schema: CRITIC_VERDICT_SCHEMA }
+        )
+        return { lens, verdict }
+      })
+    )
+
+    // A lens that failed to spawn (null verdict) cannot attest the design — stop this ticket
+    // rather than silently treating a missing lens as a pass.
+    const failedLens = replies.find(rp => !rp || rp.verdict === null)
+    if (failedLens) {
+      log(`  ${id}: ${name} panel round ${round + 1} — lens "${failedLens.lens}" failed/skipped, stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+
+    // Build the per-lens verdict list (each tagged with its lens id) for the pure reducer.
+    const lensVerdicts = replies.map(rp => ({
+      pass: rp.verdict.pass === true,
+      findings: Array.isArray(rp.verdict.findings) ? rp.verdict.findings : [],
+      lens: rp.lens,
+    }))
+
+    // Reduce M lens verdicts to one authoritative round verdict via the tested pure module.
+    const synth = await synthesizeVerdicts(lensVerdicts)
+    if (!synth) {
+      log(`  ${id}: ${name} panel round ${round + 1} — synthesize failed to compute, stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+    const passed = synth.pass === true
+    const synthFindings = Array.isArray(synth.findings) ? synth.findings : []
+    const passCount = lensVerdicts.filter(v => v.pass).length
+    log(`  ${id}: ${name} panel round ${round + 1}/${maxRounds} → ${passed ? 'PASS' : `FAIL (${passCount}/${lenses.length} lenses passed, ${synthFindings.length} finding(s))`}`)
+    summaryRounds.push(`r${round + 1}:${passed ? 'pass' : `${passCount}/${lenses.length}`}`)
+
+    // Delegate the converge/revise/cap decision to the SAME tested next_action the single
+    // critic uses, passing the synthesized verdict as the round's authoritative one-element
+    // list (the panel reduces M lenses to ONE verdict per round before the decision).
+    const decision = await criticDecision([{ pass: passed, findings: synthFindings }], round, maxRounds)
+    if (!decision) {
+      log(`  ${id}: ${name} panel critic-loop decision failed to compute — stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+    if (decision.action === 'converged') {
+      log(`  ${id}: ${name} panel CONVERGED at round ${round + 1} [${summaryRounds.join(' ')}]`)
+      return { ok: true, residualFindings: [], summary: `panel converged@r${round + 1} [${summaryRounds.join(' ')}]` }
+    }
+    if (decision.action === 'cap_reached') {
+      log(`  ${id}: ${name} panel CAP-REACHED at round ${round + 1} — ${decision.residual_findings.length} residual finding(s) carried to PR body`)
+      return { ok: true, residualFindings: decision.residual_findings, summary: `panel cap-reached@r${round + 1} (${decision.residual_findings.length} residual) [${summaryRounds.join(' ')}]` }
+    }
+    // action === 'revise': re-spawn the design producer to rewrite stg(id, name) in place
+    // addressing the synthesized findings, then re-run the panel next iteration. The findings
+    // may be bare strings or { text, lens } objects — render either for the reviser prompt.
+    log(`  ${id}: ${name} panel REVISE at round ${round + 1} — rewriting design to address ${synthFindings.length} finding(s)`)
+    const rev = await agent(
+      `You are the REVISER for ${id} artifact "${name}". A multi-lens critic panel reviewed it as a derivation of its upstream inputs and found it does NOT yet faithfully preserve every upstream requirement.
+ARTIFACT_PATH = ${artifactPath}
+TICKET_CONTENT_PATH = ${ticketContentPath}
+RESEARCH_PATH = ${researchPath}
+QUESTIONS_PATH = ${questionsPath}
+FINDINGS (each names a specific upstream requirement the current design dropped/contradicted/distorted/over-reached, optionally tagged with the lens that raised it):
+${synthFindings.map((f, i) => `  ${i + 1}. ${typeof f === 'object' && f ? `[${f.lens ?? 'panel'}] ${f.text ?? JSON.stringify(f)}` : f}`).join('\n')}
+
+Read the current artifact at ARTIFACT_PATH and the upstream inputs, then REWRITE the artifact IN PLACE at ARTIFACT_PATH so it resolves EVERY finding while keeping everything already correct. Write the full revised artifact to ARTIFACT_PATH (non-empty). Do not change any other file. Return a one-line summary.`,
+      { label: `revise:${id}:${name}#${round + 1}`, phase: 'Critic' }
+    )
+    if (rev === null) {
+      log(`  ${id}: ${name} panel reviser round ${round + 1} failed/skipped — stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+  }
+  // Defensive: next_action returns cap_reached at round == maxRounds-1, so we normally exit
+  // inside the loop. Treat exhaustion as cap-reached with no captured findings.
+  log(`  ${id}: ${name} panel loop exhausted ${maxRounds} round(s) without converging`)
+  return { ok: true, residualFindings: [], summary: `panel exhausted ${maxRounds} round(s) [${summaryRounds.join(' ')}]` }
+}
+
+// Invoke the tested pure reducer qrspi_critic_synthesize.py via a worker (the JS sandbox cannot
+// run python). Reduces M per-lens verdicts to one { pass, findings } round verdict. Returns the
+// parsed verdict or null on failure. Mirrors criticDecision: the verdicts are passed to the
+// script on stdin so the fragile finding text never round-trips through the worker's stdout echo.
+async function synthesizeVerdicts(verdicts) {
+  const out = await agent(
+    `You are the CRITIC-SYNTHESIZE worker. Your cwd is the main repo root. Run EXACTLY this one
+command verbatim (no path edits, no exploration) and return its JSON stdout verbatim:
+
+  printf '%s' ${JSON.stringify(JSON.stringify(verdicts))} | python3 ${engineCmd('scripts/qrspi_critic_synthesize.py')}
+
+It prints JSON { pass, findings }. Parse and return it verbatim. If it errors, return that
+as-is — HARD STOP, do NOT retry or improvise.`,
+    { label: 'critic-synthesize', phase: 'Critic', schema: SYNTHESIZED_VERDICT_SCHEMA }
+  )
+  if (!out || typeof out.pass !== 'boolean') return null
+  if (!Array.isArray(out.findings)) out.findings = []
+  return out
+}
+
+// Read the OPTIONAL `critics` config block via the config worker + parseCriticConfig, then
+// resolve the design-critic maxRounds + lens set (config > JS default — resolveDesignCritic).
+// Best-effort: any read/parse failure leaves the parsed block undefined ⇒ resolveDesignCritic
+// returns the JS defaults (the panel still runs with the default four lenses). Returns
+// { maxRounds, lenses }. Never throws and never gates the run (the override is opt-in).
+async function readDesignCriticConfig() {
+  const cfgOut = await agent(
+    `You are the CONFIG worker for the QRSPI design critic. Your cwd is the main repo root.
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives:
+
+  python3 ${engineCmd('scripts/qrspi_config.py')} --key critics
+
+It reads the repo's .qrspi/config.json (self-locating) and prints a one-line JSON envelope
+{ "ok": true, "key": "critics", "value": <object|""> } to stdout (value is "" when no
+critics block is present). Output that JSON as your FINAL message, exactly and verbatim — NO
+surrounding prose, NO code fences, NO edits. Do NOT call any structured-output tool. If it
+printed ok:false, still output that JSON verbatim (do NOT retry or improvise).`,
+    { label: 'config:critics', phase: 'Design' }
+  )
+  return resolveDesignCritic(parseCriticConfig(cfgOut))
+}
+
 // Invoke the tested pure decision module qrspi_critic_loop.py via a worker (the JS sandbox
 // cannot run python). Returns { action, residual_findings } or null on failure. The verdicts
 // are serialized to a token-free staged JSON file the worker passes to the script on stdin,
@@ -622,13 +872,20 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel, criti
   // still-staged artifact, so persist remains the single success gate. No-critic phases skip
   // this block entirely and behave byte-for-byte as before.
   if (criticConfig) {
-    const cr = await runCriticLoop(name, id, criticConfig)
+    // Dispatch on lenses: a non-empty criticConfig.lenses selects the multi-lens PANEL
+    // (design phase); its absence (the single-critic plan phase, or any other caller) keeps
+    // the landed single-critic path byte-for-byte unchanged.
+    const cr = criticConfig.lenses?.length
+      ? await runCriticPanelLoop(name, id, criticConfig)
+      : await runCriticLoop(name, id, criticConfig)
     if (!cr || !cr.ok) {
       log(`  ${id}: ${name} critic loop did not complete — stopping this ticket`)
       return false
     }
-    // Hand the cap-reached residual findings back to the caller via the config object.
+    // Hand the cap-reached residual findings back to the caller via the config object. The
+    // panel also returns a one-line summary the caller can fold into its result summary.
     criticConfig.residualFindings = cr.residualFindings
+    if (cr.summary) criticConfig.criticSummary = cr.summary
   }
   // The agent wrote to a token-free staging path; move it to the canonical worktree
   // path deterministically. This is also the real success gate: an agent that
@@ -776,10 +1033,21 @@ REPO_ROOT = ${wd}
 
 Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidden from you — do not seek it out.`, r.existing, t.id, 'Design')) return failTicket(t)
 
-  // Edge-critic on the design artifact, anchored on its upstream research.md (the rubric
-  // anchor). upstreamPath is resolved HERE (where `wd` is in scope) so runPhase/runCriticLoop
-  // need no `wd` (ref: structure §Unverified Assumptions). maxRounds defaults to 2 (OQ4).
-  const designCritic = { upstreamPath: art(wd, t.id, 'research.md'), maxRounds: 2 }
+  // Multi-lens edge-critic PANEL on the design artifact (RUS-56). The lens set + maxRounds are
+  // config-overridable (critics.design > JS default four lenses / 2 rounds); `lenses` is the
+  // panel switch runPhase dispatches on. The lens inputs are resolved HERE (where `wd`/`r` are
+  // in scope): research.md is upstreamPath (the rubric anchor, reused as RESEARCH_PATH) plus
+  // the ticket content + questions.md. The panel populates residualFindings exactly as the
+  // single critic did, so the criticBodyStep/PR-body flow below is unchanged.
+  const { maxRounds: designMaxRounds, lenses: designLenses } = await readDesignCriticConfig()
+  const designCritic = {
+    upstreamPath: art(wd, t.id, 'research.md'),
+    maxRounds: designMaxRounds,
+    lenses: designLenses,
+    ticketContentPath: r.ticketContentPath,
+    questionsPath: art(wd, t.id, 'questions.md'),
+  }
+  log(`  ${t.id}: design critic panel — ${designLenses.length} lens(es) [${designLenses.join(', ')}], maxRounds ${designMaxRounds}`)
   if (!await runPhase('design', 'qrspi-design',
     `TICKET_ID = ${t.id}
 TICKET_CONTENT_PATH = ${r.ticketContentPath}
@@ -803,8 +1071,11 @@ Return: ok, prUrl, newStatus, summary (1-2 sentences).`,
     { label: `finalize-design:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
   const out = finResult(t, fin, 'run_design')
-  if (out.action === 'run_design' && fin && fin.ok && designFindings.length) {
-    out.summary = `${out.summary} [critic: ${designFindings.length} residual finding(s) in PR body]`
+  if (out.action === 'run_design' && fin && fin.ok) {
+    // Fold the panel's per-round pass/fail summary (and any residual-finding count) into the
+    // result summary so a batch run surfaces what the design critic panel did.
+    if (designCritic.criticSummary) out.summary = `${out.summary} [${designCritic.criticSummary}]`
+    if (designFindings.length) out.summary = `${out.summary} [critic: ${designFindings.length} residual finding(s) in PR body]`
   }
   return out
 }

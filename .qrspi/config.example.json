@@ -1,7 +1,13 @@
 {
-  "$comment": "Optional QRSPI local config. Copy to .qrspi/config.json (gitignored) to use it. REVIEWERS: by default — with no config file — the qrspi-batch finalizer requests review from '@me' (the gh-authenticated user running the harness), so a fresh clone needs zero setup and ships no hard-coded username. 'reviewers' are GitHub logins (the literal '@me' expands to the authenticated user; set [] to request no reviewer); 'teamReviewers' are Graphite/GitHub team slugs ('org/team' or 'team'). LINEAR: 'linearTeam' is the Linear team /qrspi-ticket files new issues under (if unset, the skill discovers/asks); 'linearProject' is the Linear project, defaulting to 'QRSPI' — it scopes BOTH ticket creation (/qrspi-ticket files new issues under it) AND batch runs (qrspi-batch sweeps only this project's assigned tickets by default; pass {\"project\":\"...\"} to override for one run, or {\"allProjects\":true} to sweep every project).",
+  "$comment": "Optional QRSPI local config. Copy to .qrspi/config.json (gitignored) to use it. REVIEWERS: by default — with no config file — the qrspi-batch finalizer requests review from '@me' (the gh-authenticated user running the harness), so a fresh clone needs zero setup and ships no hard-coded username. 'reviewers' are GitHub logins (the literal '@me' expands to the authenticated user; set [] to request no reviewer); 'teamReviewers' are Graphite/GitHub team slugs ('org/team' or 'team'). LINEAR: 'linearTeam' is the Linear team /qrspi-ticket files new issues under (if unset, the skill discovers/asks); 'linearProject' is the Linear project, defaulting to 'QRSPI' — it scopes BOTH ticket creation (/qrspi-ticket files new issues under it) AND batch runs (qrspi-batch sweeps only this project's assigned tickets by default; pass {\"project\":\"...\"} to override for one run, or {\"allProjects\":true} to sweep every project). CRITICS: 'critics.design' (optional) overrides the design-phase multi-lens critic panel — 'maxRounds' caps the produce→critique→revise loop (default 2) and 'lenses' selects which lens agents run (default all four: completeness, internal-consistency, edge-alignment, simplicity). Omit the whole 'critics' block to use the defaults; unknown lens names are dropped and an empty resolved set falls back to the default four. Each lens id maps to the agent .claude/agents/qrspi-design-critic-<id>.md.",
   "reviewers": ["@me"],
   "teamReviewers": [],
   "linearTeam": "Your Linear Team",
-  "linearProject": "QRSPI"
+  "linearProject": "QRSPI",
+  "critics": {
+    "design": {
+      "maxRounds": 2,
+      "lenses": ["completeness", "internal-consistency", "edge-alignment", "simplicity"]
+    }
+  }
 }
