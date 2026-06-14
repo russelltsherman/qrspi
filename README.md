@@ -193,6 +193,29 @@ zero unresolved review threads. Each phase is its own stacked PR (`<id>/design` 
 The decision is computed by the tested resolver in `scripts/qrspi_resolve_state.py`. See
 `docs/qrspi-pr-gated-lifecycle-design.md` for the full design and rationale.
 
+## Testing
+
+The orchestration logic is covered by stdlib-only unit tests (no pytest, no
+third-party deps) living as `scripts/*_test.py` siblings next to the code they
+exercise. Run the full suite through the aggregating runner:
+
+```bash
+python3 scripts/run_tests.py            # run every scripts/*_test.py
+python3 scripts/run_tests.py resolve    # only files whose name contains "resolve"
+python3 scripts/run_tests.py --list     # list discovered test files, run nothing
+```
+
+The runner executes each test file as its own subprocess and exits non-zero if
+any fails. The same command is the regression gate in CI
+(`.github/workflows/tests.yml`), which runs on every pull request and on pushes
+to `main`.
+
+> JavaScript coverage of the `qrspi-batch.js` workflow orchestrator is **deferred
+> to future development**: the file is harness-coupled (top-level `return`,
+> harness-injected globals, and the Workflow runtime has no import/filesystem
+> access), so its pure helpers are not unit-testable in isolation without a
+> refactor.
+
 ## Requirements
 
 - [Claude Code](https://claude.ai/code) CLI
