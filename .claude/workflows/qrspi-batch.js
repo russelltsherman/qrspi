@@ -413,6 +413,49 @@ function resolveEdgeCriticMaxRounds(parsedCritics, phase) {
   return (cfg && Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0) ? cfg.maxRounds : 2
 }
 
+// Lenient parser for the OPTIONAL `critics.implementation` config block (RUS-58), the
+// implementation-phase peer of parseCriticConfig. qrspi_config.py is single-top-level-key only
+// (`--key critics.implementation` returns the default; `--key critics` round-trips the whole
+// object as {"ok":true,"key":"critics","value":{...}}), so this parser extracts that envelope,
+// accepts an OBJECT `value`, and returns `value.implementation` (an object) or undefined. ANY of:
+// no JSON, parse failure, ok:false, key mismatch, a non-object value (e.g. "" when the key is
+// absent), or a non-object `.implementation` ⇒ undefined, which leaves the opt-in critic seam OFF
+// (doImplementation falls back to its disabled JS defaults). Never throws, never gates the run.
+function parseImplementationCriticConfig(text) {
+  const raw = extractJsonObject(text)
+  if (!raw) return undefined
+  let env
+  try { env = JSON.parse(raw) } catch { return undefined }
+  if (!env || env.ok !== true || env.key !== 'critics') return undefined
+  const value = env.value
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const impl = value.implementation
+  if (!impl || typeof impl !== 'object' || Array.isArray(impl)) return undefined
+  return impl
+}
+
+// Resolve the implementation-critic config from an optional parsed `critics.implementation`
+// block (the output of parseImplementationCriticConfig). Returns the ImplementationCriticConfig
+// shape { enabled, maxRounds, coherence: { enabled, maxRounds } } with disabled defaults:
+//   - enabled:            cfg.enabled === true, else false (absent block ⇒ OFF — the byte-for-byte
+//                         unchanged no-critic implementation path).
+//   - maxRounds:          a positive integer from cfg.maxRounds, else the JS default 2.
+//   - coherence.enabled:  cfg.coherence.enabled === true, else false.
+//   - coherence.maxRounds: a positive integer from cfg.coherence.maxRounds, else 2.
+// `impl` undefined (no critics.implementation config) ⇒ all-disabled defaults. Pure, never throws.
+function resolveImplementationCritic(impl) {
+  const cfg = impl && typeof impl === 'object' ? impl : {}
+  const coh = cfg.coherence && typeof cfg.coherence === 'object' ? cfg.coherence : {}
+  return {
+    enabled: cfg.enabled === true,
+    maxRounds: Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0 ? cfg.maxRounds : 2,
+    coherence: {
+      enabled: coh.enabled === true,
+      maxRounds: Number.isInteger(coh.maxRounds) && coh.maxRounds > 0 ? coh.maxRounds : 2,
+    },
+  }
+}
+
 // Read the additive RUS-68 `failedRemotes` list off a parsed cleanup envelope, tolerating
 // its absence (older producers) and any non-array junk. Non-empty ⇒ the prune attempted but
 // some `<ticket>/*` origin refs are still present — a RETRIABLE partial failure (the run is
@@ -1173,6 +1216,34 @@ printed ok:false, still output that JSON verbatim (do NOT retry or improvise).`,
   return { ...resolveDesignCritic(parseCriticConfig(cfgOut)), parsedCritics }
 }
 
+// Read the OPTIONAL `critics.implementation` config block (RUS-58) via the config worker +
+// parseImplementationCriticConfig, then resolve it to the ImplementationCriticConfig shape
+// { enabled, maxRounds, coherence: { enabled, maxRounds } }. It round-trips the WHOLE `critics`
+// object via `--key critics` and digs `value.implementation` (NEVER `--key critics.implementation`
+// — qrspi_config.py is single-top-level-key only; a dot-path returns the default and silently
+// disables the critic; MEMORY: config reader is single-top-level-key only). Best-effort: any
+// read/parse failure or an absent block leaves the parsed value undefined ⇒ resolveImplementation-
+// Critic returns the disabled defaults (the implementation phase runs its byte-for-byte-unchanged
+// no-critic path). Never throws and never gates the run (the critic is opt-in). `wd`/`id` are
+// accepted for signature parity with the structure contract; the reader command is self-locating
+// (engineCmd), so they are not needed to locate the config.
+async function readImplementationCriticConfig(wd, id) {
+  const cfgOut = await agent(
+    `You are the CONFIG worker for the QRSPI implementation critic. Your cwd is the main repo root.
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives:
+
+  python3 ${engineCmd('scripts/qrspi_config.py')} --key critics
+
+It reads the repo's .qrspi/config.json (self-locating) and prints a one-line JSON envelope
+{ "ok": true, "key": "critics", "value": <object|""> } to stdout (value is "" when no
+critics block is present). Output that JSON as your FINAL message, exactly and verbatim — NO
+surrounding prose, NO code fences, NO edits. Do NOT call any structured-output tool. If it
+printed ok:false, still output that JSON verbatim (do NOT retry or improvise).`,
+    { label: `config:critics:impl:${id}`, phase: 'Implementation' }
+  )
+  return resolveImplementationCritic(parseImplementationCriticConfig(cfgOut))
+}
+
 // Invoke the tested pure decision module qrspi_critic_loop.py via a worker (the JS sandbox
 // cannot run python). Returns { action, residual_findings } or null on failure. The verdicts
 // are serialized to a token-free staged JSON file the worker passes to the script on stdin,
@@ -1578,6 +1649,137 @@ Return: ok, prUrl, newStatus, summary.`,
   return out
 }
 
+// ---------------------------------------------------------------------------
+// HELPER: runCoherenceCritic — the whole-stack coherence pass at the planning→
+// implementation seam (RUS-58, AC2). Runs ONCE before the slice loop, judging the six
+// frozen planning artifacts together for intent drift, and returns { ok, residualFindings }
+// in the SAME shape runCriticLoop uses (so doImplementation carries findings the same way).
+//   - There is NO reviser at the seam: per Decision 3 the disposition is surface-only — the
+//     coherence pass never rewrites an upstream artifact (that high-blast-radius path is the
+//     reviewer-initiated `reset`, not this critic). So the loop converges (pass) or carries
+//     the findings; a `revise`/`cap_reached` next_action action both terminate by carrying
+//     the current verdict's findings (there is nothing to rewrite to improve them).
+//   - The convergence decision is the EXISTING tested next_action (via criticDecision),
+//     NOT re-derived here (Decision 5 spirit).
+//   - A critic SPAWN failure (verdict === null) or a failed decision returns ok:false, which
+//     doImplementation maps to skip(...) (no silent ship; Risk Register row 2).
+// `paths` is the resolved six-artifact path object; `maxRounds` is config.coherence.maxRounds.
+async function runCoherenceCritic(id, paths, maxRounds) {
+  const rounds = Number.isInteger(maxRounds) && maxRounds > 0 ? maxRounds : 2
+  for (let round = 0; round < rounds; round++) {
+    const verdict = await agent(
+      `You are the qrspi-coherence-critic for ${id}, round ${round + 1}/${rounds}. Judge the WHOLE planning stack for intent drift — every ticket obligation must still be coherently carried from the ticket through questions, research, design, structure, and the plan.
+TICKET_CONTENT_PATH = ${paths.ticket}
+QUESTIONS_PATH = ${paths.questions}
+RESEARCH_PATH = ${paths.research}
+DESIGN_PATH = ${paths.design}
+STRUCTURE_PATH = ${paths.structure}
+PLAN_PATH = ${paths.plan}
+Read all six paths and return { pass, findings } per the schema.`,
+      { label: `coherence-critic:${id}#${round + 1}`, phase: 'Critic', agentType: 'qrspi-coherence-critic', schema: CRITIC_VERDICT_SCHEMA }
+    )
+    if (verdict === null) {
+      log(`  ${id}: coherence critic round ${round + 1} failed/skipped — stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+    const passed = verdict.pass === true
+    const findings = Array.isArray(verdict.findings) ? verdict.findings : []
+    log(`  ${id}: coherence critic round ${round + 1}/${rounds} → ${passed ? 'PASS' : `FAIL (${findings.length} finding(s))`}`)
+
+    const decision = await criticDecision([verdict], round, rounds)
+    if (!decision) {
+      log(`  ${id}: coherence critic-loop decision failed to compute — stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+    if (decision.action === 'converged') {
+      log(`  ${id}: coherence critic CONVERGED at round ${round + 1}`)
+      return { ok: true, residualFindings: [] }
+    }
+    // revise OR cap_reached: there is no upstream reviser at the seam (surface-only, Decision 3),
+    // so both terminate by carrying the current findings to the slice-1 PR body.
+    log(`  ${id}: coherence critic ${decision.action} at round ${round + 1} — ${decision.residual_findings.length} residual finding(s) carried to slice-1 PR body (surface-only)`)
+    return { ok: true, residualFindings: decision.residual_findings }
+  }
+  log(`  ${id}: coherence critic loop exhausted ${rounds} round(s) without converging`)
+  return { ok: true, residualFindings: [] }
+}
+
+// ---------------------------------------------------------------------------
+// HELPER: runSliceCritic — the per-slice edge critic inside doImplementation's slice loop
+// (RUS-58, AC1/AC3). Judges ONE slice's diff (${diffBase}..${diffHead}) as a faithful
+// implementation of that slice's plan/structure rubric, with the SINGLE-CRITIC path (NO panel
+// — AC3: no `lenses`). Returns { ok, residualFindings } (same shape as runCriticLoop):
+//   - Spawns the EXISTING qrspi-critic agent against the slice diff; the rubric is the slice's
+//     planSlice + structureSlice (passed inline). The critic reads the diff via the worker's
+//     git/gt access — it is given the Graphite diff range and the rubric text.
+//   - On a non-pass verdict, routes to the EXISTING qrspi_revise_amend.py --branch ${id}/slice-N
+//     (Decision 2 / Q7), then re-critiques on the next round.
+//   - The converge/revise/cap decision is the EXISTING tested next_action via criticDecision
+//     (Decision 5 — NOT re-implemented); cap_reached is ship-with-disclosure (carry findings).
+//   - A critic or revise-amend SPAWN failure (null) ⇒ ok:false ⇒ doImplementation maps it to
+//     skip(...) (no silent ship; Risk Register row 2).
+async function runSliceCritic(t, r, wd, sliceN, dec, planSlice, structureSlice, maxRounds) {
+  const rounds = Number.isInteger(maxRounds) && maxRounds > 0 ? maxRounds : 2
+  const id = t.id
+  const branch = `${id}/slice-${sliceN}`
+  const diffRange = `${dec.diffBase}..${dec.diffHead}`
+  const rubric = `PLAN_SLICE (the planned steps this slice must faithfully implement):\n${planSlice}\n\nSTRUCTURE_SLICE (the types/contracts/slice definition):\n${structureSlice}`
+
+  for (let round = 0; round < rounds; round++) {
+    const verdict = await agent(
+      `You are the qrspi-critic for ${id} slice ${sliceN}, round ${round + 1}/${rounds}, judging an IMPLEMENTATION slice as a faithful derivation of its planned steps. Your cwd is ${wd}.
+1. Read the slice's code diff with: \`gt checkout ${branch} --no-interactive\` then \`git diff ${diffRange}\` (the Graphite parent..this-slice range). This diff is the produced artifact you judge.
+2. The rubric (the upstream you judge against) is the slice's plan + structure below:
+${rubric}
+Judge the EDGE: does the slice diff faithfully implement every planned step / contract for this slice — preserved, correctly built, or explicitly resolved? A planned step silently dropped, contradicted, or distorted is a finding. Do NOT judge prose; judge whether the code realizes the plan. Return { pass, findings } per the schema (each finding names the specific planned step/contract the diff drops/contradicts/distorts). Do NOT amend or commit anything — you only judge.`,
+      { label: `slice-critic:${id}#${sliceN}r${round + 1}`, phase: 'Critic', agentType: 'qrspi-critic', schema: CRITIC_VERDICT_SCHEMA }
+    )
+    if (verdict === null) {
+      log(`  ${id}: slice ${sliceN} critic round ${round + 1} failed/skipped — stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+    const passed = verdict.pass === true
+    const findings = Array.isArray(verdict.findings) ? verdict.findings : []
+    log(`  ${id}: slice ${sliceN} critic round ${round + 1}/${rounds} → ${passed ? 'PASS' : `FAIL (${findings.length} finding(s))`}`)
+
+    const decision = await criticDecision([verdict], round, rounds)
+    if (!decision) {
+      log(`  ${id}: slice ${sliceN} critic-loop decision failed to compute — stopping this ticket`)
+      return { ok: false, residualFindings: [] }
+    }
+    if (decision.action === 'converged') {
+      log(`  ${id}: slice ${sliceN} critic CONVERGED at round ${round + 1}`)
+      return { ok: true, residualFindings: [] }
+    }
+    if (decision.action === 'cap_reached') {
+      log(`  ${id}: slice ${sliceN} critic CAP-REACHED at round ${round + 1} — ${decision.residual_findings.length} residual finding(s) carried to the slice PR body (ship-with-disclosure)`)
+      return { ok: true, residualFindings: decision.residual_findings }
+    }
+    // action === 'revise': route to the existing qrspi_revise_amend.py to fix the slice IN PLACE,
+    // then re-critique the amended branch on the next round.
+    log(`  ${id}: slice ${sliceN} critic REVISE at round ${round + 1} — amending the slice to address findings`)
+    const rev = await agent(
+      `You are the SLICE REVISER for ${id} slice ${sliceN}, in ${wd}. The per-slice edge critic judged the slice diff (${diffRange}) and found it does NOT yet faithfully implement its planned steps.
+FINDINGS (each names a specific planned step/contract the slice diff dropped/contradicted/distorted):
+${findings.map((f, i) => `  ${i + 1}. ${f}`).join('\n')}
+Do:
+1. \`gt checkout ${branch} --no-interactive\`.
+2. Edit the slice's code in ${wd} to resolve EVERY finding while keeping everything already correct (do NOT touch other slices' files or any phase artifact beyond what the findings require).
+3. Stage your edits AND amend the slice commit IN PLACE by running EXACTLY this one self-locating command verbatim — no path edits, no alternatives:
+     python3 ${engineCmdFor(r, 'scripts/qrspi_revise_amend.py')} --ticket ${id} --branch ${branch}
+   It checks out the branch, stages every edit (excluding caches), amends with \`gt modify\` keeping the EXACT subject+trailers, and VERIFIES the amend captured your changes (it FAILS if nothing was staged or the tree is left dirty). It prints JSON { ok, branch, oldOid, newOid, dirty, error? }. If it prints ok:false, return ok:false — HARD STOP; do NOT hand-run gt modify/git add/git commit/git reset to work around it, and never run a bare \`gt modify --no-interactive\` (without staging it amends an empty index and silently drops your edits).
+Return: ok, summary (one line naming what you changed), or ok:false with the verbatim reason.`,
+      { label: `slice-revise:${id}#${sliceN}r${round + 1}`, phase: 'Critic', schema: WORKER_SCHEMA }
+    )
+    if (!rev || rev.ok !== true) {
+      log(`  ${id}: slice ${sliceN} revise-amend round ${round + 1} failed — ${rev?.error ?? 'no result'} (stopping this ticket)`)
+      return { ok: false, residualFindings: [] }
+    }
+  }
+  log(`  ${id}: slice ${sliceN} critic loop exhausted ${rounds} round(s) without converging`)
+  return { ok: true, residualFindings: [] }
+}
+
 // ===========================================================================
 // ACTION: advance → implementation  (slice stack on plan, then land at the end)
 // ===========================================================================
@@ -1598,6 +1800,50 @@ Return: ok, worktreeDir, slices[]. Do NOT implement anything or change Linear.`,
   }
 
   const wd = setup.worktreeDir
+
+  // --- RUS-58: whole-stack coherence pass at the planning→implementation seam (T12-T16).
+  // The implementation critic is OPT-IN: readImplementationCriticConfig round-trips the WHOLE
+  // `critics` object (--key critics) and digs value.implementation; an absent block ⇒ disabled
+  // defaults, so this whole block is a no-op (the byte-for-byte-unchanged path) unless the
+  // operator turns it on. `coherenceFindings` is carried in memory through doImplementation and
+  // surfaced into the SLICE-1 PR body later (AC2: no slice commit exists yet at the seam).
+  const implCriticCfg = await readImplementationCriticConfig(wd, t.id)
+  let coherenceFindings = []
+  if (implCriticCfg.coherence.enabled) {
+    // T13: resolve the six coherence inputs inline — the five frozen planning artifacts via
+    // art(wd,id,name) + the ticket content via r.ticketContentPath (mirrors the doDesign panel).
+    const coherencePaths = {
+      ticket: r.ticketContentPath,
+      questions: art(wd, t.id, 'questions.md'),
+      research: art(wd, t.id, 'research.md'),
+      design: art(wd, t.id, 'design.md'),
+      structure: art(wd, t.id, 'structure.md'),
+      plan: art(wd, t.id, 'plan.md'),
+    }
+    // T14: fail-closed guard. The resolver's `existing` flags are the authoritative presence
+    // check for the five planning artifacts (it emits them in the envelope); r.ticketContentPath
+    // is resolved by construction before any advance. A missing/empty input ⇒ skip(...) (no
+    // critic spawn against an incomplete stack; Risk Register row 3, Decision 6).
+    const ex = r.existing || {}
+    const missing = ['questions', 'research', 'design', 'structure', 'plan']
+      .filter(k => !ex[k])
+    if (!r.ticketContentPath) missing.push('ticket')
+    if (missing.length) {
+      log(`  ${t.id}: coherence pass enabled but inputs missing/empty [${missing.join(', ')}] — skipping ticket`)
+      return skip(t, r.decision, `Coherence inputs missing/empty: ${missing.join(', ')}.`)
+    }
+    // T15: run the coherence critic ONCE at the seam (converges via next_action up to
+    // coherence.maxRounds), carrying residual findings in memory for the slice-1 PR body.
+    log(`  ${t.id}: implementation coherence pass ENABLED — maxRounds ${implCriticCfg.coherence.maxRounds}`)
+    const coh = await runCoherenceCritic(t.id, coherencePaths, implCriticCfg.coherence.maxRounds)
+    // T16: a coherence-critic SPAWN failure (ok:false) ⇒ skip(...), mirroring the implement/
+    // commit failure paths (no silent ship; Risk Register row 2, Q8).
+    if (!coh.ok) {
+      return skip(t, r.decision, 'Coherence critic spawn failed; stopped without implementing.')
+    }
+    coherenceFindings = coh.residualFindings
+  }
+
   let previousNotes = ''
   for (const s of setup.slices) {
     if (s.alreadyCommitted) { log(`  ${t.id}: slice ${s.n} already committed — skipping`); continue }
