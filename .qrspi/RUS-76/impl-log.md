@@ -120,3 +120,36 @@
 - **KNOWN LIMITATION recorded for Slice 4 doc (step 38):** the three IO-bound seams (resolve/restack/cleanup) pin formatting via `json.dumps(builder, hardcoded-kwargs)`, NOT headless `main()` stdout — so a future drift in those `main()` serializers is NOT caught by this test (the test and `main()` would drift independently). The other five seams run fully pinned. The deliberate-divergence guard was demonstrated on a headless-`main()` seam (config) per plan step 29's note.
 
 ---
+
+## Session 3 — Slice 3: Consumer-side node:vm test + node harness
+
+**Timestamp:** 2026-06-14T00:00:00Z
+**Tasks completed:** T30, T31, T32, T33, T34, T35, T36, T37
+**Tasks failed:** none
+**Tests:**
+
+- Smoke load (T36): `node scripts/contract_seam_runner.js parseConfigEnvelope scripts/fixtures/contract_seam/config/wellformed.json` → `{"ok":true,"key":"linearProject","value":"QRSPI"}`, no orchestration crash
+- `python3 scripts/run_tests.py contract_fixtures_consumer` → 1 file PASS (22 sub-tests: smoke + 10 well-formed acceptances + 10 malformed sentinels + 1 shallow-merge), 0 failed
+- Node-hidden skip: running with `PATH` lacking node → all 22 tests `skipped 'node not installed'`, returncode 0 (skipped, not failed)
+- Deliberate-divergence drift guard: temporarily setting `config/wellformed.json`'s `value` to `"DIVERGED"` → test FAILS (2 failures: smoke + config acceptance); reverted → `git diff --stat scripts/fixtures/` empty
+- Full suite `python3 scripts/run_tests.py` → 33 passed, 0 failed; `qrspi-batch.js` unmodified (runner transforms source in memory only)
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none. The CLI takes the **actual JS parser function name** (e.g. `parseConfigEnvelope`), NOT the seam directory name (`config`) — the smoke-load command in plan step 36 reads `... config scripts/.../config/wellformed.json` but the runner's first arg is the parser symbol; using the seam name returns `unknown parser 'config'` (exit 2). The Python test maps seam→parser internally, so this is invisible to `run_tests.py`. Verified-current line numbers: `RESOLVE_ACTIONS` l.196, eight `parse*` decls l.224–378, `DEFAULT_CRITIC_PHASES` l.612, `phase('Query')` orchestration boundary l.2363, terminal `return` l.2625 — all matched the plan's stated values, no drift.
+
+**Notes for next session:**
+
+- **Slice 3 added exactly two files** (no production code touched, `qrspi-batch.js` read-only):
+  - `scripts/contract_seam_runner.js` — Node harness. Loads `qrspi-batch.js` via the SAME recipe as `scripts/check_workflows.js` (strip lone leading `export`, async-wrap `return (async () => {...})()`, `vm.compileFunction` with the eight injected globals as params) PLUS one extra step: a `return { parseResolveEnvelope, ... , DEFAULT_CRITIC_PHASES }` shim spliced **immediately before `phase('Query')`** (located by regex `/^phase\(['"]Query['"]\)/m` at run time, NOT a literal offset). This makes the async IIFE return the parser map and skip all orchestration. Invoked with all eight globals stubbed as no-ops. CLI: `node scripts/contract_seam_runner.js <parser-name> <fixture-path>...` → one JSON line per fixture `{parser,fixture,result}`.
+  - `scripts/qrspi_contract_fixtures_consumer_test.py` — stdlib `unittest`, `NODE = shutil.which("node")` skip gate via `@unittest.skipIf`, self-locating paths from `__file__`, drives the runner via `subprocess.run(cwd=REPO_ROOT)` and parses emitted JSON lines.
+- **Parser arg requirements** (the runner supplies these so well-formed fixtures are genuinely ACCEPTED, not arg-rejected): `parseResolveEnvelope(text, "RUS-1")` (worktreeDir must end `/.worktrees/RUS-1`); `parseRestackEnvelope(text, "RUS-1")`; `parseConfigEnvelope(text, "linearProject")` (key must match); `parseOrderedTickets(text, [{id:"RUS-1"},{id:"RUS-2"}])` (return must be a permutation of these ids). The other four take only `text`.
+- **`prose_wrapped` fixtures are ACCEPTANCE cases, not sentinels:** `resolve/prose_wrapped.json` and `sync-trunk/prose_wrapped.json` exercise the `extractJsonObject` brace-depth scan and return the PARSED envelope (the extractor finds the balanced object inside prose) — the consumer test asserts these as accepted, NOT as `{ok:false}`. The actual loud-seam sentinels are driven by `no_json`/`unknown_action`/`missing_ok`/`missing_field`/`wrong_type`/`missing_decision`.
+- **Verified fail-mode sentinels (all distinct, per design Decision 4):** resolve/config/sync/restack → `{ok:false, error}`; cleanup → `{ok:false, decision:'skip', error}` (uniquely carries `decision:'skip'`); land → `{status:'incomplete'}`; ordered-tickets → `null`; critics → fail-OPEN to `DEFAULT_CRITIC_PHASES`. The critics shallow-merge (`{...DEFAULT_CRITIC_PHASES, ...phases}`) REPLACES a phase wholesale: `partial_merge` → `design == {enabled:true}` (no defaults augmented), five untouched phases keep DEFAULTs.
+- **For Slice 4 doc (T38):** both new test files exist now and are named above; the runner exposes `DEFAULT_CRITIC_PHASES` from the same source so the critics assertions compare against the canonical const (the Python test also keeps an `EXPECTED_DEFAULT_CRITIC_PHASES` literal mirror). The IO-bound-seam main()-serializer-not-pinned limitation (from Slice 2) and the silent-seam (ordered-tickets→null, critics→defaults) value-difference-assertion gap are BOTH to be documented in step 38.
+
+---
