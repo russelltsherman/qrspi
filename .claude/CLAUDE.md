@@ -152,7 +152,13 @@ stays on `main`; all ticket work happens in worktrees. `.worktrees/` is gitignor
   `scripts/qrspi_pr_body.py` (self-locating, like the resolver) splices `pr-summary.md` into the
   slice-1 commit message before `gt submit`, and slices 2..N carry a focused "Part N/total" body
   from their own commit messages.
-- All of the above have stdlib-only unit tests as `_test.py` siblings (`scripts/qrspi_*_test.py`, run with `python3`).
+- All of the above have stdlib-only unit tests as `_test.py` siblings (`scripts/*_test.py`, run with `python3`).
+  Run the whole suite with the aggregating runner `python3 scripts/run_tests.py` (`--list` to enumerate,
+  a substring arg to filter, e.g. `python3 scripts/run_tests.py resolve`); it runs every `scripts/*_test.py`
+  as its own subprocess and exits non-zero if any fails. The same command is the regression gate in CI
+  (`.github/workflows/tests.yml`, on every PR + push to `main`). JS coverage of `qrspi-batch.js` is
+  deferred (the file is harness-coupled — top-level `return`, injected globals, no import support — so it
+  is not unit-testable in isolation without a refactor).
 - Artifact templates live in `.qrspi/templates/` (reference only — not written locally)
 - The `evals/` + `scripts/run_eval.py` harness is a **non-functional placeholder** — verify
   pure logic with the unit tests and orchestration changes with manual end-to-end runs
