@@ -153,3 +153,29 @@
 - **For Slice 4 doc (T38):** both new test files exist now and are named above; the runner exposes `DEFAULT_CRITIC_PHASES` from the same source so the critics assertions compare against the canonical const (the Python test also keeps an `EXPECTED_DEFAULT_CRITIC_PHASES` literal mirror). The IO-bound-seam main()-serializer-not-pinned limitation (from Slice 2) and the silent-seam (ordered-tickets→null, critics→defaults) value-difference-assertion gap are BOTH to be documented in step 38.
 
 ---
+
+## Session 4 — Slice 4: Documentation update
+
+**Timestamp:** 2026-06-14T23:10:00Z
+**Tasks completed:** T38, T39
+**Tasks failed:** none
+**Tests:**
+
+- Inspection (T39 checkpoint) → `docs/testing-dynamic-workflows.md` references `scripts/fixtures/contract_seam/` (1×), names both `qrspi_contract_fixtures_producer_test.py` (1×) and `qrspi_contract_fixtures_consumer_test.py` (1×), marks the strategy IMPLEMENTED/shipped, states coverage = all eight `parse*` seams, and documents BOTH limitations (silent-seam debuggability gap + IO-bound `main()`-serializer-not-pinned). All checks passed.
+- `python3 scripts/run_tests.py` → 33 passed, 0 failed (regression gate; no code touched).
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none. The seam-fixture strategy lives as item 3 in the doc's "Recommended strategy" list (previously tagged `*(Tracked as a QRSPI ticket.)*`); marked IMPLEMENTED there in place. The doc's top status banner ("research synthesis + recommended strategy") was left unchanged — it describes the whole doc (which remains a research synthesis), while the per-item status now accurately reflects the shipped seam-fixture work.
+
+**Notes for next session:**
+
+- **Slice 4 (final slice) added zero files and touched exactly one doc**: `docs/testing-dynamic-workflows.md`. No production code, no fixtures, no test files touched (`git diff --stat` shows only the doc). `qrspi-batch.js` remains read-only throughout the ticket.
+- The doc now (item 3 of "Recommended strategy for this repo") marks the JS↔Python seam-fixture contract strategy **shipped (RUS-76)**, references `scripts/fixtures/contract_seam/<seam>/<variant>.json`, names both `_test.py` files and `scripts/contract_seam_runner.js`, states coverage is all eight `parse*` seams (incl. restack/cleanup), and records both known limitations verbatim from plan step 38 / design Risk register row 5: (a) silent seams (`parseOrderedTickets`→null, `parseCriticsEnvelope`→defaults) guarded by value-difference assertions because no runtime log signal exists; (b) IO-bound seams (resolve/restack/cleanup) pin formatting via `json.dumps(builder, hardcoded-kwargs)` not headless `main()`, so a drift in those `main()` serializers is not caught.
+- All four slices complete. The orchestrator should now run the PR phase (`pr-summary.md`) and submit the stack.
+
+---
