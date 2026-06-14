@@ -26,3 +26,32 @@
 - An extra defensive `ok:false` branch exists if the classifier says `updated` but `git merge --ff-only` itself fails at runtime (surfaces the merge stderr verbatim, exits 1) — not in the six-token space but a real fail-loud path the wiring inherits for free.
 
 ---
+
+## Session 2 — Slice 2
+
+**Timestamp:** 2026-06-14T11:10:59Z
+**Tasks completed:** T11, T12, T13, T14, T15, T16, T17, T18
+**Tasks failed:** none
+**Tests:**
+
+- `node --check .claude/workflows/qrspi-batch.js` → passes (no syntax regression)
+- `python3 scripts/qrspi_sync_trunk_test.py` → 34 passed, 0 failed (re-run to confirm the Slice 1 wiring target is sound; not a Slice 2 deliverable, dependency sanity only)
+
+**Deviations from structure.md:**
+
+- none. `parseSyncTrunkEnvelope` mirrors `parseRestackEnvelope` (extractJsonObject → validate `ok` boolean → on ok, require `updated`/`from`/`to`); `syncTrunk(phaseLabel)` mirrors `ensureRestacked`'s worker-spawn shape with `engineCmd('scripts/qrspi_sync_trunk.py')` run verbatim (no argv) by a main-checkout worker. No `WORKER_SCHEMA` change — `error?` was already declared (confirmed at line 467).
+
+**Deviations from plan.md:**
+
+- Minor (within the AC4 / step 16 edit): plan step 16 pins only `finResult`'s returned `summary` to `fin?.error ?? fin?.summary ?? 'unknown'`. I also widened the adjacent `log()` line in the same `finResult` failure block from `fin?.error ?? 'no result'` to `fin?.error ?? fin?.summary ?? 'no result'` so the logged reason and the returned summary stay consistent (otherwise a real conflict would log "no result" while the returned summary shows the verbatim reason — a latent inconsistency). Purely a surfaced-string change in the one function step 16 targets; no behavioral/contract change.
+
+**Notes for next session:**
+
+- Slice 2 is the last slice (worktree.md: "End of plan"). No further implementation session.
+- Wiring summary, all in `.claude/workflows/qrspi-batch.js`:
+  - `parseSyncTrunkEnvelope(text)` added after `parseRestackEnvelope` (~line 277).
+  - `syncTrunk(phaseLabel)` added after `ensureRestacked` (~line 1502); spawns a main-checkout worker running `python3 ${engineCmd('scripts/qrspi_sync_trunk.py')}` verbatim, parses via `parseSyncTrunkEnvelope`, logs FF-advanced / already-current / FAILED.
+  - AC2 run-start sync: `phase('Sync')` + `await syncTrunk('Sync')` inserted after the empty-queue short-circuit and BEFORE the per-ticket `for` loop (~line 2508); `throw` on non-ok.
+  - AC3 post-land sync: `await syncTrunk('Finalize')` in `doLand`, immediately after `res.landed = true` and before `runCleanup` (so inside the `verdict.status === 'landed'` branch, ~line 2243); `throw` on non-ok (fatal, OQ3-RESOLVED).
+  - AC4: `doLand` land-worker prompt now instructs the worker to put the verbatim conflict/merge reason in the `error` field (not only `summary`); `finResult` failure path reads `fin?.error ?? fin?.summary ?? 'unknown'`.
+- T19 (manual e2e, AC5) is verification-only per the eval-placeholder convention and was NOT run here — it needs a controlled `origin/main` that is ahead of / divergent from local `main`, which this sandbox cannot stage deterministically. The dependency helper's own 34-check suite plus `node --check` cover the unit/syntax surface.

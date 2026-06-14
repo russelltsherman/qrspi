@@ -287,6 +287,24 @@ function parseRestackEnvelope(text, ticketId) {
   return env
 }
 
+// Parse + validate the trunk-sync worker's text into the qrspi_sync_trunk.py envelope
+// (SyncEnvelope { ok, repoRoot, updated, from, to, error? }). Same text-return + JS-parse
+// shape as restack (no StructuredOutput). Validates `ok` is boolean and, on the ok path,
+// that updated/from/to are present (the helper always emits them on its two ok tokens);
+// fail-loud tokens carry a verbatim `error`. A garbled echo becomes a clean ok:false so the
+// caller surfaces it and aborts the run (sync is a hard gate, not a skip).
+function parseSyncTrunkEnvelope(text) {
+  const raw = extractJsonObject(text)
+  if (!raw) return { ok: false, error: 'sync-trunk: no JSON envelope in worker output' }
+  let env
+  try { env = JSON.parse(raw) } catch (e) { return { ok: false, error: `sync-trunk: unparseable envelope (${e.message})` } }
+  if (typeof env.ok !== 'boolean') return { ok: false, error: 'sync-trunk: envelope missing ok flag' }
+  if (env.ok && (typeof env.updated !== 'boolean' || !('from' in env) || !('to' in env))) {
+    return { ok: false, error: 'sync-trunk: ok envelope missing updated/from/to' }
+  }
+  return env
+}
+
 // Parse + validate the cleanup worker's text into the qrspi_cleanup.py envelope
 // ({ ok, repoRoot, decision, reason, removed{worktree,branches[],remotes[]},
 // failedRemotes[], dryRun, error? }). Same text-return + JS-parse shape as resolve/restack
@@ -1360,6 +1378,41 @@ STOP — do NOT retry, do NOT run gt restack/abort/sync yourself or improvise pa
 }
 
 // ===========================================================================
+// SYNC-TRUNK — never build a dependent ticket on a stale local main (RUS-74).
+// Fetches origin and FF-advances local `main` to `origin/main` in the MAIN checkout,
+// failing loud on a non-`main` HEAD, divergence, a dirty tree, or a fetch failure.
+// Called at run start (before any worktree is cut) and after every successful land,
+// so a dependent ticket's worktree is always cut from a current trunk. The helper
+// self-locates REPO_ROOT (resolves the MAIN checkout even when invoked from a worktree),
+// takes no meaningful argv, and prints the SyncEnvelope { ok, repoRoot, updated, from,
+// to, error? } on stdout (exit 0 when ok else 1). A non-ok envelope is FATAL: callers
+// `throw` to abort the whole run rather than skip a ticket. Mirrors the restack-worker
+// invocation shape (engineCmd + verbatim run + parse).
+// ===========================================================================
+async function syncTrunk(phaseLabel) {
+  const out = await agent(
+    `You are the TRUNK-SYNC worker for qrspi-batch. Your cwd is the main repo root.
+Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives,
+no other git/gt commands:
+
+  python3 ${engineCmd('scripts/qrspi_sync_trunk.py')}
+
+It fetches origin and fast-forward-advances local \`main\` to \`origin/main\` in the main
+checkout (self-locating; takes no arguments), and prints a JSON envelope
+{ ok, repoRoot, updated, from, to, error? }. Output that JSON as your FINAL message,
+exactly and verbatim — NO surrounding prose, NO code fences, NO edits. Do NOT call any
+structured-output tool. If it printed ok:false, still output that JSON verbatim (HARD
+STOP — do NOT retry, do NOT run git fetch/merge/reset yourself or improvise paths).`,
+    { label: 'sync-trunk', phase: phaseLabel }
+  )
+  const sy = parseSyncTrunkEnvelope(out)
+  if (!sy.ok) log(`  trunk-sync FAILED — ${sy.error ?? 'unknown'}`)
+  else if (sy.updated) log(`  trunk-sync: local main FF-advanced ${sy.from} → ${sy.to}`)
+  else log(`  trunk-sync: local main already current (${sy.to})`)
+  return sy
+}
+
+// ===========================================================================
 // ACTION: run_design  (questions → research → design, then submit Design PR)
 // ===========================================================================
 async function doDesign(t, r) {
@@ -2062,8 +2115,8 @@ async function doLand(t, r) {
   // 1. Merge the stack bottom-up + best-effort Linear → Done (the land worker; it no
   //    longer does worktree/branch cleanup — that is the deterministic script below).
   const fin = await agent(
-    `You are the LAND worker for ${t.id}, in ${r.worktreeDir}. Every PR in the stack is approved+clean. Follow the "action: land" steps of ${SKILL}: ensure the stack is current (gt submit --publish --stack), merge bottom-up (gt merge --no-interactive — NOT --confirm, which forces a prompt --no-interactive cannot satisfy), then BEST-EFFORT project Linear → "Done". Do NOT remove the worktree, delete branches, or run \`gt sync --force\` — a separate deterministic cleanup step (qrspi_cleanup.py) handles all reaping AFTER the merge. Treat any infrastructure/merge error as a HARD STOP (return ok:false, verbatim error).
-Return: ok, prUrl, newStatus, summary.`,
+    `You are the LAND worker for ${t.id}, in ${r.worktreeDir}. Every PR in the stack is approved+clean. Follow the "action: land" steps of ${SKILL}: ensure the stack is current (gt submit --publish --stack), merge bottom-up (gt merge --no-interactive — NOT --confirm, which forces a prompt --no-interactive cannot satisfy), then BEST-EFFORT project Linear → "Done". Do NOT remove the worktree, delete branches, or run \`gt sync --force\` — a separate deterministic cleanup step (qrspi_cleanup.py) handles all reaping AFTER the merge. Treat any infrastructure/merge error as a HARD STOP (return ok:false, and put the VERBATIM conflict/merge reason in the \`error\` field — NOT only in \`summary\`; the orchestrator surfaces \`error\` to the operator).
+Return: ok, error (the verbatim reason on failure), prUrl, newStatus, summary.`,
     { label: `land:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
   const res = finResult(t, fin, 'land')
@@ -2088,6 +2141,15 @@ Return: ok, prUrl, newStatus, summary.`,
     return res
   }
   res.landed = true
+  // Post-land trunk sync (RUS-74, AC3): a successful land merged this stack into
+  // origin/main, so local `main` is now behind. FF-advance it before the next ticket's
+  // worktree is cut, so a sibling/dependent ticket later in this same run never builds on
+  // the pre-land trunk. Same disposition as the run-start sync: a non-ok envelope is FATAL
+  // (OQ3-RESOLVED) — throw to abort the run with the verbatim reason.
+  const postLandSync = await syncTrunk('Finalize')
+  if (!postLandSync.ok) {
+    throw new Error(`post-land trunk sync failed for ${t.id} — ${postLandSync.error ?? 'unknown'}; aborting run (refusing to leave local main stale after a land)`)
+  }
   const cl = await runCleanup(t.id, /* dryRun */ false, 'Finalize')
   const stranded = cleanupFailedRemotes(cl)
   if (!cl.ok) {
@@ -2115,8 +2177,8 @@ function failTicket(t) {
 }
 function finResult(t, fin, action) {
   if (!fin || !fin.ok) {
-    log(`  ${t.id}: ${action} finalize failed — ${fin?.error ?? 'no result'} (nothing advanced)`)
-    return { ticketId: t.id, action, summary: `${action} finalize failed: ${fin?.error ?? 'unknown'}` }
+    log(`  ${t.id}: ${action} finalize failed — ${fin?.error ?? fin?.summary ?? 'no result'} (nothing advanced)`)
+    return { ticketId: t.id, action, summary: `${action} finalize failed: ${fin?.error ?? fin?.summary ?? 'unknown'}` }
   }
   return { ticketId: t.id, action, newStatus: fin.newStatus, summary: fin.summary, prUrl: fin.prUrl }
 }
@@ -2378,6 +2440,18 @@ if (tickets.length === 0) {
   // reap stranded merged worktrees when the pass is enabled.
   const reconciliation = RECONCILE ? await runReconciliation(new Set()) : undefined
   return { ticketsProcessed: 0, note: `No tickets in ${STATUSES.join(' / ')}`, reconciliation }
+}
+
+// Run-start trunk sync (RUS-74, AC2): FF-advance local `main` to `origin/main` BEFORE the
+// per-ticket loop cuts any worktree, so no ticket — least of all a dependent one — is built
+// on a stale trunk. A non-ok envelope (non-`main` HEAD, divergence, dirty tree, fetch
+// failure) is FATAL: throw to abort the whole run loud with the verbatim reason rather than
+// silently proceed on stale state. Runs only on a non-empty queue (the empty short-circuit
+// above already returned).
+phase('Sync')
+const runStartSync = await syncTrunk('Sync')
+if (!runStartSync.ok) {
+  throw new Error(`run-start trunk sync failed — ${runStartSync.error ?? 'unknown'}; aborting run (refusing to build on a stale local main)`)
 }
 
 // Sequential: tickets share one .git index, so worktree/Graphite ops must not race.
