@@ -25,10 +25,17 @@ discovers/asks. No team name is hard-coded in the harness.
 
 `linearProject` scopes **both** ticket creation **and** `qrspi-batch` runs: by default the
 batch Query phase sweeps only the mapped project's assigned tickets (precedence
-`input.allProjects` > `input.project` > config `linearProject` > `QRSPI`). Pass
-`{"project":"..."}` to override for one run, or `{"allProjects":true}` to restore the
+`input.ticket` > `input.allProjects` > `input.project` > config `linearProject` > `QRSPI`).
+Pass `{"project":"..."}` to override for one run, or `{"allProjects":true}` to restore the
 all-projects sweep (an absent project no longer means "all projects"). A concrete scope
 that matches no Linear project aborts the run (fail loud) rather than sweeping empty.
+Pass `{"ticket":"RUS-XX"}` to scope a run to a **single** ticket: the Query phase fetches
+that one issue via `mcp__linear__get_issue` and skips project-scope resolution / the
+`list_issues` sweep / the ordering step, running just that ticket through the identical
+loop (a nonexistent id aborts, fail loud) — e.g.
+`Workflow({ name: "qrspi-batch", args: { ticket: "RUS-58" } })`. The single ticket is still
+re-fetched and re-decided by the resolver, so a gated (unassigned / not-`Selected`) ticket
+still surfaces `entry_blocked`/`wait` as a recorded result.
 
 ### Lifecycle — PR-gated
 

@@ -3,7 +3,7 @@ export const meta = {
   description: 'Drive every assigned in-flight QRSPI ticket one PR-gated step forward by resolving each ticket\'s PR review state and spawning the typed phase agents from the workflow script itself',
   whenToUse: 'After assigning tickets and moving them to Selected, or after approving phase PRs. Runs the autonomously-runnable actions (run_design, advance, submit, land, automatic reset/discard, and revise — addressing a CHANGES_REQUESTED phase PR in place then re-requesting review); leaves not-yet-approved tickets (wait) untouched.',
   phases: [
-    { title: 'Query', detail: 'List assigned Selected + in-flight (Design/Plan/Code Review) tickets, scoped to the mapped Linear project (input.allProjects > input.project > config linearProject > "QRSPI")' },
+    { title: 'Query', detail: 'List assigned Selected + in-flight (Design/Plan/Code Review) tickets, scoped to the mapped Linear project (input.ticket > input.allProjects > input.project > config linearProject > "QRSPI"); input.ticket fetches that one issue and skips the sweep' },
     { title: 'Resolve', detail: 'Per ticket: worktree + PR-state gather + tested resolver → decision (worker agent)' },
     { title: 'Restack', detail: 'Per ticket: restack the stack onto current trunk so drift/conflicts surface early (worker agent)' },
     { title: 'Design', detail: 'action=run_design → questions/research/design phase agents' },
@@ -107,13 +107,17 @@ const engineCmdFor = (r, rel) => `${engineRootFor(r)}/${rel}`
 const SKILL = engineCmd('.claude/skills/qrspi-work/SKILL.md')
 
 // --- args ------------------------------------------------------------------
-// Optional overrides: { statuses?: string[], project?: string,
+// Optional overrides: { statuses?: string[], ticket?: string, project?: string,
 //                       allProjects?: boolean,
 //                       reconcile?: boolean, reconcileDryRun?: boolean }
 //
-// PROJECT SCOPE (RUS-66): the Query sweep is scoped to ONE Linear project by
+// PROJECT SCOPE (RUS-66, RUS-73): the Query sweep is scoped to ONE Linear project by
 // default — the repo's mapped project — instead of every project the assignee
 // touches. Scope is resolved at Query start through this precedence chain:
+//   input.ticket > input.allProjects > input.project > config linearProject > "QRSPI"
+//   0. input.ticket (RUS-73; truthy after trim) ⇒ SINGLE-TICKET scope: fetch THIS
+//      one issue via mcp__linear__get_issue and skip project-scope resolution / the
+//      list_issues sweep / the order step entirely. A not-found id aborts (fail loud).
 //   1. input.allProjects === true  ⇒ ALL projects (the explicit opt-in; an
 //      undefined/absent project no longer means "all projects").
 //   2. input.project (truthy after trim; a blank/whitespace value is normalized
@@ -136,6 +140,14 @@ const ALL_PROJECTS = input?.allProjects === true
 // through to config rather than meaning all-projects).
 const PROJECT_ARG = (typeof input?.project === 'string' && input.project.trim() !== '')
   ? input.project.trim()
+  : undefined
+// input.ticket (RUS-73): single-ticket scope. When present (truthy after trim; a
+// blank/whitespace value is normalized to unset), the Query phase fetches THIS one
+// issue via mcp__linear__get_issue and skips project-scope resolution / the
+// list_issues sweep / the ordering step entirely. It heads the scope precedence:
+// input.ticket > input.allProjects > input.project > config linearProject > "QRSPI".
+const TICKET_ARG = (typeof input?.ticket === 'string' && input.ticket.trim() !== '')
+  ? input.ticket.trim()
   : undefined
 // Reconciliation pass (RUS-52): reap already-merged-but-uncleaned tickets stranded in
 // `.worktrees/` (the backlog the old per-land prose left behind on failure/skip). It is
@@ -2308,6 +2320,43 @@ phase('Query')
 // only happens when scope is NOT already pinned by allProjects or input.project.
 // A non-ok config read is a HARD FAILURE (per Slice 1 notes) — never a silent
 // fall-through to a wrong/empty sweep.
+// Scope→loop boundary (RUS-73): both arms below must leave `tickets` holding records
+// of the existing { id, title, status, createdAt } shape so the unchanged loop body
+// consumes them identically. The single-ticket arm (if TICKET_ARG) fetches ONE issue;
+// the else arm is the existing scope-resolve + validate + sweep + order stretch,
+// byte-for-byte unchanged.
+let tickets = []
+if (TICKET_ARG) {
+  // --- single-ticket scope (input.ticket) ----------------------------------
+  // Skip project-scope resolution / the list_issues sweep / the order step: fetch
+  // exactly this one issue and run it through the identical loop body below. A
+  // not-found fetch is a HARD FAILURE (fail loud) rather than an empty queue.
+  log(`Project scope: single ticket (input.ticket=${TICKET_ARG})`)
+  const oneOut = await agent(
+    `You are the SINGLE-TICKET fetch worker for the QRSPI batch Query phase.
+Use mcp__linear__get_issue to fetch the Linear issue whose identifier is EXACTLY
+"${TICKET_ARG}".
+
+Return that one ticket as a tickets array with a single element:
+  { "tickets": [ { "id": "${TICKET_ARG}", "title": <the issue title>, "status": <the issue's current workflow state name, e.g. "Selected" / "Design Review">, "createdAt": <the issue's ISO-8601 creation timestamp> } ] }
+
+Pin status to the issue's current workflow STATE NAME and createdAt to its ISO-8601
+creation timestamp — both are required. Nothing else. If no issue with that exact
+identifier exists, do NOT invent one and do NOT return an empty array: report that the
+issue was not found (HARD STOP).`,
+    { label: `get:${TICKET_ARG.toLowerCase()}`, phase: 'Query', schema: TICKETS_SCHEMA }
+  )
+  if (!oneOut || !Array.isArray(oneOut.tickets) || oneOut.tickets.length === 0) {
+    // Fail loud: a single-ticket run for a nonexistent id must abort the whole run,
+    // NOT fall through to an empty queue indistinguishable from "nothing to do".
+    throw new Error(
+      `qrspi-batch: single-ticket scope input.ticket="${TICKET_ARG}" resolved to no issue — ` +
+      `aborting (fail loud) rather than producing an empty queue. Check the identifier.`
+    )
+  }
+  const el = oneOut.tickets[0]
+  tickets = [{ id: el.id, title: el.title, status: el.status, createdAt: el.createdAt }]
+} else {
 let PROJECT // the concrete resolved project name, or undefined when ALL_PROJECTS
 if (!ALL_PROJECTS) {
   if (PROJECT_ARG !== undefined) {
@@ -2386,7 +2435,7 @@ Return every ticket as { id, title, status, createdAt } with id like "RUS-8", st
 )
 
 const seen = new Set()
-let tickets = []
+tickets = []
 for (const b of batches) {
   if (!b) continue
   for (const t of b.tickets) {
@@ -2427,6 +2476,7 @@ output the verbatim error (HARD STOP — do NOT retry or improvise an alternativ
   const sorted = parseOrderedTickets(sortedOut, tickets)
   if (sorted) tickets = sorted
 }
+} // end else (sweep/scope path) — RUS-73 single-ticket vs sweep branch
 
 log(`Found ${tickets.length} ticket(s): ${tickets.map(t => `${t.id} (${t.status})`).join(', ') || '(none)'}`)
 if (tickets.length === 0) {
