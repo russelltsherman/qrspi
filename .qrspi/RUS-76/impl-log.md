@@ -89,3 +89,34 @@
 - No production code touched; `qrspi-batch.js` and all producers are unchanged (read-only).
 
 ---
+
+## Session 2 — Slice 2: Producer-side conformance test
+
+**Timestamp:** 2026-06-14T00:00:00Z
+**Tasks completed:** T20, T21, T22, T23, T24, T25, T26, T27, T27a, T27b, T28, T29
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py contract_fixtures_producer` → 1 file PASS (8 sub-tests, one per seam), 0 failed
+- Deliberate-divergence drift guard: temporarily flipping `config/wellformed.json`'s `value` (a fully-pinned headless-`main()` seam) → test FAILS (exit 1, `test_config` formatting assert); reverted → PASS again. Fixture confirmed byte-identical to original (`git diff --stat scripts/fixtures/` empty).
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none. Step 20's per-seam symbol/serialization pinning was confirmed against the live producer source: resolve `qrspi_resolve.build_envelope` + `qrspi_resolve_state.resolve`; config has NO pure builder (`main()` inlines `print(json.dumps({"ok","key","value"}))`, reproduced inline in the test); critics `qrspi_critics_config.default_phases`; sync-trunk `qrspi_sync_trunk.build_envelope`; land `qrspi_land_verify.verify_landed`; ordered-tickets `qrspi_order_tickets.sort_tickets`; restack `qrspi_restack.build_envelope`; cleanup `qrspi_cleanup._envelope`.
+
+**Notes for next session:**
+
+- **Slice 2 added exactly one file**: `scripts/qrspi_contract_fixtures_producer_test.py` (stdlib `unittest`, self-locating fixture paths via `__file__` → `scripts/fixtures/contract_seam/`). No production code or fixtures touched. Slice 3 (consumer side) is INDEPENDENT of this file — it depends only on Slice 1 fixtures + `qrspi-batch.js` — so nothing here gates Slice 3.
+- **Serialization pinned per seam (verified byte-for-byte against the goldens):**
+  - resolve/restack/cleanup → `json.dumps(builder, indent=2) + "\n"` (IO-bound seams; their `main()` uses `json.dump(env, sys.stdout, indent=2)` then `print()`).
+  - config/critics/sync-trunk/land → `json.dumps(builder) + "\n"` (headless `main()` uses `print(json.dumps(...))`).
+  - ordered-tickets → `json.dumps(builder)` with **NO** trailing newline (its `main()` is `json.dump(..., sys.stdout)`, no `print()`). Only seam without a trailing newline.
+- **REPO_ROOT monkeypatch** is required for restack and cleanup: `build_envelope`/`_envelope` embed the module-level `qrspi_<m>.REPO_ROOT` (not a kwarg), so the test sets `qrspi_restack.REPO_ROOT = "/repo"` / `qrspi_cleanup.REPO_ROOT = "/repo"` inside a try/finally that restores the original. resolve passes `repo_root="/repo"` as a kwarg instead (its `build_envelope` accepts `repo_root=`), so resolve needs no monkeypatch.
+- **Resolve state that yields the `run_design` golden decision:** `state = {"assigned": True, "linearStatus": "Selected", "phases": {}}` → `qrspi_resolve_state.resolve(state)` returns the `run_design` decision with reason "Entry gate satisfied (assigned + Selected); no design branch yet." matching `resolve/wellformed.json`'s embedded `decision`. (The `existing=["design"]` builder kwarg is the envelope's top-level `existing` field — independent of the resolver input `phases={}`.)
+- **KNOWN LIMITATION recorded for Slice 4 doc (step 38):** the three IO-bound seams (resolve/restack/cleanup) pin formatting via `json.dumps(builder, hardcoded-kwargs)`, NOT headless `main()` stdout — so a future drift in those `main()` serializers is NOT caught by this test (the test and `main()` would drift independently). The other five seams run fully pinned. The deliberate-divergence guard was demonstrated on a headless-`main()` seam (config) per plan step 29's note.
+
+---
