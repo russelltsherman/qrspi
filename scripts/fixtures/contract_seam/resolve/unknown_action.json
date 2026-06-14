@@ -1,0 +1,1 @@
+{"ok": true, "repoRoot": "/repo", "worktreeDir": "/repo/.worktrees/RUS-1", "existing": ["design"], "decision": {"action": "frobnicate", "phase": "design", "reason": "action value outside RESOLVE_ACTIONS"}, "commentTargets": [], "reviewers": "@me", "teamReviewers": "", "ticketContentPath": "/repo/.worktrees/RUS-1/.qrspi/RUS-1/ticket.md", "tip": "RUS-1/design", "slices": []}

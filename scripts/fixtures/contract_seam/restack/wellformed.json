@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "repoRoot": "/repo",
+  "ticket": "RUS-1",
+  "worktreeDir": "/repo/.worktrees/RUS-1",
+  "tip": "RUS-1/slice-2",
+  "restacked": true,
+  "submitted": true
+}
