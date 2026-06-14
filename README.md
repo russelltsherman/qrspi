@@ -57,7 +57,7 @@ It does **not** re-derive any decision logic: per ticket it runs the same tested
 
 | Phase | What it does |
 |-------|--------------|
-| **Query** | List assigned `Selected` + in-flight (`Design Review`/`Plan Review`/`Code Review`) tickets, scoped to the mapped Linear project (`input.allProjects` > `input.project` > config `linearProject` > `QRSPI`). |
+| **Query** | List assigned `Selected` + in-flight (`Design Review`/`Plan Review`/`Code Review`) tickets, scoped to the mapped Linear project (`input.ticket` > `input.allProjects` > `input.project` > config `linearProject` > `QRSPI`). Pass `{"ticket":"RUS-XX"}` (e.g. `Workflow({ name: "qrspi-batch", args: { ticket: "RUS-58" } })`) to scope the run to a **single** ticket: it fetches that one issue via `mcp__linear__get_issue` and skips the `list_issues` sweep / ordering, running just that ticket through the identical loop (a nonexistent id aborts, fail loud). |
 | **Resolve** | Per ticket: set up the worktree, gather PR review state, run the resolver → a decision. |
 | **Restack** | Per ticket: restack onto current trunk so drift/conflicts surface early. |
 | **Design / Plan / Implementation** | Spawn the typed phase agents for `run_design`, `advance → plan`, and `advance → implementation`. |
@@ -161,7 +161,12 @@ docs/                  # Guides and reference documentation
 Tickets are created and tracked as Linear issues. The Linear team and project are
 config-driven, not hard-coded: `.qrspi/config.json` (gitignored; see `.qrspi/config.example.json`)
 supplies `linearTeam` (the skill discovers/asks if unset) and `linearProject` (defaults to `QRSPI`).
-`linearProject` scopes both ticket creation and which tickets `qrspi-batch` sweeps.
+`linearProject` scopes both ticket creation and which tickets `qrspi-batch` sweeps
+(scope precedence `input.ticket` > `input.allProjects` > `input.project` > config
+`linearProject` > `QRSPI`); pass `{"ticket":"RUS-XX"}`
+(e.g. `Workflow({ name: "qrspi-batch", args: { ticket: "RUS-58" } })`) to scope a run to a
+**single** ticket, fetched via `mcp__linear__get_issue` and run through the identical loop
+without the sweep.
 **Linear does not gate advancement — PR review state does.** Linear has two roles only:
 
 1. **Entry gate.** A ticket may only *begin* if it is assigned to a user and in the `Selected`
