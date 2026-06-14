@@ -325,135 +325,26 @@ function parseConfigEnvelope(text, key) {
   return env
 }
 
-// Lenient parser for the OPTIONAL `critics` config block (RUS-56), separate from the
-// string-only parseConfigEnvelope. The design-phase panel reads the TOP-LEVEL `critics` key
-// (qrspi_config.py is single-top-level-key only — `--key critics.design` returns the default;
-// `--key critics` round-trips the whole object as {"ok":true,"key":"critics","value":{...}}),
-// so this parser extracts that envelope, accepts an OBJECT `value`, and returns `value.design`
-// (an object) or undefined. ANY of: no JSON, parse failure, ok:false, key mismatch, a
-// non-object value (e.g. "" when the key is absent), or a non-object `.design` ⇒ undefined,
-// which leaves the opt-in panel seam OFF (doDesign falls back to its JS defaults). This never
-// throws and never gates the run — a garbled critics block silently disables the override.
-// Parse the WHOLE `critics` object off the config worker's `--key critics` envelope. Returns
-// the parsed `value` object ({ design?, questions?, research?, structure?, plan? }) or undefined
-// on ANY of: no JSON, parse failure, ok:false, key mismatch, or a non-object value (e.g. "" when
-// the key is absent). Never throws and never gates the run. parseCriticConfig (the design-block
-// extractor) is layered on top of this so a single `--key critics` read feeds BOTH the design
-// panel and the per-phase edge-critic maxRounds resolver — no second config read (RUS-57 Q6/Q8).
-function parseCriticsObject(text) {
+// Parse the resolved per-phase critic config emitted by scripts/qrspi_critics_config.py — the
+// single tested source of truth that replaces the former ~6 inline JS parsers/resolvers AND the
+// two separate `--key critics` reads (the "single read discipline"). The script reads
+// .qrspi/config.json ONCE and prints { ok, phases, warnings }; this extracts `phases` and logs
+// each warning (the lens-drop / candidate-clamp notices the inline resolvers used to log()).
+// Best-effort: ANY of no JSON, a parse failure, or a missing/non-object `phases` ⇒
+// DEFAULT_CRITIC_PHASES, so a garbled critic config silently falls back to defaults and NEVER
+// gates the run. Returns the full phases object — every phase resolved to { enabled, maxRounds,
+// … } with the UNIFORM `enabled` flag (default ON for questions/research/design/structure/plan,
+// OFF for the opt-in implementation seam). A present-but-partial envelope is shallow-merged over
+// the defaults so every phase key is always present for the consumers below.
+function parseCriticsEnvelope(text) {
   const raw = extractJsonObject(text)
-  if (!raw) return undefined
+  if (!raw) return DEFAULT_CRITIC_PHASES
   let env
-  try { env = JSON.parse(raw) } catch { return undefined }
-  if (!env || env.ok !== true || env.key !== 'critics') return undefined
-  const value = env.value
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  return value
-}
-
-function parseCriticConfig(text) {
-  const value = parseCriticsObject(text)
-  if (!value) return undefined
-  const design = value.design
-  if (!design || typeof design !== 'object' || Array.isArray(design)) return undefined
-  return design
-}
-
-// Resolve the design-critic maxRounds + lens set + N-select candidate count from an optional
-// parsed `critics.design` block (the output of parseCriticConfig), applying config-value >
-// JS-default precedence (RUS-56 OQ3, RUS-59 AC3/OQ3). Returns { maxRounds, lenses, candidates }:
-//   - maxRounds:  a positive integer from config.maxRounds, else the JS default 2.
-//   - lenses:     config.lenses filtered to KNOWN_DESIGN_LENSES (unknown names dropped with a
-//                 warning); if config omits lenses OR every supplied name is unknown/empty, the
-//                 DEFAULT_DESIGN_LENSES four. Always a non-empty list of known lens ids.
-//   - candidates: the N-select fan-out count (RUS-59). Absent / non-numeric / ≤1 ⇒ 1 (the
-//                 N-select stage is OFF — the design phase runs the single produce agent as
-//                 today). ≥2 ⇒ clamped to [2, DEFAULT_DESIGN_FRAMINGS.length] (= [2, 3]); a
-//                 value above the cap is clamped DOWN to the framing count with a log line
-//                 (mirroring the unknown-lens log-and-drop idiom). Always an integer ≥1.
-// `design` undefined (no critics.design config) ⇒ pure JS defaults. Pure except the log() warns.
-function resolveDesignCritic(design) {
-  const cfg = design && typeof design === 'object' ? design : {}
-  const maxRounds = Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0 ? cfg.maxRounds : 2
-
-  let lenses = DEFAULT_DESIGN_LENSES
-  if (Array.isArray(cfg.lenses)) {
-    const known = []
-    const unknown = []
-    for (const l of cfg.lenses) {
-      if (typeof l === 'string' && KNOWN_DESIGN_LENSES.has(l)) known.push(l)
-      else unknown.push(l)
-    }
-    if (unknown.length) log(`  config: dropping unknown design-critic lens(es) [${unknown.join(', ')}] — known: [${DEFAULT_DESIGN_LENSES.join(', ')}]`)
-    // An empty resolved set (lenses present but all unknown) falls back to the default four
-    // rather than disabling the panel silently (OQ3).
-    lenses = known.length ? known : DEFAULT_DESIGN_LENSES
-  }
-
-  // N-select candidate count (RUS-59). Absent / non-numeric / ≤1 ⇒ 1 (OFF). A finite numeric
-  // ≥2 is clamped to [2, framingCap]; a value above the cap is clamped down WITH a log line.
-  const framingCap = DEFAULT_DESIGN_FRAMINGS.length
-  let candidates = 1
-  if (typeof cfg.candidates === 'number' && Number.isFinite(cfg.candidates) && cfg.candidates > 1) {
-    const requested = Math.floor(cfg.candidates)
-    candidates = Math.min(requested, framingCap)
-    if (requested > framingCap) log(`  config: clamping design-critic candidates ${requested} → ${framingCap} (max framings: [${DEFAULT_DESIGN_FRAMINGS.join(', ')}])`)
-  }
-  return { maxRounds, lenses, candidates }
-}
-
-// Resolve the per-phase edge-critic `maxRounds` for the single-critic planning phases
-// (questions/research/structure/plan) from the whole parsed `critics` object (RUS-57 Decision 5).
-// Returns `critics.<phase>.maxRounds` when it is a positive integer, else the JS default 2 —
-// mirroring resolveDesignCritic's `Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0 ? … : 2`.
-// `parsedCritics` undefined / missing the phase / a non-positive-int maxRounds all fall back to 2.
-// Reads from the already-parsed `critics` object (parseCriticsObject) — NO new config read (Q6/Q8).
-function resolveEdgeCriticMaxRounds(parsedCritics, phase) {
-  const cfg = parsedCritics && typeof parsedCritics === 'object' ? parsedCritics[phase] : undefined
-  return (cfg && Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0) ? cfg.maxRounds : 2
-}
-
-// Lenient parser for the OPTIONAL `critics.implementation` config block (RUS-58), the
-// implementation-phase peer of parseCriticConfig. qrspi_config.py is single-top-level-key only
-// (`--key critics.implementation` returns the default; `--key critics` round-trips the whole
-// object as {"ok":true,"key":"critics","value":{...}}), so this parser extracts that envelope,
-// accepts an OBJECT `value`, and returns `value.implementation` (an object) or undefined. ANY of:
-// no JSON, parse failure, ok:false, key mismatch, a non-object value (e.g. "" when the key is
-// absent), or a non-object `.implementation` ⇒ undefined, which leaves the opt-in critic seam OFF
-// (doImplementation falls back to its disabled JS defaults). Never throws, never gates the run.
-function parseImplementationCriticConfig(text) {
-  const raw = extractJsonObject(text)
-  if (!raw) return undefined
-  let env
-  try { env = JSON.parse(raw) } catch { return undefined }
-  if (!env || env.ok !== true || env.key !== 'critics') return undefined
-  const value = env.value
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const impl = value.implementation
-  if (!impl || typeof impl !== 'object' || Array.isArray(impl)) return undefined
-  return impl
-}
-
-// Resolve the implementation-critic config from an optional parsed `critics.implementation`
-// block (the output of parseImplementationCriticConfig). Returns the ImplementationCriticConfig
-// shape { enabled, maxRounds, coherence: { enabled, maxRounds } } with disabled defaults:
-//   - enabled:            cfg.enabled === true, else false (absent block ⇒ OFF — the byte-for-byte
-//                         unchanged no-critic implementation path).
-//   - maxRounds:          a positive integer from cfg.maxRounds, else the JS default 2.
-//   - coherence.enabled:  cfg.coherence.enabled === true, else false.
-//   - coherence.maxRounds: a positive integer from cfg.coherence.maxRounds, else 2.
-// `impl` undefined (no critics.implementation config) ⇒ all-disabled defaults. Pure, never throws.
-function resolveImplementationCritic(impl) {
-  const cfg = impl && typeof impl === 'object' ? impl : {}
-  const coh = cfg.coherence && typeof cfg.coherence === 'object' ? cfg.coherence : {}
-  return {
-    enabled: cfg.enabled === true,
-    maxRounds: Number.isInteger(cfg.maxRounds) && cfg.maxRounds > 0 ? cfg.maxRounds : 2,
-    coherence: {
-      enabled: coh.enabled === true,
-      maxRounds: Number.isInteger(coh.maxRounds) && coh.maxRounds > 0 ? coh.maxRounds : 2,
-    },
-  }
+  try { env = JSON.parse(raw) } catch { return DEFAULT_CRITIC_PHASES }
+  const phases = env && typeof env === 'object' ? env.phases : undefined
+  if (!phases || typeof phases !== 'object' || Array.isArray(phases)) return DEFAULT_CRITIC_PHASES
+  if (Array.isArray(env.warnings)) for (const w of env.warnings) log(`  config: ${w}`)
+  return { ...DEFAULT_CRITIC_PHASES, ...phases }
 }
 
 // Read the additive RUS-68 `failedRemotes` list off a parsed cleanup envelope, tolerating
@@ -652,13 +543,12 @@ const SYNTHESIZED_VERDICT_SCHEMA = {
   },
 }
 
-// The default design-critic lens set (RUS-56) — used when no `critics.design.lenses` config is
-// present, and as the fallback when a config lens set resolves empty (every name unknown). Each
-// id maps to the landed agentType `qrspi-design-critic-<id>` and its prompt file under
-// .claude/agents/. KNOWN_DESIGN_LENSES is the validation allow-list: config-supplied lens names
-// not in it are dropped with a warning (an unknown agentType would fail to spawn).
+// The design-critic lens set (RUS-56). Each id maps to the landed agentType
+// `qrspi-design-critic-<id>` and its prompt file under .claude/agents/. Config-supplied lens
+// validation now lives in scripts/qrspi_critics_config.py (the tested resolver); this constant
+// is the JS-side fallback baked into DEFAULT_CRITIC_PHASES so a config-read failure still yields
+// the full default panel.
 const DEFAULT_DESIGN_LENSES = ['completeness', 'internal-consistency', 'edge-alignment', 'simplicity']
-const KNOWN_DESIGN_LENSES = new Set(DEFAULT_DESIGN_LENSES)
 
 // The default design-phase N-select framing axes (RUS-59). When `critics.design.candidates`
 // N > 1, runDesignSelectLoop fans out the first N of these framings as orthogonal produce runs
@@ -666,6 +556,21 @@ const KNOWN_DESIGN_LENSES = new Set(DEFAULT_DESIGN_LENSES)
 // SAME qrspi-design agentType as a per-framing instruction line (Decision 2 Option A: framings
 // as data, no per-framing agent files). The list length (3) is the hard upper clamp on N.
 const DEFAULT_DESIGN_FRAMINGS = ['mvp-first', 'risk-first', 'extensibility-first']
+
+// The JS-side fallback mirror of scripts/qrspi_critics_config.py's all-defaults resolution —
+// returned verbatim by parseCriticsEnvelope when the config read/parse fails, and shallow-merged
+// under a partial envelope so every phase key is always present. Defaults encode the UNIFORM
+// `enabled` vocabulary AND a uniform default: EVERY phase critic is OFF unless its config block
+// sets `enabled: true` (critics are opt-in across the board). Keep this in lockstep with the
+// Python resolver's defaults (verified there by qrspi_critics_config_test.py).
+const DEFAULT_CRITIC_PHASES = {
+  questions: { enabled: false, maxRounds: 2 },
+  research: { enabled: false, maxRounds: 2 },
+  design: { enabled: false, maxRounds: 2, lenses: DEFAULT_DESIGN_LENSES, candidates: 1 },
+  structure: { enabled: false, maxRounds: 2 },
+  plan: { enabled: false, maxRounds: 2 },
+  implementation: { enabled: false, maxRounds: 2, coherence: { enabled: false, maxRounds: 2 } },
+}
 
 // --- helpers ---------------------------------------------------------------
 
@@ -1061,7 +966,7 @@ Return its JSON stdout verbatim ({ ok }). HARD STOP — do NOT retry or improvis
 // the doDesign result line (AC2 scores half).
 //
 // criticConfig fields consumed here (resolved in doDesign where wd/r are in scope):
-//   candidates        : N (already clamped to [2, framings] by resolveDesignCritic).
+//   candidates        : N (already clamped to [2, framings] by qrspi_critics_config.py).
 //   ticketContentPath : the ticket content path (candidate + judge input).
 //   questionsPath     : questions.md path (candidate + judge input).
 //   upstreamPath      : research.md path (candidate + judge input — reused as RESEARCH_PATH).
@@ -1190,58 +1095,31 @@ Return its JSON stdout verbatim ({ ok }). HARD STOP — do NOT retry or improvis
   return !!(out && out.ok === true)
 }
 
-// Read the OPTIONAL `critics` config block via the config worker (ONE `--key critics` read),
-// then resolve the design-critic maxRounds + lens set (config > JS default — resolveDesignCritic)
-// AND surface the whole parsed `critics` object so the per-phase edge-critic maxRounds resolver
-// (resolveEdgeCriticMaxRounds) can read questions/research/structure/plan off the SAME read — no
-// second config read (RUS-57 Decision 5; Q6/Q8; the single-top-level-key constraint that bit
-// slice 3). Best-effort: any read/parse failure leaves the parsed block undefined ⇒
-// resolveDesignCritic returns the JS defaults AND every resolveEdgeCriticMaxRounds falls back to
-// 2. Returns { maxRounds, lenses, candidates, parsedCritics }. Never throws / never gates the run.
-async function readDesignCriticConfig() {
+// Read the OPTIONAL `critics` config block and resolve EVERY phase in ONE pass via the tested
+// resolver scripts/qrspi_critics_config.py (the single read discipline — replaces the former
+// readDesignCriticConfig + readImplementationCriticConfig, each of which spawned its own
+// near-identical `--key critics` worker). The script reads .qrspi/config.json once and prints
+// { ok, phases, warnings } with every phase resolved to { enabled, maxRounds, … }; parseCritics-
+// Envelope turns that into the phases object (logging warnings), falling back to
+// DEFAULT_CRITIC_PHASES on any failure. Each caller (doDesign / doPlan / doImplementation) calls
+// this ONCE for its action and indexes the phase(s) it needs. `phaseLabel` only groups the worker
+// in the progress display. Never throws / never gates the run. The reader command is self-locating
+// (engineCmd → the main checkout, where .qrspi/config.json lives and is shared by all tickets).
+async function readCriticsConfig(phaseLabel) {
   const cfgOut = await agent(
-    `You are the CONFIG worker for the QRSPI design critic. Your cwd is the main repo root.
+    `You are the CONFIG worker for the QRSPI phase critics. Your cwd is the main repo root.
 Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives:
 
-  python3 ${engineCmd('scripts/qrspi_config.py')} --key critics
+  python3 ${engineCmd('scripts/qrspi_critics_config.py')}
 
 It reads the repo's .qrspi/config.json (self-locating) and prints a one-line JSON envelope
-{ "ok": true, "key": "critics", "value": <object|""> } to stdout (value is "" when no
-critics block is present). Output that JSON as your FINAL message, exactly and verbatim — NO
-surrounding prose, NO code fences, NO edits. Do NOT call any structured-output tool. If it
-printed ok:false, still output that JSON verbatim (do NOT retry or improvise).`,
-    { label: 'config:critics', phase: 'Design' }
+{ "ok": true, "phases": { … six phases … }, "warnings": [ … ] } to stdout. Output that JSON as
+your FINAL message, exactly and verbatim — NO surrounding prose, NO code fences, NO edits. Do NOT
+call any structured-output tool. If it printed ok:false, still output that JSON verbatim (do NOT
+retry or improvise).`,
+    { label: 'config:critics', phase: phaseLabel }
   )
-  const parsedCritics = parseCriticsObject(cfgOut)
-  return { ...resolveDesignCritic(parseCriticConfig(cfgOut)), parsedCritics }
-}
-
-// Read the OPTIONAL `critics.implementation` config block (RUS-58) via the config worker +
-// parseImplementationCriticConfig, then resolve it to the ImplementationCriticConfig shape
-// { enabled, maxRounds, coherence: { enabled, maxRounds } }. It round-trips the WHOLE `critics`
-// object via `--key critics` and digs `value.implementation` (NEVER `--key critics.implementation`
-// — qrspi_config.py is single-top-level-key only; a dot-path returns the default and silently
-// disables the critic; MEMORY: config reader is single-top-level-key only). Best-effort: any
-// read/parse failure or an absent block leaves the parsed value undefined ⇒ resolveImplementation-
-// Critic returns the disabled defaults (the implementation phase runs its byte-for-byte-unchanged
-// no-critic path). Never throws and never gates the run (the critic is opt-in). `wd`/`id` are
-// accepted for signature parity with the structure contract; the reader command is self-locating
-// (engineCmd), so they are not needed to locate the config.
-async function readImplementationCriticConfig(wd, id) {
-  const cfgOut = await agent(
-    `You are the CONFIG worker for the QRSPI implementation critic. Your cwd is the main repo root.
-Run EXACTLY this one command verbatim — no path edits, no exploration, no alternatives:
-
-  python3 ${engineCmd('scripts/qrspi_config.py')} --key critics
-
-It reads the repo's .qrspi/config.json (self-locating) and prints a one-line JSON envelope
-{ "ok": true, "key": "critics", "value": <object|""> } to stdout (value is "" when no
-critics block is present). Output that JSON as your FINAL message, exactly and verbatim — NO
-surrounding prose, NO code fences, NO edits. Do NOT call any structured-output tool. If it
-printed ok:false, still output that JSON verbatim (do NOT retry or improvise).`,
-    { label: `config:critics:impl:${id}`, phase: 'Implementation' }
-  )
-  return resolveImplementationCritic(parseImplementationCriticConfig(cfgOut))
+  return parseCriticsEnvelope(cfgOut)
 }
 
 // Invoke the tested pure decision module qrspi_critic_loop.py via a worker (the JS sandbox
@@ -1476,17 +1354,20 @@ async function doDesign(t, r) {
   const wd = r.worktreeDir
   phase('Design')
 
-  // ONE `--key critics` read up front (RUS-57 Decision 5): it resolves the design-panel knobs
-  // AND surfaces the whole parsed `critics` object so each planning phase's edge-critic maxRounds
-  // (resolveEdgeCriticMaxRounds) reads off the SAME read — no second config read (Q6/Q8).
-  const { maxRounds: designMaxRounds, lenses: designLenses, candidates: designCandidates, parsedCritics } = await readDesignCriticConfig()
+  // ONE resolver read up front (the single read discipline): scripts/qrspi_critics_config.py
+  // resolves EVERY phase's critic — the uniform `enabled` flag, maxRounds, and the design panel's
+  // lenses/candidates — so questions/research/design here (and structure/plan in doPlan) index off
+  // one shared resolution. A disabled phase ⇒ undefined criticConfig ⇒ runPhase skips its critic.
+  const critics = await readCriticsConfig('Design')
 
   // Single edge-critic on questions (RUS-57), anchored on the TICKET (Q12 — questions are derived
-  // from the ticket). No `lenses` ⇒ runPhase routes to the single-critic runCriticLoop.
-  const questionsCritic = {
+  // from the ticket). No `lenses` ⇒ runPhase routes to the single-critic runCriticLoop. Gated on
+  // critics.questions.enabled (uniform vocabulary; default ON).
+  const questionsCritic = critics.questions.enabled ? {
     upstreamPath: r.ticketContentPath,
-    maxRounds: resolveEdgeCriticMaxRounds(parsedCritics, 'questions'),
-  }
+    maxRounds: critics.questions.maxRounds,
+  } : undefined
+  if (!critics.questions.enabled) log(`  ${t.id}: questions critic DISABLED by config`)
   if (!await runPhase('questions', 'qrspi-questions',
     `TICKET_ID = ${t.id}
 TICKET_CONTENT_PATH = ${r.ticketContentPath}
@@ -1502,13 +1383,17 @@ TEMPLATE_PATH = ${tpl(wd, 'questions.md')}`, r.existing, t.id, 'Design', questio
   // (the worktree root) explicitly — never resolve_repo_root() (RUS-57 Decision 3; impl-log
   // slice 1: pass --worktree-root wd). engineCmdFor(r,…) anchors the script on the host checkout
   // root (not the worktree HEAD, which a relocating ticket may have moved).
-  const researchCritic = {
+  // Gated on critics.research.enabled (default ON). Disabling the research critic also skips its
+  // bundled citation node-check — they ride the same criticConfig, so `enabled:false` turns the
+  // whole research-critic bundle off.
+  const researchCritic = critics.research.enabled ? {
     upstreamPath: art(wd, t.id, 'questions.md'),
-    maxRounds: resolveEdgeCriticMaxRounds(parsedCritics, 'research'),
+    maxRounds: critics.research.maxRounds,
     nodeCheck: {
       cmd: `python3 ${engineCmdFor(r, 'scripts/qrspi_verify_citations.py')} --artifact-path ${stg(t.id, 'research')} --worktree-root ${wd}`,
     },
-  }
+  } : undefined
+  if (!critics.research.enabled) log(`  ${t.id}: research critic DISABLED by config (citation node-check also skipped)`)
   if (!await runPhase('research', 'qrspi-research',
     `TICKET_ID = ${t.id}
 QUESTIONS_PATH = ${art(wd, t.id, 'questions.md')}
@@ -1524,19 +1409,25 @@ Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidde
   // HERE (where `wd`/`r` are in scope): research.md is upstreamPath (the rubric anchor, reused as
   // RESEARCH_PATH) plus the ticket content + questions.md. The panel populates residualFindings
   // exactly as the single critic does, so the criticBodyStep/PR-body flow below is unchanged.
-  const designCritic = {
+  // Gated on critics.design.enabled (default ON). Disabled ⇒ undefined ⇒ runPhase skips BOTH the
+  // panel and the N-select stage (which it guards on criticConfig.candidates).
+  const designCritic = critics.design.enabled ? {
     upstreamPath: art(wd, t.id, 'research.md'),
-    maxRounds: designMaxRounds,
-    lenses: designLenses,
+    maxRounds: critics.design.maxRounds,
+    lenses: critics.design.lenses,
     ticketContentPath: r.ticketContentPath,
     questionsPath: art(wd, t.id, 'questions.md'),
     // RUS-59 N-select: candidates (clamped [1,3]) gates the pre-critic N-select stage in
     // runPhase (N>1 only); templatePath is the candidate produce input it needs.
-    candidates: designCandidates,
+    candidates: critics.design.candidates,
     templatePath: tpl(wd, 'design.md'),
+  } : undefined
+  if (critics.design.enabled) {
+    log(`  ${t.id}: design critic panel — ${critics.design.lenses.length} lens(es) [${critics.design.lenses.join(', ')}], maxRounds ${critics.design.maxRounds}`)
+    if (critics.design.candidates > 1) log(`  ${t.id}: design N-select ENABLED — N=${critics.design.candidates} candidate framings`)
+  } else {
+    log(`  ${t.id}: design critic panel DISABLED by config`)
   }
-  log(`  ${t.id}: design critic panel — ${designLenses.length} lens(es) [${designLenses.join(', ')}], maxRounds ${designMaxRounds}`)
-  if (designCandidates > 1) log(`  ${t.id}: design N-select ENABLED — N=${designCandidates} candidate framings`)
   if (!await runPhase('design', 'qrspi-design',
     `TICKET_ID = ${t.id}
 TICKET_CONTENT_PATH = ${r.ticketContentPath}
@@ -1553,12 +1444,14 @@ TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, r.existing, t.id, 'Design', designCrit
   // residual findings are AGGREGATED into the one design-commit splice (RUS-57 T16). qrspi_critic_
   // body.py only knows the design/plan branch suffixes — there is no questions/research branch —
   // so questions/research findings ride the design phase, each tagged with its source phase.
+  // cfg is undefined when that phase's critic was disabled by config — null-safe so a disabled
+  // phase simply contributes no findings.
   const tagFindings = (phaseName, cfg) =>
-    (cfg.residualFindings ?? []).map(f => `[${phaseName}] ${f}`)
+    ((cfg?.residualFindings) ?? []).map(f => `[${phaseName}] ${f}`)
   const designFindings = [
     ...tagFindings('questions', questionsCritic),
     ...tagFindings('research', researchCritic),
-    ...(designCritic.residualFindings ?? []),
+    ...(designCritic?.residualFindings ?? []),
   ]
   const designBodyStep = criticBodyStep(t.id, 'design', designFindings, wd)
   const fin = await agent(
@@ -1574,8 +1467,8 @@ Return: ok, prUrl, newStatus, summary (1-2 sentences).`,
     // Fold the N-select stage summary (per-candidate judge scores + winner + graft) and the
     // panel's per-round pass/fail summary (and any residual-finding count) into the result
     // summary so a batch run surfaces what the design phase did (AC2 scores half).
-    if (designCritic.selectSummary) out.summary = `${out.summary} [${designCritic.selectSummary}]`
-    if (designCritic.criticSummary) out.summary = `${out.summary} [${designCritic.criticSummary}]`
+    if (designCritic?.selectSummary) out.summary = `${out.summary} [${designCritic.selectSummary}]`
+    if (designCritic?.criticSummary) out.summary = `${out.summary} [${designCritic.criticSummary}]`
     if (designFindings.length) out.summary = `${out.summary} [critic: ${designFindings.length} residual finding(s) in PR body]`
   }
   return out
@@ -1588,18 +1481,17 @@ async function doPlan(t, r) {
   const wd = r.worktreeDir
   phase('Plan')
 
-  // ONE `--key critics` read for the plan phase, surfacing the whole parsed `critics` object so
-  // structure's and plan's edge-critic maxRounds resolve off the same read (RUS-57 Decision 5;
-  // Q6/Q8). doPlan is a SEPARATE batch action from doDesign, so reading here is the single read
-  // for this invocation — not a duplicate of doDesign's.
-  const { parsedCritics } = await readDesignCriticConfig()
+  // ONE resolver read for the plan action (the single read discipline). doPlan is a SEPARATE batch
+  // action from doDesign, so reading here is the single read for this invocation — not a duplicate.
+  const critics = await readCriticsConfig('Plan')
 
   // Single edge-critic on structure (RUS-57), anchored on its upstream design.md. No `lenses` ⇒
-  // runPhase routes to the single-critic runCriticLoop.
-  const structureCritic = {
+  // runPhase routes to the single-critic runCriticLoop. Gated on critics.structure.enabled (default ON).
+  const structureCritic = critics.structure.enabled ? {
     upstreamPath: art(wd, t.id, 'design.md'),
-    maxRounds: resolveEdgeCriticMaxRounds(parsedCritics, 'structure'),
-  }
+    maxRounds: critics.structure.maxRounds,
+  } : undefined
+  if (!critics.structure.enabled) log(`  ${t.id}: structure critic DISABLED by config`)
   if (!await runPhase('structure', 'qrspi-structure',
     `TICKET_ID = ${t.id}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
@@ -1607,11 +1499,12 @@ OUTPUT_PATH = ${stg(t.id, 'structure')}
 TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, r.existing, t.id, 'Plan', structureCritic)) return failTicket(t)
 
   // Edge-critic on the plan artifact, anchored on its upstream structure.md (OQ4). maxRounds is
-  // now config-overridable per-phase (RUS-57 — was a literal 2; falls back to 2).
-  const planCritic = {
+  // config-overridable per-phase (RUS-57). Gated on critics.plan.enabled (default ON).
+  const planCritic = critics.plan.enabled ? {
     upstreamPath: art(wd, t.id, 'structure.md'),
-    maxRounds: resolveEdgeCriticMaxRounds(parsedCritics, 'plan'),
-  }
+    maxRounds: critics.plan.maxRounds,
+  } : undefined
+  if (!critics.plan.enabled) log(`  ${t.id}: plan critic DISABLED by config`)
   if (!await runPhase('plan', 'qrspi-plan',
     `TICKET_ID = ${t.id}
 STRUCTURE_PATH = ${art(wd, t.id, 'structure.md')}
@@ -1630,8 +1523,8 @@ TEMPLATE_PATH = ${tpl(wd, 'worktree.md')}`, r.existing, t.id, 'Plan')) return fa
   // knows the design/plan branch suffixes — there is no structure branch), so structure's residual
   // findings are AGGREGATED into the one plan-commit splice, tagged with their source phase (T16).
   const planFindings = [
-    ...((structureCritic.residualFindings ?? []).map(f => `[structure] ${f}`)),
-    ...(planCritic.residualFindings ?? []),
+    ...((structureCritic?.residualFindings ?? []).map(f => `[structure] ${f}`)),
+    ...(planCritic?.residualFindings ?? []),
   ]
   const planBodyStep = criticBodyStep(t.id, 'plan', planFindings, wd)
   const fin = await agent(
@@ -1802,12 +1695,13 @@ Return: ok, worktreeDir, slices[]. Do NOT implement anything or change Linear.`,
   const wd = setup.worktreeDir
 
   // --- RUS-58: whole-stack coherence pass at the planning→implementation seam (T12-T16).
-  // The implementation critic is OPT-IN: readImplementationCriticConfig round-trips the WHOLE
-  // `critics` object (--key critics) and digs value.implementation; an absent block ⇒ disabled
-  // defaults, so this whole block is a no-op (the byte-for-byte-unchanged path) unless the
-  // operator turns it on. `coherenceFindings` is carried in memory through doImplementation and
-  // surfaced into the SLICE-1 PR body later (AC2: no slice commit exists yet at the seam).
-  const implCriticCfg = await readImplementationCriticConfig(wd, t.id)
+  // The implementation critic is OPT-IN: readCriticsConfig resolves EVERY phase via
+  // scripts/qrspi_critics_config.py; .implementation carries { enabled, maxRounds, coherence:
+  // { enabled, maxRounds } } and defaults OFF when the block is absent, so this whole section is a
+  // no-op (the byte-for-byte-unchanged path) unless the operator turns it on. `coherenceFindings`
+  // is carried in memory through doImplementation and surfaced into the SLICE-1 PR body later
+  // (AC2: no slice commit exists yet at the seam).
+  const implCriticCfg = (await readCriticsConfig('Implementation')).implementation
   let coherenceFindings = []
   if (implCriticCfg.coherence.enabled) {
     // T13: resolve the six coherence inputs inline — the five frozen planning artifacts via

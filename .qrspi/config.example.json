@@ -1,34 +1,55 @@
 {
-  "$comment": "Optional QRSPI local config. Copy to .qrspi/config.json (gitignored) to use it. REVIEWERS: by default — with no config file — the qrspi-batch finalizer requests review from '@me' (the gh-authenticated user running the harness), so a fresh clone needs zero setup and ships no hard-coded username. 'reviewers' are GitHub logins (the literal '@me' expands to the authenticated user; set [] to request no reviewer); 'teamReviewers' are Graphite/GitHub team slugs ('org/team' or 'team'). LINEAR: 'linearTeam' is the Linear team /qrspi-ticket files new issues under (if unset, the skill discovers/asks); 'linearProject' is the Linear project, defaulting to 'QRSPI' — it scopes BOTH ticket creation (/qrspi-ticket files new issues under it) AND batch runs (qrspi-batch sweeps only this project's assigned tickets by default; pass {\"project\":\"...\"} to override for one run, or {\"allProjects\":true} to sweep every project). CRITICS: 'critics.design' (optional) overrides the design-phase multi-lens critic panel — 'maxRounds' caps the produce→critique→revise loop (default 2) and 'lenses' selects which lens agents run (default all four: completeness, internal-consistency, edge-alignment, simplicity). Omit the whole 'critics' block to use the defaults; unknown lens names are dropped and an empty resolved set falls back to the default four. Each lens id maps to the agent .claude/agents/qrspi-design-critic-<id>.md. 'candidates' (numeric, default OFF) enables the design-phase N-select stage: when N>1 the design phase produces N candidate designs under orthogonal framings (mvp-first, risk-first, extensibility-first), a judge scores them, the highest-scoring wins, and runner-up ideas are grafted in. Absent / non-numeric / <=1 ⇒ N=1 (OFF — the single produce agent runs as today, zero extra spawns); values are clamped to [1,3] (the framing count), clamping down with a log line. The single-critic planning phases 'critics.questions', 'critics.research', 'critics.structure', and 'critics.plan' (optional) each take only 'maxRounds' (a positive integer; default 2) to cap their produce→critique→revise edge-critic loop — there is no 'lenses'/'candidates' knob for these single critics. An absent block or a non-positive-integer maxRounds falls back to 2. The 'research' phase additionally runs a deterministic citation node-check (scripts/qrspi_verify_citations.py) on its staged artifact before the critic; this gate is NOT configurable here. 'critics.implementation' (optional, default OFF) gates the implementation-phase critics: 'enabled'/'maxRounds' cap the per-slice edge critic (one single critic per non-first/non-committed slice, judging the slice diff against its plan-slice rubric; a single-slice ticket skips it — the coherence pass covers the lone slice), and the nested 'coherence.enabled'/'coherence.maxRounds' gate the whole-stack coherence pass that runs ONCE at the planning→implementation seam over all six artifacts and surfaces its residual findings into the slice-1 PR body. Omit the 'implementation' block (or leave both 'enabled' flags false) to keep the byte-for-byte-unchanged no-critic implementation path.",
-  "reviewers": ["@me"],
-  "teamReviewers": [],
-  "linearTeam": "Your Linear Team",
-  "linearProject": "QRSPI",
+  "$comment": "Optional QRSPI local config — copy to .qrspi/config.json (gitignored) to use it. Every '$comment' key is documentation only and ignored by the harness; each block below carries its own. Omit any block to take its defaults; with no config file at all, the defaults described per-block apply.",
+  "$comment_linear": "LINEAR — 'linearTeam' is the Linear team /qrspi-ticket files new issues under (if unset, the skill discovers/asks). 'linearProject' is the Linear project, defaulting to 'QRSPI'; it scopes BOTH ticket creation AND batch runs (qrspi-batch sweeps only this project's assigned tickets by default; pass {\"project\":\"...\"} to override for one run, or {\"allProjects\":true} to sweep every project).",
+  "$comment_reviewers": "REVIEWERS — by default (no config file) the qrspi-batch finalizer requests review from '@me' (the gh-authenticated user running the harness), so a fresh clone needs zero setup and ships no hard-coded username. 'reviewers' are GitHub logins (the literal '@me' expands to the authenticated user; set [] to request no reviewer). 'teamReviewers' are Graphite/GitHub team slugs ('org/team' or 'team').",
   "critics": {
+    "$comment": "Per-phase critic config, resolved by scripts/qrspi_critics_config.py (the tested resolver). Every phase honors a uniform 'enabled' flag that defaults OFF — critics are opt-in across the board (questions, research, design, structure, plan, implementation, and implementation's coherence sub-pass). A phase runs its critic ONLY when its block sets 'enabled': true; only an explicit boolean overrides the default (a non-boolean value falls back to OFF). This example mirrors the defaults — every phase 'enabled': false — so as written it changes nothing; flip a phase's 'enabled' to true to opt it in. Omit the whole 'critics' block, or any phase, to take the same defaults. Each phase block below documents its own knobs.",
     "design": {
-      "maxRounds": 2,
-      "lenses": ["completeness", "internal-consistency", "edge-alignment", "simplicity"],
-      "candidates": 1
-    },
-    "questions": {
-      "maxRounds": 2
-    },
-    "research": {
-      "maxRounds": 2
-    },
-    "structure": {
-      "maxRounds": 2
-    },
-    "plan": {
+      "$comment": "Design-phase multi-lens critic PANEL. 'maxRounds' caps the produce->critique->revise loop (default 2). 'lenses' selects which lens agents run (default all four: completeness, internal-consistency, edge-alignment, simplicity); unknown names are dropped (logged) and an all-unknown/empty set falls back to the default four. Each lens id maps to agent .claude/agents/qrspi-design-critic-<id>.md. 'candidates' (numeric, default 1 = OFF) enables the N-select stage: when N>1 the phase produces N candidate designs under orthogonal framings (mvp-first, risk-first, extensibility-first), a judge scores them, the highest wins, and runner-up ideas are grafted in. Absent / non-numeric / <=1 => N=1 (OFF, zero extra spawns); values clamp to [1,3] (the framing count), clamping down with a log line.",
+      "candidates": 1,
+      "enabled": false,
+      "lenses": [
+        "completeness",
+        "internal-consistency",
+        "edge-alignment",
+        "simplicity"
+      ],
       "maxRounds": 2
     },
     "implementation": {
-      "enabled": false,
-      "maxRounds": 2,
+      "$comment": "Implementation-phase critics (default OFF, like every phase — opt-in). 'enabled'/'maxRounds' cap the per-slice edge critic (one single critic per non-first/non-committed slice, judging the slice diff against its plan-slice rubric; a single-slice ticket skips it — the coherence pass covers the lone slice). The nested 'coherence.enabled'/'coherence.maxRounds' gate the whole-stack coherence pass that runs ONCE at the planning->implementation seam over all six artifacts and surfaces its residual findings into the slice-1 PR body. Set both 'enabled' flags false (or omit this block) to keep the byte-for-byte-unchanged no-critic implementation path.",
       "coherence": {
         "enabled": false,
         "maxRounds": 2
-      }
+      },
+      "enabled": false,
+      "maxRounds": 2
+    },
+    "plan": {
+      "$comment": "Single-edge-critic planning phase — same shape as 'questions' ('enabled' + 'maxRounds' only).",
+      "enabled": false,
+      "maxRounds": 2
+    },
+    "questions": {
+      "$comment": "Single-edge-critic planning phase: only 'enabled' (default false, like every phase) and 'maxRounds' (positive integer, default 2) cap its produce->critique->revise loop — there is no 'lenses'/'candidates' knob. A non-positive-integer maxRounds falls back to 2. The same shape applies to 'research', 'structure', and 'plan'.",
+      "enabled": false,
+      "maxRounds": 2
+    },
+    "research": {
+      "$comment": "Single-edge-critic planning phase (same shape as 'questions'). Additionally runs a deterministic citation node-check (scripts/qrspi_verify_citations.py) on its staged artifact before the critic; that gate is not separately configurable, but setting 'enabled': false skips it too (the node-check rides the same critic bundle).",
+      "enabled": false,
+      "maxRounds": 2
+    },
+    "structure": {
+      "$comment": "Single-edge-critic planning phase — same shape as 'questions' ('enabled' + 'maxRounds' only).",
+      "enabled": false,
+      "maxRounds": 2
     }
-  }
+  },
+  "linearProject": "QRSPI",
+  "linearTeam": "Your Linear Team",
+  "reviewers": [
+    "@me"
+  ],
+  "teamReviewers": []
 }
