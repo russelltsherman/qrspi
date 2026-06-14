@@ -546,6 +546,22 @@ const LOOP_DECISION_SCHEMA = {
   },
 }
 
+// The decision returned by scripts/qrspi_slice_critic.py's `decide` CLI shim (RUS-75): whether
+// to run the per-slice edge critic for one slice and, if so, the Graphite diff range that scopes
+// it. The JS glue (sliceCriticDecide) never re-derives this — the tested pure module is the
+// single source of truth. `run` is the only required field; the nullable string fields are
+// `null` on a skip (alreadyCommitted / single-slice) and populated on a run.
+const SLICE_DECIDE_SCHEMA = {
+  type: 'object',
+  required: ['run'],
+  properties: {
+    run: { type: 'boolean' },
+    skipReason: { type: ['string', 'null'] },
+    diffBase: { type: ['string', 'null'] },
+    diffHead: { type: ['string', 'null'] },
+  },
+}
+
 // The synthesized round verdict the qrspi_critic_synthesize.py worker emits (RUS-56): the M
 // per-lens { pass, findings } replies reduced to one authoritative { pass, findings } for the
 // round (pass only if every lens passed; findings is the exact-string-deduped union, each
@@ -1172,6 +1188,29 @@ return that as-is — HARD STOP, do NOT retry or improvise.`,
   return out
 }
 
+// Invoke the tested pure decision module qrspi_slice_critic.py's `decide` shim via a worker (the
+// JS sandbox cannot run python) to decide whether to run the per-slice edge critic for slice `n`
+// and, if so, the Graphite diff range scoping it (RUS-75, AC1). Returns the parsed
+// { run, skipReason, diffBase, diffHead } envelope or null on failure. The worker `setup` object
+// lacks the ticket id, so it is injected here into the projected { id, slices } blob the script
+// reads from stdin (the `decide` shim derives the branch names from it). Mirrors criticDecision:
+// the blob is piped on stdin so the slice list never round-trips through the worker's stdout echo.
+async function sliceCriticDecide(t, setup, n) {
+  const blob = JSON.stringify({ id: t.id, slices: setup.slices })
+  const out = await agent(
+    `You are the SLICE-CRITIC-DECIDE worker. Your cwd is the main repo root. Run EXACTLY this one
+command verbatim (no path edits, no exploration) and return its JSON stdout verbatim:
+
+  printf '%s' ${JSON.stringify(blob)} | python3 ${engineCmd('scripts/qrspi_slice_critic.py')} --slice-index ${n}
+
+It prints JSON { run, skipReason, diffBase, diffHead }. Parse and return it verbatim. If it errors,
+return that as-is — HARD STOP, do NOT retry or improvise.`,
+    { label: `slice-decide:${t.id}#${n}`, phase: 'Critic', schema: SLICE_DECIDE_SCHEMA }
+  )
+  if (!out || typeof out.run !== 'boolean') return null
+  return out
+}
+
 // Build the finalize-prompt FRAGMENT that splices the critic's residual findings (cap-reached
 // only) into the phase commit message BEFORE `gt submit` — so Graphite seeds the PR body with
 // them at creation (a body amended AFTER submit would not update the PR, since gt seeds the
@@ -1768,6 +1807,10 @@ Return: ok, worktreeDir, slices[]. Do NOT implement anything or change Linear.`,
   // (AC2: no slice commit exists yet at the seam).
   const implCriticCfg = (await readCriticsConfig('Implementation')).implementation
   let coherenceFindings = []
+  // RUS-75: cross-iteration accumulator of each slice's per-slice edge-critic residual findings,
+  // keyed by 1-based slice number. Populated only on the enabled path (implCriticCfg.enabled);
+  // surfaced into the matching slice-N PR body in the finalize worker. Stays {} when disabled.
+  const perSliceFindings = {}
   if (implCriticCfg.coherence.enabled) {
     // T13: resolve the six coherence inputs inline — the five frozen planning artifacts via
     // art(wd,id,name) + the ticket content via r.ticketContentPath (mirrors the doDesign panel).
@@ -1843,6 +1886,29 @@ Return: ok, branch, notesForNext (empty string if none).`,
     }
     previousNotes = commit.notesForNext || ''
     log(`  ${t.id}: slice ${s.n}/${setup.slices.length} committed (${commit.branch})`)
+
+    // RUS-75 (AC1/AC2/AC3/AC6): per-slice edge critic, run IN-LOOP after this slice's commit.
+    // Gated by implCriticCfg.enabled so the disabled path stays byte-for-byte unchanged (AC5).
+    // alreadyCommitted slices `continue` above and never reach here; `decide` also returns
+    // run:false for them as a second guard (single-slice tickets likewise skip via skipReason).
+    if (implCriticCfg.enabled) {
+      const dec = await sliceCriticDecide(t, setup, s.n)
+      if (!dec) {
+        log(`  ${t.id}: slice ${s.n} critic decide failed — stopping (prior slices preserved)`)
+        return skip(t, r.decision, `Slice ${s.n} critic decide failed; stopped without shipping.`)
+      }
+      if (!dec.run) {
+        // Critic-SKIP (NOT a ticket skip()): the slice still ships. Mirrors the coherence
+        // "skipping" log lines, naming the reason the decide shim returned.
+        log(`  ${t.id}: slice ${s.n} critic skipped (${dec.skipReason ?? 'no reason'}) — slice ships unjudged`)
+      } else {
+        const sc = await runSliceCritic(t, r, wd, s.n, dec, s.planSlice, s.structureSlice, implCriticCfg.maxRounds)
+        if (!sc.ok) {
+          return skip(t, r.decision, `Slice ${s.n} critic spawn failed; stopped without shipping.`)
+        }
+        perSliceFindings[s.n] = sc.residualFindings
+      }
+    }
   }
 
   await agent(
@@ -1856,10 +1922,38 @@ REPO_ROOT = ${wd}`,
     { label: `pr:${t.id}`, phase: 'Implementation', agentType: 'qrspi-pr' }
   )
 
+  // RUS-75 (AC4/AC4b): build the per-slice / coherence findings-splice steps for the finalize
+  // worker, amended lowest-N-first, BEFORE the existing pr-summary splice + the single
+  // `gt submit --stack`. Skip-on-empty is CALLER-SIDE and MANDATORY: a bucket whose findings are
+  // empty (or whitespace-only) produces NO instruction, so qrspi_critic_body.py is never invoked
+  // for it (its empty handling is message-level only; set_findings still runs gt checkout + gt
+  // modify, which needlessly restacks — OQ3). The whole block is dormant when implCriticCfg is
+  // off: coherenceFindings stays [] (gated by coherence.enabled) and perSliceFindings stays {}
+  // (populated only on the enabled path), so the disabled transcript is byte-for-byte unchanged.
+  const nonEmpty = (arr) => Array.isArray(arr) && arr.filter(f => String(f).trim() !== '').length > 0
+  const spliceTargets = []
+  // (a) coherence findings → slice-1 (no slice commit existed at the seam; AC2).
+  if (nonEmpty(coherenceFindings)) {
+    spliceTargets.push({ slice: 1, kind: 'coherence', findings: coherenceFindings })
+  }
+  // (b) per-slice residual findings, lowest-N-first.
+  for (const n of Object.keys(perSliceFindings).map(Number).sort((a, b) => a - b)) {
+    if (nonEmpty(perSliceFindings[n])) {
+      spliceTargets.push({ slice: n, kind: 'per-slice', findings: perSliceFindings[n] })
+    }
+  }
+  // Ordering for slice 1: coherence first, then slice-1 per-slice findings, then (below) pr-summary.
+  const findingsSpliceStep = spliceTargets.length === 0 ? '' :
+    `\n1b. Splice the edge-critic residual findings into the matching slice commit MESSAGES, in EXACTLY this order, EACH before the pr-summary splice in step 2 — for EACH item run EXACTLY the two commands verbatim (no path edits, no alternatives); if any prints ok:false, return ok:false — HARD STOP:\n` +
+    spliceTargets.map((tg, i) => {
+      const stageFile = `/tmp/phase-stage/${t.id}/critic-findings-slice-${tg.slice}-${tg.kind}.json`
+      return `   (${i + 1}) [${tg.kind} findings → slice ${tg.slice}] write this EXACT JSON verbatim (a JSON array of strings) to ${stageFile}: ${JSON.stringify(tg.findings)} ; then run: python3 ${engineCmdFor(r, 'scripts/qrspi_critic_body.py')} --ticket ${t.id} --phase slice --slice ${tg.slice} --findings-file ${stageFile} (it appends the findings to the ${t.id}/slice-${tg.slice} commit message via gt modify, self-locating).`
+    }).join('\n')
+
   phase('Finalize')
   const fin = await agent(
     `You are the implementation finalize worker for ${t.id}, in ${wd}. Follow the SKILL "advance → implementation" submit steps. PR bodies are seeded at Graphite CREATION from the commit message (\`gt submit\` has no body flag and seeds the body at creation only), so author the body via the commit message as below — this is the deterministic default. A post-hoc body correction, if ever needed, uses \`gh api repos/<owner>/<repo>/pulls/<N> -X PATCH -F body=@<file>\` (NOT \`gh pr edit\`, which can abort on the Projects-classic GraphQL bug). Do:
-1. Amend pr-summary.md into the last slice commit as the durable artifact (git add .qrspi/${t.id}/pr-summary.md && gt modify --no-interactive).
+1. Amend pr-summary.md into the last slice commit as the durable artifact (git add .qrspi/${t.id}/pr-summary.md && gt modify --no-interactive).${findingsSpliceStep}
 2. Splice pr-summary.md into the SLICE-1 commit MESSAGE (so the slice-1 PR body is the full summary at creation), BEFORE submitting, by running EXACTLY this one self-locating command verbatim — no path edits, no alternatives:
      python3 ${engineCmdFor(r, 'scripts/qrspi_pr_body.py')} --ticket ${t.id} --slice 1
    It preserves the slice-1 subject+trailer, splices the summary in between, amends via \`gt modify\` (auto-restacking the slices above), and prints JSON { ok, branch, subject, bytes, error? }. If it prints ok:false, return ok:false — HARD STOP: surface the splice failure honestly, do NOT paper over it (no gt body flag exists; do not substitute a gh body write to mask a failed splice).
