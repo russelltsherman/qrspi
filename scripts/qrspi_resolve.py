@@ -229,9 +229,44 @@ def ci_failing_checks_of(decision, phases):
     return checks if isinstance(checks, list) else []
 
 
+def red_branches_of(decision, phases, ticket):
+    """The ascending list of branches `doRevise` must bump this pass, to surface at the
+    TOP LEVEL of the envelope (mirroring `ci_failing_checks_of`).
+
+    The resolver folds the frontier's CI-failure flag into `decision["ciFailing"]` but
+    cannot carry the per-branch red map (the `decision` dict's key set is fixed and the
+    gather attaches per-slice `ciState` only inside `phases`). We re-derive the exact red
+    branch list here so the doRevise consumer iterates `r.ciRedBranches` directly and the
+    JS never delegates "which slices are red" to an LLM worker (which would reintroduce the
+    non-determinism Option A' exists to remove).
+
+    - non-CI decision (`ciFailing` False) ⇒ []
+    - implementation ⇒ each slice with `ciState == "red"`, as "<ticket>/slice-<n>",
+      ascending by slice number (per-slice `ciState` attached by the gather)
+    - design/plan ⇒ ["<ticket>/<phase>"] when that frontier phase's gathered
+      `ciState == "red"`, else []
+
+    Pure: a None/non-dict decision, a non-CI decision, or absent phase data yields []."""
+    if not ci_failing_of(decision):
+        return []
+    if not isinstance(phases, dict):
+        return []
+    name = decision.get("phase")
+    if name == "implementation":
+        out = []
+        for s in phases.get("implementation", {}).get("slices", []) or []:
+            if s.get("ciState") == "red":
+                out.append("%s/slice-%d" % (ticket, s.get("n")))
+        return out
+    if name in ("design", "plan"):
+        if phases.get(name, {}).get("ciState") == "red":
+            return ["%s/%s" % (ticket, name)]
+    return []
+
+
 def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
                    reviewers="", team_reviewers="", ticket_content_path="",
-                   tip=None, slices=None, repo_root=None, phases=None):
+                   tip=None, slices=None, repo_root=None, phases=None, ticket=""):
     """Assemble the JSON envelope the qrspi-batch resolveTicket() step consumes.
     Pure; `repoRoot` is the resolved host checkout root — `repo_root` when supplied
     (the runtime root from resolve_repo_root, honouring --repo-root), else the
@@ -252,6 +287,12 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
     and `ciFailingChecks` re-aggregates the decision phase's failing checks from
     `phases` (the fixed-key `decision` cannot carry them). Both are inert defaults
     (`False` / `[]`) for any non-CI decision; the doRevise consumer reads them directly.
+
+    `ciRedBranches` (list of branch names) is re-emitted at the TOP LEVEL via
+    red_branches_of: the ascending list of branches doRevise must bump this pass — each
+    red slice branch for implementation, the single phase branch for a red design/plan
+    frontier, `[]` for any non-CI decision. It hands doRevise the deterministic red-branch
+    list so the JS never re-derives per-slice CI nor delegates it to an LLM worker.
 
     `tip`/`slices` carry the stack's tip branch (`<ticket>/slice-<maxN>`, or the
     plan/design fallback from pick_tip(), `None` when the ticket has no branch) and
@@ -277,6 +318,7 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
         "commentTargets": comment_targets_of(decision),
         "ciFailing": ci_failing_of(decision),
         "ciFailingChecks": ci_failing_checks_of(decision, phases),
+        "ciRedBranches": red_branches_of(decision, phases, ticket or ""),
         "reviewers": reviewers,
         "teamReviewers": team_reviewers,
         "ticketContentPath": ticket_content_path,
@@ -475,7 +517,8 @@ def main():
                              tip=pick_tip(branches, args.ticket),
                              slices=slice_branches(branches, args.ticket),
                              repo_root=repo_root,
-                             phases=state.get("phases", {}))
+                             phases=state.get("phases", {}),
+                             ticket=args.ticket)
     except Exception as exc:  # noqa: BLE001 - any failure is reported, not retried
         # Best-effort host root for the error envelope: prefer the override (unvalidated
         # here — we are already in the error path), else the module default.

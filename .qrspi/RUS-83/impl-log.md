@@ -55,3 +55,36 @@
 - **No write-side coupling:** Slice 2 only READS the gathered `ciReviseAttempt` (via `ci_revise_attempt_of`) to compute `ciGaveUp`; it does not write the trailer. The trailer increment authority remains Slice 1's `qrspi_ci_revise_bump.py`. Slice 3 wires the two together.
 
 ---
+
+## Session 3 — Slice 3
+
+**Timestamp:** 2026-06-15T23:55:00Z
+**Tasks completed:** T15, T16, T17, T18, T19, T20, T21 (plan steps 15–21)
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/qrspi_resolve_test.py` → 133 passed, 0 failed (+18 new `red_branches_of` / `ciRedBranches` cases)
+- `python3 scripts/run_tests.py resolve` → 2 files passed, 0 failed
+- `python3 scripts/run_tests.py` → 40 files passed, 0 failed (full suite green)
+- `node --check .claude/workflows/qrspi-batch.js` → SYNTAX OK
+- Deterministic e2e sanity (in-process): `build_envelope` emits `ciRedBranches == ["RUS-9/slice-1","RUS-9/slice-3"]` for an impl `[red,green,red]` stack, `["RUS-9/design"]` for a red design frontier, `[]` for a non-CI decision
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- **Byte-pinned golden regenerated (same caveat Slice 2 hit, now for a top-level field):** adding `ciRedBranches` to the envelope tripped `scripts/fixtures/contract_seam/resolve/wellformed.json` (consumed by `qrspi_contract_fixtures_producer_test.py::test_resolve`, which byte-matches the producer's serialized envelope). Plan step 15 listed only `qrspi_resolve.py` + `qrspi_resolve_test.py`; this golden + the producer test's shape-key list are the two additional touch points the additive top-level field forces. The golden was **regenerated mechanically from the producer** (re-ran `build_envelope(resolve(...))` with the same `json.dumps(env, indent=2) + "\n"` form `main()` uses), NOT hand-edited — `ciRedBranches: []` is inserted between `ciFailingChecks` and `reviewers`, matching dict key order. Net: additive, no logic/consumer change.
+- **Live-PR e2e checkpoints (plan steps 23–27) NOT executed:** the unfixable-red / multi-slice-selectivity / non-CI-reset / cap / green-reset checkpoints require a live PR with red CI and mutate live PR heads via `gt submit` (the helper publishes). Per the QRSPI hard constraint (this agent runs no git/gt mutations — the orchestrator owns commits/publishes) and the Slice 1 precedent (its live `gt` round-trip was likewise deferred), those are deferred to a real batch run. The deterministic core (`ciRedBranches` aggregation, envelope re-emit, resolver passthrough, JS wiring shape + Node syntax) and the full Python suite ARE verified here.
+
+**Notes for next session:**
+
+- Slice 3 is the final slice. Feature is ready for `/qrspi-pr`.
+- **Single-writer-per-path invariant (now orchestrator-owned, three-way matched set):** the worker step-6 `CI-Revise-Attempt` block was DELETED (worker never touches the counter). In `doRevise`, AFTER the step-2b content worker returns: (1) CI path (`ciFailing`) → `bumpCiReviseTrailers(t, r, d)` fires UNCONDITIONALLY (regardless of worker `ok`, regardless of `changeRequested`), iterating `r.ciRedBranches` lowest-first, each via a thin worker running `qrspi_ci_revise_bump.py --ticket --branch [--stack]` (engineCmdFor/r.repoRoot). (2) Non-CI path (`changeRequested && !ciFailing`) → `resetCiReviseTrailer(t, r, d, answered)` fires UNCONDITIONALLY (idempotent). Step-2a's gated reset (`answered.some(a => a.applied)`) is UNCHANGED.
+- **`ciRedBranches` is the deterministic red-branch list** (new top-level envelope field via pure `red_branches_of(decision, phases, ticket)` in `qrspi_resolve.py`): impl → each red slice as `"<t>/slice-<n>"` ascending; red design/plan frontier → `["<t>/<phase>"]`; non-CI/None → `[]`. doRevise iterates it directly — it never re-derives per-slice CI nor delegates "which slices are red" to an LLM worker.
+- **`ciGaveUp` surfacing:** `skip()` now carries `ciGaveUp` onto the wait/skip record from `decision.ciGaveUp`; the wait-case log and the final per-ticket log line both annotate "CI-revise cap reached — auto-revise gave up, manual diagnosis needed". A revise result also passes `ciGaveUp` through verbatim (always False on a revise, since give-up resolves to `wait`).
+- **Helper non-zero exit = hard failure (OQ1):** `bumpCiReviseTrailers` returns `{ ok, bumped, failures }`; a non-zero/`ok:false` helper exit sets `out.ciReviseBumpFailed = true` and appends "CI-Revise-Attempt counter FAILED to advance on: <branches>" to the revise summary, and the final per-ticket log line flags it — a count that could not advance is never silent.
+- **`CI_REVISE_BUMP_SCHEMA`** (new) pins the thin bump worker's parsed output to `{ ok, branch, prior?, new?, error? }` read off the script STDOUT (not exit code alone).
+
+---
