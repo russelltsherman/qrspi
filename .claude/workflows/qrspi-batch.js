@@ -111,12 +111,19 @@ const SKILL = engineCmd('.claude/skills/qrspi-work/SKILL.md')
 // a base-rate report to exactly one run (RUS-78, AC-Instrumentation). Computed ONCE at
 // the top of the imperative shell: the env var when the harness exports one, else a
 // generated id, so the appender's "runId always present, always a string" contract
-// holds. The crypto guards mirror the defensive `typeof process` style above — a
-// sandbox without webcrypto falls back to a timestamp+random id (still a unique string).
+// holds. The crypto guards mirror the defensive `typeof process` style above. NOTE:
+// workflow scripts forbid Date.now()/Math.random() (they break resume), so the
+// no-webcrypto fallback uses crypto.getRandomValues, then a constant last resort —
+// never a timestamp/Math.random id.
 const runId =
   (typeof process !== 'undefined' && process.env && process.env.QRSPI_RUN_ID) ||
-  ((typeof crypto !== 'undefined' && crypto.randomUUID && crypto.randomUUID()) ||
-    `run-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  (typeof crypto !== 'undefined' && crypto.randomUUID && crypto.randomUUID()) ||
+  (typeof crypto !== 'undefined' &&
+    crypto.getRandomValues &&
+    `run-${Array.from(crypto.getRandomValues(new Uint8Array(8)))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')}`) ||
+  'run-fallback'
 
 // --- args ------------------------------------------------------------------
 // Optional overrides: { statuses?: string[], ticket?: string, project?: string,
