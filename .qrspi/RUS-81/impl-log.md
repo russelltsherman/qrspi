@@ -95,3 +95,30 @@
 - Cap wiring: `main()` now calls `resolve(state, ci_revise_cap=load_ci_revise_cap(repo_root))`. `load_ci_revise_cap` reads the flat `ciReviseCap` config key (default 3, non-positive/non-int/bool → 3 via `coerce_cap`).
 
 ---
+
+## Session 4 — Slice 4: Worker (`doRevise` CI-failure path + durable trailer write)
+
+**Timestamp:** 2026-06-15T16:54:12Z
+**Tasks completed:** T31, T32
+**Tasks failed:** none
+**Tests:**
+
+- `node --check .claude/workflows/qrspi-batch.js` → syntax OK
+- `python3 scripts/run_tests.py` → 37 passed, 0 failed (regression gate; `qrspi-batch.js` is harness-coupled and not unit-testable per project convention, so slice-4's own verification is manual e2e — plan step 33)
+
+**Deviations from structure.md:**
+
+- none (Contracts honored: `doRevise` reads `r.ciFailing` / `r.ciFailingChecks` at the envelope top level, not from `decision`; no `RESOLVE_ACTIONS` change — reuses `revise`/`wait`; trailer write is path-dependent: CI path increments `<prior+1>`, every non-CI amend overwrites to `0`).
+
+**Deviations from plan.md:**
+
+- none in substance. One scope addition the plan step 32 implies but does not name a site for: the writer-side reset on a NON-CI amend also applies to the **comment-only APPLY** path (not just the CR/CI 2b prompt). Added a dedicated best-effort `resetCiReviseTrailer(...)` worker invoked from step 2a when `answered.some(a => a.applied)`, since `qrspi_revise_amend.py` preserves the message verbatim and would otherwise leave a stale trailer. This is durability/observability hygiene only — the gather's read-side reset (`ciReviseAttempt = ... if ciState=="red" else 0`) already forces the EFFECTIVE cap count to 0 whenever CI is not red, so the cap is correct regardless.
+
+**Notes for next session:**
+
+- Slice 4 edits exactly ONE in-scope file: `.claude/workflows/qrspi-batch.js`. No Python/script/fixture changes.
+- `doRevise` now reads `const ciFailing = !!(r.ciFailing || (d && d.ciFailing))` and `const ciFailingChecks = Array.isArray(r.ciFailingChecks) ? r.ciFailingChecks : []`. The early-return guard now also admits a CI-only revise (`!changeRequested && targets.length === 0 && !ciFailing` is the new skip condition). The comment-only short-circuit (step 2a) is now `!changeRequested && !ciFailing` so a red-CI/no-CR PR falls through to the fix+re-request path (2b).
+- Step 2b prompt is path-aware: a `trigger` line states whether it is CR-only, CI-only, or both; a `checksBlock` renders `r.ciFailingChecks` (name + detailsUrl). The worker is instructed to read REAL failing-check output (`gh pr checks <PR>` → `gh run view <run-id> --log-failed` / open detailsUrl) BEFORE any fix (honesty-bound), fix ALL red slices in one pass (implementation), amend content via `qrspi_revise_amend.py`, then do a SEPARATE message-only `gt modify -m` to set the trailer, then `gt submit --rerequest-review`.
+- TRAILER MECHANISM (important for Slice 5 docs / any future worker change): `qrspi_revise_amend.py` preserves the commit message **verbatim** — it does NOT and cannot write the trailer. So the trailer is written by a DISTINCT message-only amend the worker performs after the content amend: read `git log -1 --format=%B`, replace/append exactly one `CI-Revise-Attempt: N` line, `gt modify --no-interactive -m "<full message>"` (no staged files — the one place a bare `gt modify` is correct), then `gt submit`. CI path: `N = prior+1` (prior read off the head commit's existing trailer, absent ⇒ 0). Non-CI path: `N = 0`.
+- The `resetCiReviseTrailer(...)` helper (new, after `respondToComments`) is best-effort: a failure logs a WARN and does NOT fail the revise, because the read-side reset already protects cap correctness.
+- Slice 5 (Docs) is next: document the CI-gated revise trigger + the consecutive-red counter with its TWO resets (writer-side here in `doRevise`, AND the gather's read-side not-red→0). Manual e2e of this slice (plan step 33) was NOT run in this session — the harness needs a live ticket with a known-red frontier PR; flag for the human-driven e2e gate.

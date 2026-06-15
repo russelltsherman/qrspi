@@ -190,8 +190,9 @@ const TICKETS_SCHEMA = {
 //     existing{ questions,research,design,structure,plan,worktree : boolean },
 //     reviewers, teamReviewers,                 // comma-joined CSV, "" => omit flag
 //     commentTargets[],                         // unaddressed reviewer comments (revise)
+//     ciFailing:boolean, ciFailingChecks[],     // RUS-81: frontier CI is RED + failing checks
 //     decision{ action, phase, nextPhase, resetToPhase, discardPhases[],
-//               commentTargets[], changeRequested, reason } }
+//               commentTargets[], changeRequested, ciFailing, reason } }
 // action ∈ entry_blocked|run_design|advance|submit|wait|revise|reset|land.
 const RESOLVE_ACTIONS = new Set(
   ['entry_blocked', 'run_design', 'advance', 'submit', 'wait', 'revise',
@@ -2204,18 +2205,24 @@ Return: ok, newStatus, summary (name what was discarded).`,
 // ACTION: revise  (UNIFIED feedback handler — subsumes the former respond_comment)
 // ===========================================================================
 // AUTONOMOUS. The resolver emits `revise` when a frontier phase PR carries a formal
-// CHANGES_REQUESTED AND/OR >=1 unaddressed reviewer comment. The decision carries:
+// CHANGES_REQUESTED AND/OR >=1 unaddressed reviewer comment AND/OR a RED CI rollup on the
+// frontier (RUS-81, under the configurable cap). The decision carries:
 //   - r.commentTargets    the unaddressed reviewer comments to evaluate per-intent
 //   - r.decision.changeRequested  whether a formal change request is present
-// The worker runs in two coherent steps within ONE pass (this is the unification — comment
-// handling no longer slips to a separate later run):
+//   - r.decision.ciFailing / r.ciFailing  whether the frontier CI is RED (a CI-driven revise)
+//   - r.ciFailingChecks   the failing-check {name, detailsUrl} entries (RUS-81), [] otherwise
+// The worker runs coherent steps within ONE pass (this is the unification — comment AND CI
+// handling no longer slip to separate later runs):
 //   1. PER-COMMENT INTENT ENGINE — for each commentTarget, an honest peer-reviewer worker
 //      ANSWERs / APPLYs (edit + amend in place) / DECLINEs, and posts an in-thread reply.
-//   2. FORMAL CHANGE REQUEST (only when changeRequested) — a worker addresses any remaining
+//   2. FORMAL CHANGE REQUEST and/or CI FAILURE — a worker addresses any remaining
 //      change-request feedback (e.g. the review SUMMARY body, which is not a reply-able
-//      thread comment), amends if there is anything left to change, then ALWAYS re-requests
-//      review. Re-requesting flips reviewDecision back to REVIEW_REQUIRED — the loop-safe
-//      termination signal that lets the next pass return `wait` instead of re-firing.
+//      thread comment) AND, when `ciFailing`, reads the REAL failing-check output before any
+//      fix (honesty-bound), fixes ALL red slice PRs in one pass (OQ3), amends via
+//      qrspi_revise_amend.py, writes the path-dependent `CI-Revise-Attempt` trailer
+//      (increment on the CI-failure path; overwrite to 0 on every non-CI amend), then ALWAYS
+//      re-requests review. Re-requesting flips reviewDecision back to REVIEW_REQUIRED — the
+//      loop-safe termination signal that lets the next pass return `wait` instead of re-firing.
 // A comment-only PR (no formal change request, even when APPROVED) runs step 1 only and does
 // NOT re-request review — replies are the whole job; the approved PR is left undisturbed.
 // Thread RESOLUTION is always left to the reviewer (only they can mark a thread resolved); a
@@ -2226,11 +2233,17 @@ async function doRevise(t, r) {
   const d = r.decision
   const targets = Array.isArray(r.commentTargets) ? r.commentTargets : []
   const changeRequested = !!(d && d.changeRequested)
+  // RUS-81: the frontier CI is RED (under the cap) — the resolver folded ciFailing into the
+  // decision and the envelope re-emitted it + the failing checks at top level. doRevise reads
+  // r.ciFailing / r.ciFailingChecks directly (NOT decision.ciFailingChecks — the checks live
+  // only at envelope top level per the re-emit contract).
+  const ciFailing = !!(r.ciFailing || (d && d.ciFailing))
+  const ciFailingChecks = Array.isArray(r.ciFailingChecks) ? r.ciFailingChecks : []
 
-  if (!changeRequested && targets.length === 0) {
-    // The resolver only emits revise with a change request and/or comment targets, so this
-    // is a defensive guard, not an expected path.
-    return skip(t, d, 'revise with neither a change request nor comment targets; nothing to do.')
+  if (!changeRequested && targets.length === 0 && !ciFailing) {
+    // The resolver only emits revise with a change request, comment targets, and/or a red
+    // frontier CI, so this is a defensive guard, not an expected path.
+    return skip(t, d, 'revise with neither a change request, comment targets, nor a CI failure; nothing to do.')
   }
 
   // --- Step 1: per-comment intent engine (answer / apply+amend / decline + in-thread reply).
@@ -2248,31 +2261,69 @@ async function doRevise(t, r) {
       + `${failures.length ? `, ${failures.length} failed` : ''}`
     : ''
 
-  // --- Step 2a: comment-only path (no formal change request) — replies are the whole job.
-  // Do NOT re-request review: the PR may be APPROVED, and we must not disturb it.
-  if (!changeRequested) {
+  // --- Step 2a: comment-only path (no formal change request AND no CI failure) — replies are
+  // the whole job. Do NOT re-request review: the PR may be APPROVED, and we must not disturb it.
+  // (A red CI on a comment-only PR still falls through to step 2b — CI must be fixed and review
+  // re-requested even with no formal change request.)
+  if (!changeRequested && !ciFailing) {
+    // RUS-81 writer-side reset: a comment APPLY amends the phase commit via qrspi_revise_amend.py,
+    // which preserves the message verbatim — so a stale CI-Revise-Attempt trailer (left by a prior
+    // CI-failure revise) would survive this NON-CI amend. Per the path-dependent trailer contract,
+    // EVERY non-CI amend overwrites the trailer to 0. Only needed when a comment was actually
+    // applied (an amend happened); pure ANSWER/DECLINE replies touch no commit. (The gather already
+    // forces the EFFECTIVE count to 0 whenever ciState != "red", so this is durability/observability
+    // hygiene on the committed head, not a correctness gate for the cap.)
+    if (answered.some(a => a.applied)) {
+      await resetCiReviseTrailer(t, r, d, answered)
+    }
     const summary = `Responded to ${answered.length}/${targets.length} reviewer comment(s) on the ${d.phase} PR`
       + `${answered.some(a => a.applied) ? ` (${answered.filter(a => a.applied).length} applied as changes)` : ''}`
       + `${failures.length ? `; ${failures.length} failed` : ''}.`
     return { ticketId: t.id, action: 'revise', summary, prUrl: undefined }
   }
 
-  // --- Step 2b: formal change request — address the review summary / remaining feedback,
-  // amend only if there is something left to change, then ALWAYS re-request review.
+  // --- Step 2b: formal change request and/or CI failure — address the review summary /
+  // remaining feedback AND (when ciFailing) read the real failing-check output, fix every red
+  // slice, amend, write the path-dependent CI-Revise-Attempt trailer, then ALWAYS re-request
+  // review.
+  // The opening line is path-aware: it is NOT always a change request (a red frontier CI on an
+  // otherwise-clean PR also reaches here).
+  const trigger = changeRequested && ciFailing
+    ? `A formal CHANGES_REQUESTED landed on the ${d.phase} PR AND its CI checks are RED.`
+    : changeRequested
+      ? `A formal CHANGES_REQUESTED landed on the ${d.phase} PR.`
+      : `The ${d.phase} PR's CI checks are RED (no formal change request).`
+  // The failing checks the gather surfaced (name + detailsUrl). The worker reads the REAL log
+  // output before any fix — honesty-bound. Empty unless ciFailing.
+  const checksBlock = ciFailing
+    ? ciFailingChecks.length
+      ? ciFailingChecks.map((c, i) => `   ${i + 1}. ${c && c.name ? c.name : '(unnamed check)'}${c && c.detailsUrl ? ` — ${c.detailsUrl}` : ''}`).join('\n')
+      : '   (the gather reported a red rollup but no per-check detail; discover the failing checks yourself via `gh pr checks` / `gh pr view --json statusCheckRollup`)'
+    : ''
   const fin = await agent(
-    `You are the REVISE worker for ${t.id} (frontier phase: ${d.phase}), in ${r.worktreeDir}. A formal CHANGES_REQUESTED landed on the ${d.phase} PR. ${targets.length ? `The reviewer's INLINE/TOP-LEVEL comments have ALREADY been engaged and replied to in a prior step — do NOT re-reply to them; focus on the review SUMMARY body and any change-request feedback not tied to a specific comment.` : ''} Address it AUTONOMOUSLY, following the "action: revise" steps of ${SKILL}, with these REQUIRED adaptations:
+    `You are the REVISE worker for ${t.id} (frontier phase: ${d.phase}), in ${r.worktreeDir}. ${trigger} ${targets.length ? `The reviewer's INLINE/TOP-LEVEL comments have ALREADY been engaged and replied to in a prior step — do NOT re-reply to them; focus on the review SUMMARY body and any change-request feedback not tied to a specific comment.` : ''} Address it AUTONOMOUSLY, following the "action: revise" steps of ${SKILL}, with these REQUIRED adaptations:
 - DO NOT attempt to RESOLVE review threads (only the reviewer can mark a thread resolved). Reading feedback via \`gh pr view\`/\`gh api graphql\` queries is fine. Thread resolution is the reviewer's job — leave threads as-is.
 - Stay WITHIN the ${d.phase} phase only — never edit a downstream phase's artifacts (that is \`reset\`, not revise).
+- You are HONESTY-BOUND: never fabricate a fix, a log line, or a green result. Every fix must address a REAL failure you actually read.
 Steps:
-1. Identify the branch(es) to fix. For design/plan: \`gt checkout ${t.id}/${d.phase} --no-interactive\`. For implementation: query the ticket's slice PRs (\`gh pr list --head ${t.id}/slice-... \` or graphql) and address EVERY slice whose PR is CHANGES_REQUESTED, lowest slice number first (changes restack upward).
-2. Read the change request: the CHANGES_REQUESTED review SUMMARY body AND any unresolved thread comments not already addressed (READ-only queries per the SKILL).
-3. If there is remaining feedback to act on, address it by editing the phase's artifacts/code in ${r.worktreeDir}. If the prior per-comment step already applied every needed change and NOTHING further remains, do NOT invent an edit — skip straight to step 5 (re-request review).
-4. When you made edits, stage them AND amend the phase commit IN PLACE by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives) — for design/plan run it once; for implementation run it once per CHANGES_REQUESTED slice branch, lowest slice number first:
+1. Identify the branch(es) to fix. For design/plan: \`gt checkout ${t.id}/${d.phase} --no-interactive\`. For implementation: query the ticket's slice PRs (\`gh pr list --head ${t.id}/slice-... \` or graphql) and address EVERY slice whose PR is CHANGES_REQUESTED${ciFailing ? ' OR whose CI is RED' : ''}, lowest slice number first (changes restack upward).${ciFailing ? `
+2. DIAGNOSE CI (CI is RED — do this BEFORE any code edit; honesty-bound, read the REAL failing output). The gather reported these failing check(s):
+${checksBlock}
+   For each failing check, read its ACTUAL failure output with a READ-only query before fixing — e.g. \`gh pr checks <PR_NUMBER>\` to list checks + their run URLs, then \`gh run view <run-id> --log-failed\` (derive <run-id> from the check's detailsUrl / the \`gh pr checks\` run link), or open the detailsUrl. Do NOT guess the failure — base every fix on the log you read. For implementation, repeat for EVERY red slice PR (fix ALL red slices in this one invocation), lowest slice number first.` : ''}
+${ciFailing ? '3' : '2'}. Read any change request: the CHANGES_REQUESTED review SUMMARY body AND any unresolved thread comments not already addressed (READ-only queries per the SKILL).${changeRequested ? '' : ' (There is no formal change request on this PR — there may be nothing here; the trigger is the red CI.)'}
+${ciFailing ? '4' : '3'}. Fix the REAL problems by editing the phase's artifacts/code in ${r.worktreeDir}: the CI failure(s) you diagnosed${changeRequested ? ' and any remaining change-request feedback' : ''}. If the prior per-comment step already applied every needed change${ciFailing ? ' AND CI requires no further edit' : ''} and NOTHING further remains, do NOT invent an edit — skip to the re-request step.
+${ciFailing ? '5' : '4'}. When you made edits, stage them AND amend the phase commit IN PLACE by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives) — for design/plan run it once; for implementation run it once per affected slice branch, lowest slice number first:
    \`python3 ${engineCmdFor(r, 'scripts/qrspi_revise_amend.py')} --ticket ${t.id} --branch <BRANCH>\` where <BRANCH> = \`${t.id}/${d.phase}\` for design/plan, or \`${t.id}/slice-<N>\` for an implementation slice.
-   The script checks out the branch, stages every edit you made (excluding caches), amends the commit with \`gt modify\` keeping its EXACT subject+trailers (it does NOT rename the subject), and VERIFIES the amend captured your changes — it FAILS if nothing was staged or the tree is left dirty. It prints JSON { ok, branch, oldOid, newOid, dirty, error? }. If ANY invocation prints ok:false, return ok:false — HARD STOP; do NOT hand-run \`gt modify\`/\`git add\`/\`git commit\`/\`git reset\` to work around it. Never run a bare \`gt modify --no-interactive\` here: without staging it amends an empty index and silently drops your edits. (If step 3 determined nothing further needs changing, SKIP this step entirely — do not run the amend script with no staged edits.)
-5. Re-request review so the stale CHANGES_REQUESTED is cleared (ALWAYS do this, whether or not you amended in step 4): \`gt submit --publish --no-edit --rerequest-review${reviewerFlags(r)}${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`. (Re-requesting review clears the change request; no gh body edit is involved here.)
-6. BEST-EFFORT keep Linear in the current review status (a failed Linear write is a WARN, still return ok:true if review was re-requested).
-Return: ok, prUrl, newStatus, summary (name what you changed — or state that the prior comment replies covered it and you only re-requested review — and confirm review was re-requested; if you could not address the feedback, return ok:false with the verbatim reason — never fabricate a fix).`,
+   The script checks out the branch, stages every edit you made (excluding caches), amends the commit with \`gt modify\` keeping its EXACT subject+trailers (it does NOT rename the subject), and VERIFIES the amend captured your changes — it FAILS if nothing was staged or the tree is left dirty. It prints JSON { ok, branch, oldOid, newOid, dirty, error? }. If ANY invocation prints ok:false, return ok:false — HARD STOP; do NOT hand-run \`gt modify\`/\`git add\`/\`git commit\`/\`git reset\` to work around it. Never run a bare \`gt modify --no-interactive\` here: without staging it amends an empty index and silently drops your edits. (If the prior step determined nothing further needs changing, SKIP the content amend — do not run the amend script with no staged edits.)
+${ciFailing ? '6' : '5'}. WRITE THE \`CI-Revise-Attempt\` TRAILER (RUS-81 — the durable, observable-from-GitHub consecutive-red-CI counter). For EACH branch you touched in this pass (the design/plan branch, or each affected slice branch — checkout the branch first if not current):
+   a. Read the head commit's FULL message verbatim: \`git log -1 --format=%B\` (this is the subject + body + ALL trailers, INCLUDING any existing \`CI-Revise-Attempt: N\` line). Read the existing \`CI-Revise-Attempt: N\` value off it — absent ⇒ prior = 0.
+   b. Compute the new trailer value PATH-DEPENDENTLY:
+      ${ciFailing ? '- This is the CI-FAILURE path (CI is RED): set the new value to <prior + 1> (e.g. prior 0 → 1, prior 2 → 3).' : '- This is a NON-CI amend (no CI failure): overwrite the value to 0.'}
+   c. Rewrite the message: take the verbatim message from (a), and set EXACTLY one trailing \`CI-Revise-Attempt: <new value>\` line — replace the existing \`CI-Revise-Attempt:\` line in place if present, else append it as the LAST trailer. Preserve the subject and EVERY other line/trailer byte-for-byte; change ONLY the \`CI-Revise-Attempt\` value. Do NOT add a duplicate trailer.
+   d. Apply it as a message-only amend (NO file changes): \`gt modify --no-interactive -m "<the full rewritten message>"\`. (This is the one place a bare \`gt modify\` is correct — there is nothing to stage; you are only rewriting the message.) Confirm with \`git log -1 --format=%B\` that exactly one \`CI-Revise-Attempt: <new value>\` trailer is present and the subject/other trailers are unchanged. Note: amending the message re-stacks descendants; that is expected.
+${ciFailing ? '7' : '6'}. Re-request review so any stale CHANGES_REQUESTED is cleared and the re-pushed head (with the trailer + fixes) re-enters review (ALWAYS do this, whether or not you amended content): \`gt submit --publish --no-edit --rerequest-review${reviewerFlags(r)}${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`. (This pushes the new head — including the trailer — to the PR. No gh body edit is involved here.)
+${ciFailing ? '8' : '7'}. BEST-EFFORT keep Linear in the current review status (a failed Linear write is a WARN, still return ok:true if review was re-requested).
+Return: ok, prUrl, newStatus, summary (name what you fixed${ciFailing ? ' — including the real CI failure(s) you read and the resulting CI-Revise-Attempt value(s) you wrote' : ''} — or state that the prior comment replies covered it and you only re-requested review — and confirm review was re-requested; if you could not address the failure/feedback, return ok:false with the verbatim reason — never fabricate a fix).`,
     { label: `revise:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
   const out = finResult(t, fin, `revise:${d.phase}`)
@@ -2353,6 +2404,38 @@ Return: ok (true only if the reply posted), applied (true ONLY if you chose APPL
   }
 
   return { answered, failures }
+}
+
+// ---------------------------------------------------------------------------
+// HELPER: resetCiReviseTrailer — writer-side reset of the CI-Revise-Attempt trailer to 0
+// after a NON-CI amend (RUS-81). The comment-only APPLY path amends the phase commit via
+// qrspi_revise_amend.py, which preserves the message verbatim — so a stale CI-Revise-Attempt
+// trailer (from a prior CI-failure revise) survives. Per the path-dependent trailer contract,
+// EVERY non-CI amend overwrites the trailer to 0. This spawns one worker to rewrite the head
+// commit message of each amended branch, setting exactly one `CI-Revise-Attempt: 0` trailer
+// and preserving the subject + every other trailer byte-for-byte, then re-publishing.
+// Best-effort: a failure here does NOT fail the revise (the gather's read-side reset already
+// forces the EFFECTIVE count to 0 while CI is not red; this only keeps the committed head tidy).
+// ---------------------------------------------------------------------------
+async function resetCiReviseTrailer(t, r, d, answered) {
+  const branchHint = d.phase === 'implementation'
+    ? `the slice branch(es) you amended (e.g. ${t.id}/slice-<N>) — reset EACH one you touched`
+    : `${t.id}/${d.phase}`
+  const fin = await agent(
+    `You are the CI-TRAILER-RESET worker for ${t.id} (phase: ${d.phase}), in ${r.worktreeDir}. A prior step APPLIED reviewer-comment change(s) and amended the phase commit; this was a NON-CI amend, so the durable \`CI-Revise-Attempt\` counter (RUS-81) on the amended head commit(s) must be overwritten to 0. You are HONESTY-BOUND: change ONLY the trailer value; never touch any file or any other line of the message.
+For EACH branch that was amended (${branchHint}) — checkout the branch first (\`gt checkout <branch> --no-interactive\`):
+1. Read the head commit's FULL message verbatim: \`git log -1 --format=%B\` (subject + body + ALL trailers).
+2. If there is NO \`CI-Revise-Attempt:\` line, there is nothing to reset — skip this branch (do NOT add one; absent already means 0).
+3. If a \`CI-Revise-Attempt: N\` line is present and N is already 0, skip (no-op).
+4. Otherwise rewrite the message with EXACTLY one \`CI-Revise-Attempt: 0\` line — replace the existing value in place. Preserve the subject and EVERY other line/trailer byte-for-byte; change ONLY that value. Apply it as a message-only amend (NO file changes — there is nothing to stage, so a bare \`gt modify\` is correct here): \`gt modify --no-interactive -m "<the full rewritten message>"\`. Confirm with \`git log -1 --format=%B\`.
+5. Re-publish the (re)stacked branch so the PR head carries the reset trailer: \`gt submit --publish --no-edit${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`. Do NOT --rerequest-review here (this is a comment-only path; we must not disturb an approved PR's review state).
+Return: ok, summary (which branch(es) you reset, or that no trailer was present to reset). If you cannot complete it, return ok:false with the verbatim reason — never fabricate.`,
+    { label: `ci-trailer-reset:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
+  )
+  if (!fin || !fin.ok) {
+    log(`  ${t.id}: CI-Revise-Attempt trailer reset (comment-only amend) WARN — ${fin?.error ?? 'no result'} (effective count is already 0 via the gather's read-side reset)`)
+  }
+  return fin
 }
 
 // ===========================================================================
