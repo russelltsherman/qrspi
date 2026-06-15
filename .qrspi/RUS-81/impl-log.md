@@ -32,3 +32,35 @@
 - Existing test expectations for `parse_pr_nodes` were updated to include the three additive keys via a `_CI_DEFAULTS` spread constant in the test file (in-slice test maintenance, not a structure deviation).
 
 ---
+
+## Session 2 — Slice 2: Resolver (CI-gated `revise`/`wait` branch with cap)
+
+**Timestamp:** 2026-06-15T16:35:06Z
+**Tasks completed:** T13, T14, T15, T16, T17, T18, T19, T20
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py resolve_state` → 1 file passed, 0 failed (Slice 2 verification gate, plan §2.20). Direct run reports 60 cases passed (was 41; 19 new CI cases).
+- `python3 scripts/run_tests.py resolve_test` → 1 file passed (the `qrspi_resolve.py` consumer still constructs a valid `resolve(state)` call via the default cap).
+- `python3 scripts/run_tests.py pr_state` → 1 file passed (Slice 1 gather unaffected).
+- `python3 scripts/run_tests.py` (full suite) → 36 passed, 1 FAILED: `qrspi_contract_fixtures_producer_test.py::test_resolve` (and the consumer pin would fail identically). See note below — this is the expected Slice 3 lockstep repair, NOT a regression in this slice's scope.
+
+**Deviations from structure.md:**
+
+- none on contracts. One bounded implementation choice: `resolve(state, ci_revise_cap=3)` was given a DEFAULT of `3` rather than a bare required positional. Structure says the cap is "passed in by the caller … never read from disk inside the resolver, preserving purity" — the default does not read disk and does not break purity; it only keeps the resolver additive so the untouched `qrspi_resolve.py` call site (`resolve(state)`, updated to pass the explicit cap in Slice 3 / T21) stays valid and `qrspi_resolve_test.py` does not regress mid-feature. The default mirrors the documented config default (3) and the additive `changeRequested` flag pattern. Slice 3 makes the caller explicit.
+
+**Deviations from plan.md:**
+
+- none. Note on plan §2.18b (frontier CR + CI-fail in one pass): this is implemented in the EXISTING unified feedback handler (block "2b"), not the new CI branch ("2c"). Block 2b now also computes `ciFailing = (ci_state(phases, f) == "red")` for the feedback phase it selects and folds it into the single `revise` decision, so a frontier carrying a change request and/or reviewer comments AND red CI returns one `revise` with both `changeRequested` and `ciFailing` set. The standalone CI branch (2c) handles the no-feedback red/pending/green/none cases on the frontier (highest existing phase), slotted after 2b and before the active-phase block, exactly per the precedence rule.
+
+**Notes for next session:**
+
+- Slice 2 edits ONLY `scripts/qrspi_resolve_state.py` + `scripts/qrspi_resolve_state_test.py`. Changes:
+  - `decision()` fixed key set gained `ciFailing: bool` (default `False`), placed between `changeRequested` and `reason`. Because the resolve envelope embeds the full decision dict, this new key now appears in the producer dump — which is WHY `scripts/fixtures/contract_seam/resolve/wellformed.json` + `prose_wrapped.json` + the producer/consumer pins are now byte-stale. **Slice 3 (T25-T28) repairs these four files in byte-for-byte lockstep** (plan Rollback Notes: "Slice 3's envelope re-emit depends on Slice 2's `ciFailing` decision key"). I deliberately did NOT touch them — they are Slice 3 scope. The producer dump now emits the decision block with `"ciFailing": false` inserted directly before `"reason"`; the consumer fixture must match byte-for-byte.
+  - `resolve(state, ci_revise_cap=3)` — new keyword param (default 3). Slice 3 T21 must thread the config-resolved cap in as the explicit argument.
+  - Two new pure helpers: `ci_state(phases, name) -> str` (implementation aggregation: any slice red→red, else any pending→pending, else any green→green, else none) and `ci_revise_attempt_of(phases, name) -> int` (reads the gathered `ciReviseAttempt`, already not-red→0 normalized at gather time; implementation aggregates per-slice attempts via `max(...)`). `ci_revise_attempt_of` is an internal addition beyond the structure's named `ci_state` contract — needed to read the gathered per-phase attempt count for the cap comparison; it is pure and unit-covered.
+  - New resolver block "2c" (after the unified feedback handler 2b, before `active = max(...)`): frontier red & attempt `< cap` → `revise` + `ciFailing=True`; frontier red & attempt `>= cap` → `wait` + `ciFailing=True`; frontier pending → `wait`; green/none → fall through (no-op). "Frontier" = the highest existing phase (`max(existing, key=_order)`).
+  - The CI branch runs BEFORE the implementation completeness gate, so a red OPEN slice with unbuilt later slices (later slices contribute `ciState="none"`, aggregate stays red) revises before `advance` builds the next slice (review finding #2 / plan §2.18c).
+  - Test infra: `_phase()`/`_slice()` gained additive `ci_state="none"`/`ci_attempt=0` kwargs; `case()` gained a `cap=3` kwarg threaded into `resolve(..., ci_revise_cap=cap)` in the runner; the runner tuple is now `(name, st, expect, cap)`. Existing 41 cases were not semantically changed (they pass no `ci_state`, so `ci_state` defaults to "none" → CI no-op).
+
+---

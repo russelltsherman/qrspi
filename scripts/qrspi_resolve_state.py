@@ -107,6 +107,37 @@ def phase_changes_requested(phases, name):
     return _pr_changes_requested(phases.get(name, {}))
 
 
+def ci_state(phases, name):
+    """Aggregate phase `name`'s CI rollup state from its gathered per-PR `ciState`
+    field(s). For the implementation stack (reviewed as a whole): any slice red -> red;
+    else any slice pending -> pending; else green/none (collapsed to "none" when no
+    slice is green, "green" when at least one slice is green and none red/pending).
+    For design/plan it is the single PR's gathered `ciState`. Missing/absent ->
+    "none", guarded like the other helpers (ref: structure Contracts ci_state)."""
+    if name == "implementation":
+        states = [s.get("ciState", "none") for s in _impl_slices(phases)]
+        if any(s == "red" for s in states):
+            return "red"
+        if any(s == "pending" for s in states):
+            return "pending"
+        if any(s == "green" for s in states):
+            return "green"
+        return "none"
+    return phases.get(name, {}).get("ciState", "none")
+
+
+def ci_revise_attempt_of(phases, name):
+    """The effective consecutive-red CI-revise attempt count for phase `name`, read
+    from the gathered `ciReviseAttempt` field (already not-red->0 normalized at gather
+    time, Slice 1 — so it is read directly here, never re-zeroed). For implementation,
+    aggregate the per-slice attempt counts with max(...) (the stack revises as a whole,
+    so the highest attempt governs the cap). Missing/absent -> 0."""
+    if name == "implementation":
+        attempts = [int(s.get("ciReviseAttempt", 0) or 0) for s in _impl_slices(phases)]
+        return max(attempts) if attempts else 0
+    return int(phases.get(name, {}).get("ciReviseAttempt", 0) or 0)
+
+
 def design_already_landed(state):
     """True only when a real merge signal says the design phase has already landed
     (its branch pruned), even though `branchExists` is False — so the entry gate must
@@ -139,8 +170,15 @@ def phase_comment_targets(phases, name):
     return phases.get(name, {}).get("commentTargets") or []
 
 
-def resolve(state):
-    """Pure decision function. Returns a decision dict (see module docstring)."""
+def resolve(state, ci_revise_cap=3):
+    """Pure decision function. Returns a decision dict (see module docstring).
+
+    `ci_revise_cap` is the maximum number of consecutive autonomous CI-failure
+    revises allowed before a still-red frontier PR is parked as `wait` (AC6). It is
+    passed IN by the caller (resolved from `.qrspi/config.json` in qrspi_resolve.py,
+    Slice 3) so this function stays pure and does no disk read; the default `3`
+    mirrors the documented config default and keeps the resolver additive for callers
+    that have not yet threaded the cap through."""
     phases = state.get("phases", {})
     existing = [p for p in PHASES if phase_exists(phases, p)]
 
@@ -153,6 +191,7 @@ def resolve(state):
             "discardPhases": kw.get("discardPhases", []),
             "commentTargets": kw.get("commentTargets", []),
             "changeRequested": kw.get("changeRequested", False),
+            "ciFailing": kw.get("ciFailing", False),
             "reason": kw.get("reason", ""),
         }
         return out
@@ -218,11 +257,52 @@ def resolve(state):
             what = "a change request"
         else:
             what = "unaddressed reviewer comment(s)"
+        # If this same phase ALSO has failing CI, fold the CI signal into the one revise
+        # pass (frontier CR + CI-fail handled together — plan §2.18b) so the worker fixes
+        # the reviewer feedback and the red checks in a single amend rather than looping.
+        ci_red = ci_state(phases, f) == "red"
+        if ci_red:
+            what += " and failing CI"
         return decision("revise", phase=f,
                         commentTargets=targets,
                         changeRequested=cr_present,
+                        ciFailing=ci_red,
                         reason="%s PR has %s; address in place%s." % (
                             f, what, " and re-request review" if cr_present else ""))
+
+    # 2c. CI-gated revise/wait. Slotted AFTER the unified feedback handler (2b) and
+    # BEFORE the active-phase block (incl. the implementation completeness gate). Only
+    # the FRONTIER (highest existing) phase's CI signal gates here: a red frontier under
+    # the cap is auto-revised; a red frontier at/above the cap is parked (cap-then-wait,
+    # AC6); a pending frontier waits for checks to finish; green/none is a no-op that
+    # falls through to the normal review-state path. A NON-frontier red PR takes no CI
+    # action (its upstream phase already merged/approved; only the live frontier matters)
+    # — and any non-frontier CHANGES_REQUESTED already reset at step 2 above, so a real
+    # upstream regression never silently hides behind a green frontier here.
+    #
+    # Running BEFORE the completeness gate matters for the incomplete-implementation case:
+    # a red OPEN slice PR with later slices not yet built (those contribute ciState="none",
+    # so the aggregate is still "red") is revised to fix the failing checks before
+    # `advance` would build the next slice on top of a broken base (review finding #2).
+    frontier = max(existing, key=_order)
+    fci = ci_state(phases, frontier)
+    if fci == "red":
+        attempt = ci_revise_attempt_of(phases, frontier)
+        if attempt < ci_revise_cap:
+            return decision("revise", phase=frontier, ciFailing=True,
+                            changeRequested=phase_changes_requested(phases, frontier),
+                            commentTargets=phase_comment_targets(phases, frontier),
+                            reason="%s frontier PR has failing CI (attempt %d/%d); "
+                                   "auto-revise to fix the red checks." % (
+                                       frontier, attempt, ci_revise_cap))
+        return decision("wait", phase=frontier, ciFailing=True,
+                        reason="%s frontier PR still has failing CI after %d/%d "
+                               "consecutive auto-revise attempt(s); cap reached, parked "
+                               "for manual attention." % (frontier, attempt, ci_revise_cap))
+    if fci == "pending":
+        return decision("wait", phase=frontier,
+                        reason="%s frontier PR CI is still pending; wait for checks to "
+                               "finish before acting." % frontier)
 
     # 3. Active phase = highest existing phase.
     active = max(existing, key=_order)

@@ -12,10 +12,11 @@ from qrspi_resolve_state import resolve
 
 
 def _phase(branch=True, pr=True, decision="REVIEW_REQUIRED", threads=0, comments=None,
-           merged=False):
+           merged=False, ci_state="none", ci_attempt=0):
     return {"branchExists": branch, "prExists": pr,
             "reviewDecision": decision, "unresolvedThreads": threads,
-            "commentTargets": comments or [], "merged": merged}
+            "commentTargets": comments or [], "merged": merged,
+            "ciState": ci_state, "ciReviseAttempt": ci_attempt}
 
 
 def _impl(slices, expected=None, pr_summary=True, merged=False):
@@ -27,10 +28,11 @@ def _impl(slices, expected=None, pr_summary=True, merged=False):
             "prSummaryCommitted": pr_summary, "merged": merged}
 
 
-def _slice(n, pr=True, decision="REVIEW_REQUIRED", threads=0, comments=None, merged=False):
+def _slice(n, pr=True, decision="REVIEW_REQUIRED", threads=0, comments=None, merged=False,
+           ci_state="none", ci_attempt=0):
     return {"n": n, "prExists": pr, "reviewDecision": decision,
             "unresolvedThreads": threads, "commentTargets": comments or [],
-            "merged": merged}
+            "merged": merged, "ciState": ci_state, "ciReviseAttempt": ci_attempt}
 
 
 # A minimal CommentTarget for the resolver precedence cases (the resolver only
@@ -57,8 +59,11 @@ def contains(reason, needle):
 CASES = []
 
 
-def case(name, st, expect):
-    CASES.append((name, st, expect))
+def case(name, st, expect, cap=3):
+    # `cap` is threaded into resolve(...) as the explicit ci_revise_cap argument
+    # (Slice 2, plan §2.19). Defaults to 3 so the pre-existing cases keep passing a
+    # valid call; CI-cap cases override it to exercise the under-cap / at-cap boundary.
+    CASES.append((name, st, expect, cap))
 
 
 # --- entry gate -------------------------------------------------------------
@@ -335,10 +340,158 @@ case("no commentTargets, approved slices -> land, NOT revise",
      {"action": "land", "phase": "implementation"})
 
 
+# --- CI-gated revise/wait (Slice 2): red/pending/green/none × frontier/non-frontier × cap --
+# The resolver consumes the gathered ciState/ciReviseAttempt off the per-PR shape (Slice 1)
+# and gates the FRONTIER (highest existing) phase: red under cap -> revise+ciFailing; red
+# at/above cap -> wait; pending -> wait; green/none -> the normal review-state path.
+
+# T17a — red frontier (design) under cap -> revise + ciFailing=True.
+case("CI red frontier (design) under cap -> revise + ciFailing",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=0)}),
+     {"action": "revise", "phase": "design", "ciFailing": True, "changeRequested": False},
+     cap=3)
+
+# T17b — red frontier at cap (attempt == cap) -> wait (cap-then-wait, AC6). ciFailing stays
+# True on the parked decision so the envelope/worker can still surface the failure context.
+case("CI red frontier at cap -> wait (cap-then-wait, AC6)",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=3)}),
+     {"action": "wait", "phase": "design", "ciFailing": True},
+     cap=3)
+
+# Red frontier ABOVE cap (attempt > cap) -> still wait.
+case("CI red frontier above cap -> wait",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=5)}),
+     {"action": "wait", "phase": "design", "ciFailing": True},
+     cap=3)
+
+# Boundary: attempt == cap-1 is the last allowed revise (under cap).
+case("CI red frontier at cap-1 -> revise (last allowed attempt)",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=2)}),
+     {"action": "revise", "phase": "design", "ciFailing": True},
+     cap=3)
+
+# T17c — pending frontier -> wait (no ciFailing; not a failure, just unfinished checks).
+case("CI pending frontier -> wait",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="pending")}),
+     {"action": "wait", "phase": "design", "ciFailing": False})
+
+# T17d — green frontier -> no CI action; falls through to the normal review-state path.
+case("CI green frontier (approved+clean) -> advance, NOT a CI action",
+     state(phases={"design": _phase(decision="APPROVED", ci_state="green")}),
+     {"action": "advance", "phase": "design", "nextPhase": "plan", "ciFailing": False})
+
+# none frontier -> no CI action (same as today's behavior; CI simply absent).
+case("CI none frontier (approved+clean) -> advance, NOT a CI action",
+     state(phases={"design": _phase(decision="APPROVED", ci_state="none")}),
+     {"action": "advance", "phase": "design", "nextPhase": "plan"})
+
+# T17e — NON-frontier red takes NO CI action: design merged-and-pruned (non-frontier) while
+# the plan frontier is green+approved -> advance to implementation, NOT a CI revise. (A
+# pruned phase carries no live ciState anyway, but this pins "only the frontier gates".)
+case("CI red on non-frontier ignored; green frontier advances",
+     state(phases={"design": _phase(decision="APPROVED", ci_state="green"),
+                   "plan": _phase(decision="APPROVED", ci_state="green")}),
+     {"action": "advance", "phase": "plan", "nextPhase": "implementation",
+      "ciFailing": False})
+
+# Implementation stack: any slice red -> the stack frontier is red -> revise.
+case("CI: one slice red -> revise implementation (any-slice-red aggregation)",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="APPROVED", ci_state="green"),
+                                            _slice(2, decision="REVIEW_REQUIRED",
+                                                   ci_state="red", ci_attempt=1)])}),
+     {"action": "revise", "phase": "implementation", "ciFailing": True})
+
+# Implementation per-slice attempt aggregation uses max(...): one slice at cap parks the
+# whole stack as wait even if another red slice is under cap.
+case("CI: impl per-slice attempt aggregated via max -> at cap -> wait",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="REVIEW_REQUIRED",
+                                                   ci_state="red", ci_attempt=1),
+                                            _slice(2, decision="REVIEW_REQUIRED",
+                                                   ci_state="red", ci_attempt=3)])}),
+     {"action": "wait", "phase": "implementation", "ciFailing": True},
+     cap=3)
+
+# Implementation: a slice pending (none red) -> pending aggregation -> wait.
+case("CI: impl one slice pending, none red -> wait (pending aggregation)",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="APPROVED", ci_state="green"),
+                                            _slice(2, decision="REVIEW_REQUIRED",
+                                                   ci_state="pending")])}),
+     {"action": "wait", "phase": "implementation", "ciFailing": False})
+
+# Cap is honored as passed: with cap=1, an attempt of 1 is already at cap -> wait; the same
+# state under cap=5 is under cap -> revise. Proves the cap is threaded, not hard-coded.
+case("CI red frontier attempt=1, cap=1 -> wait (cap threaded)",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=1)}),
+     {"action": "wait", "phase": "design", "ciFailing": True},
+     cap=1)
+
+case("CI red frontier attempt=1, cap=5 -> revise (cap threaded)",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=1)}),
+     {"action": "revise", "phase": "design", "ciFailing": True},
+     cap=5)
+
+
+# --- precedence cases (Slice 2, plan §2.18) ---------------------------------
+# T18a — a NON-frontier CHANGES_REQUESTED still resets at step 2 even with a red frontier:
+# design CR (non-frontier, plan above) with a red plan frontier -> reset to design, discard
+# plan. The CI branch (2c) never runs because the reset returns first.
+case("non-frontier CR resets even with red frontier (CR outranks CI)",
+     state(phases={"design": _phase(decision="CHANGES_REQUESTED"),
+                   "plan": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=0)}),
+     {"action": "reset", "resetToPhase": "design", "discardPhases": ["plan"]})
+
+# T18b — a frontier CR + CI-fail are BOTH handled in one revise pass: the unified feedback
+# handler (2b) fires for the frontier CR and folds in ciFailing=True because the same phase
+# is red. One decision carries changeRequested AND ciFailing.
+case("frontier CR + red CI -> single revise carrying changeRequested + ciFailing",
+     state(phases={"design": _phase(decision="CHANGES_REQUESTED", ci_state="red", ci_attempt=1)}),
+     {"action": "revise", "phase": "design", "changeRequested": True, "ciFailing": True})
+
+# Frontier reviewer COMMENTS (no CR) + red CI -> one revise, changeRequested False,
+# ciFailing True (comments and red checks fixed together).
+case("frontier comments (no CR) + red CI -> single revise, ciFailing True, changeRequested False",
+     state(phases={"design": _phase(decision="APPROVED", comments=[_ct(9)],
+                                    ci_state="red", ci_attempt=1)}),
+     {"action": "revise", "phase": "design", "changeRequested": False, "ciFailing": True,
+      "commentTargets": [_ct(9)]})
+
+# Feedback with GREEN CI -> the existing revise behavior is unchanged; ciFailing stays False.
+case("frontier comments (no CR) + green CI -> revise, ciFailing False (unchanged behavior)",
+     state(phases={"design": _phase(decision="APPROVED", comments=[_ct(9)], ci_state="green")}),
+     {"action": "revise", "phase": "design", "changeRequested": False, "ciFailing": False})
+
+# T18c — incomplete-implementation: a red OPEN slice PR with a later slice NOT yet built
+# (which the gather models as ciState="none"). The aggregate is still red, so the CI branch
+# (2c) revises BEFORE the completeness gate would `advance` to build the next slice
+# (review finding #2). expected=2 with one committed slice = incomplete.
+case("incomplete impl: red open slice + unbuilt later slice -> revise before advance",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="REVIEW_REQUIRED",
+                                                   ci_state="red", ci_attempt=0)],
+                                           expected=2, pr_summary=False)}),
+     {"action": "revise", "phase": "implementation", "ciFailing": True})
+
+# Counterpart: an incomplete impl whose only committed slice is GREEN still advances to build
+# the rest (CI no-op; the completeness gate governs).
+case("incomplete impl: green committed slice -> advance to finish (CI no-op)",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="APPROVED", ci_state="green")],
+                                           expected=2, pr_summary=False)}),
+     {"action": "advance", "phase": "implementation", "nextPhase": "implementation"})
+
+
 def run():
     failures = 0
-    for name, st, expect in CASES:
-        got = resolve(st)
+    for name, st, expect, cap in CASES:
+        got = resolve(st, ci_revise_cap=cap)
         ok = True
         for key, want in expect.items():
             if key == "_reasonContains":
