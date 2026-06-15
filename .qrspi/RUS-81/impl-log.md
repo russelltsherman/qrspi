@@ -122,3 +122,28 @@
 - TRAILER MECHANISM (important for Slice 5 docs / any future worker change): `qrspi_revise_amend.py` preserves the commit message **verbatim** — it does NOT and cannot write the trailer. So the trailer is written by a DISTINCT message-only amend the worker performs after the content amend: read `git log -1 --format=%B`, replace/append exactly one `CI-Revise-Attempt: N` line, `gt modify --no-interactive -m "<full message>"` (no staged files — the one place a bare `gt modify` is correct), then `gt submit`. CI path: `N = prior+1` (prior read off the head commit's existing trailer, absent ⇒ 0). Non-CI path: `N = 0`.
 - The `resetCiReviseTrailer(...)` helper (new, after `respondToComments`) is best-effort: a failure logs a WARN and does NOT fail the revise, because the read-side reset already protects cap correctness.
 - Slice 5 (Docs) is next: document the CI-gated revise trigger + the consecutive-red counter with its TWO resets (writer-side here in `doRevise`, AND the gather's read-side not-red→0). Manual e2e of this slice (plan step 33) was NOT run in this session — the harness needs a live ticket with a known-red frontier PR; flag for the human-driven e2e gate.
+
+---
+
+## Session 5 — Slice 5: Docs (CI-gated revise behavior)
+
+**Timestamp:** 2026-06-15T17:05:00Z
+**Tasks completed:** T34, T35, T36
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py` (full suite, Slice 5 verification gate / plan §5.36) → 37 passed, 0 failed (docs-only change does not regress code)
+
+**Deviations from structure.md:**
+
+- none (Slice 5 is docs-only; no new types/contracts).
+
+**Deviations from plan.md:**
+
+- none in substance. Plan T34 says "Modify `CLAUDE.md`" — the Lifecycle section it names lives in the project `.claude/CLAUDE.md` (the repo-root `CLAUDE.md` is a 0-line `@~/.agents/AGENTS.md` import with no Lifecycle section), so the edit was made in `.claude/CLAUDE.md`. Plan T35 also says "Remove any stale 'CI is ignored entirely today' claim" — a full grep of `docs/qrspi-pr-gated-lifecycle-design.md` found NO such claim (the doc is the original RUS-50 design, which never asserted CI was consulted at all), so the removal is vacuous; nothing stale was deleted.
+
+**Notes for next session:**
+
+- Slice 5 edits exactly TWO in-scope files: `.claude/CLAUDE.md` (Lifecycle section — added a CI-gated revise bullet + updated the qrspi-batch actions bullet to name red-CI/pending/at-cap) and `docs/qrspi-pr-gated-lifecycle-design.md` (added a `### CI gate (RUS-81)` subsection to §5 Predicates covering the green/red/pending/none normalization, the revise/wait predicate table, the after-2b/before-active precedence slot, the configurable `ciReviseCap` cap default 3 from `.qrspi/config.json`, and the dual reset). No code/script/fixture/workflow changes.
+- The §4 resolve-loop pseudocode in the design doc was NOT rewritten — it is the original RUS-50 manual-revise loop and does not reflect the shipped RUS-54 unified-feedback handler either; rewriting it is out of this slice's scope. The new CI gate is documented declaratively in §5 (Predicates), which is the doc's home for advancement signals (READY/RESET live there too).
+- Manual e2e (plan step 33 for Slice 4, and the manual doc read in step 36) is the only remaining gate: a live ticket with a known-red frontier PR is needed to exercise `doRevise`'s CI path end-to-end. Flag for the human-driven e2e gate before landing — no automated coverage exists for `qrspi-batch.js` per project convention.

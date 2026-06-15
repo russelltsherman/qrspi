@@ -75,14 +75,35 @@ Selected (assigned)
   resolved is excluded from the comment set (the gather drops resolved threads, RUS-69), so a PR
   whose only outstanding signal is unresolved threads with neither a change request nor an
   unaddressed reviewer comment is left for the reviewer and resolves to `wait`.
+- **CI check state is a third advancement signal** (RUS-81). The gather reads each PR's head-commit
+  `statusCheckRollup` and normalizes it to `green | red | pending | none`. The resolver evaluates CI
+  on the **frontier** (highest existing) phase, in a precedence slot **after** the unified-feedback
+  handler and **before** the active-phase block (so a formal `CHANGES_REQUESTED` still wins, and a
+  red frontier is fixed before `advance` builds the next phase): a **red** frontier → `revise`
+  (`ciFailing=True`); **pending** → `wait` (let CI finish); **green/none** → no CI action (fall
+  through to the normal review-state path). A frontier carrying reviewer feedback **and** red CI is
+  handled in a single `revise` pass (`changeRequested` and `ciFailing` both set). For implementation
+  the per-slice CI is aggregated across the stack — any slice red → red, else any pending → pending —
+  and the worker fixes **all** red slices in one pass, reading REAL failing-check output
+  (`gh pr checks` → `gh run view --log-failed`) **before** any fix. A consecutive-red **cap** bounds
+  retries: the `CI-Revise-Attempt: N` head-commit trailer counts consecutive red revises, and once
+  the effective count reaches the cap the resolver switches red → `wait` (stop the loop, surface to a
+  human) instead of `revise`. The cap is configurable via the flat `ciReviseCap` key in
+  `.qrspi/config.json` (default `3`; non-positive / non-integer → `3`). The counter has **two
+  resets**: (1) a **read-side** reset in the gather — `ciReviseAttempt` is forced to `0` whenever the
+  rollup is not `red`; and (2) a **writer-side** reset in `doRevise` — every non-CI amend
+  (feedback-only, or any amend on a not-red PR) overwrites the trailer to `CI-Revise-Attempt: 0`,
+  while the CI-failure path writes `CI-Revise-Attempt: <prior+1>`. The trailer is written by a
+  distinct message-only `gt modify -m` after the content amend (the content amender preserves the
+  commit message verbatim and cannot write the trailer).
 - **`*Approved` Linear states were dropped** — approval lives in the PR. Reporting statuses:
   `Selected` → `Design Review` → `Plan Review` → `Code Review` → `Done`.
 - The decision is computed by a tested resolver (`scripts/qrspi_resolve_state.py`, unit-tested);
   the orchestrator and batch both call it rather than re-deriving state logic.
 - The `qrspi-batch` workflow drives the autonomously-runnable actions across assigned tickets
   (run_design, advance, submit, land, automatic reset, and revise — addressing a frontier
-  `CHANGES_REQUESTED` PR then re-requesting review); it skips only `wait` (not-yet-approved or
-  thread-only PRs awaiting the reviewer).
+  `CHANGES_REQUESTED` PR **and/or a red-CI frontier** then re-requesting review); it skips only
+  `wait` (not-yet-approved, thread-only, pending-CI, or at-cap red-CI PRs awaiting the reviewer).
 
 ### Available skills (invoke with / or let Claude auto-invoke)
 

@@ -142,6 +142,60 @@ reset to phase K   when  K is the LOWEST phase with RESET_TRIGGER(pr_K)
 A plain comment / unresolved nit thread does **not** reset; it only blocks
 `READY` (advance/land) and must be resolved. Only a formal change request resets.
 
+### CI gate (RUS-81)
+
+CI check state is a third advancement signal, evaluated on the **frontier** (highest
+existing) phase only. The gather reads each PR's head-commit `statusCheckRollup` and
+normalizes it:
+
+```
+CI(pr)  ≔  green   when statusCheckRollup.state == SUCCESS
+           red     when FAILURE | ERROR
+           pending when PENDING | EXPECTED
+           none    when null / absent
+
+ci_revise CI-gated revise of frontier F   when  CI(F) == red AND attempt(F) <  cap
+ci_wait   wait on frontier F              when  CI(F) == red AND attempt(F) >= cap   (cap-then-wait)
+ci_wait   wait on frontier F              when  CI(F) == pending                     (let CI finish)
+no CI action                              when  CI(F) ∈ {green, none}                (fall through)
+```
+
+Precedence: the CI gate is slotted **after** the unified-feedback handler (the
+`CHANGES_REQUESTED` / reviewer-comment block) and **before** the active-phase
+advance/land block. Consequences:
+
+- A formal `CHANGES_REQUESTED` still wins — reset/feedback is handled first.
+- A frontier carrying reviewer feedback **and** red CI is addressed in a single `revise`
+  pass (both `changeRequested` and `ciFailing` set).
+- A red frontier is fixed **before** `advance` builds the next phase — an incomplete
+  implementation with a red OPEN slice (later, unbuilt slices contribute `CI == none`,
+  so the implementation aggregate stays red) revises rather than advancing.
+
+For **implementation** the per-slice CI is aggregated across the stack: any slice red →
+red; else any slice pending → pending; else green/none. The worker fixes **all** red
+slices in one pass, reading REAL failing-check output (`gh pr checks` →
+`gh run view --log-failed`) before any fix.
+
+**Consecutive-red cap.** A red revise loop is bounded so a persistently-red PR is
+surfaced to a human rather than retried forever. The `CI-Revise-Attempt: N` head-commit
+trailer counts consecutive red revises; once the effective count reaches the cap the gate
+switches red → `wait` (`ci_wait`) instead of `revise`. The cap is configurable via the
+flat `ciReviseCap` key in `.qrspi/config.json` (default `3`; non-positive / non-integer →
+`3`), read by `scripts/qrspi_resolve.py` and threaded into the pure resolver as an explicit
+`ci_revise_cap` argument (the resolver never reads disk).
+
+**Dual reset** of the counter:
+
+1. **Read-side** (gather, `scripts/qrspi_pr_state.py`): the effective `ciReviseAttempt`
+   is forced to `0` whenever the rollup is not `red`, so a PR that goes green and later
+   regresses starts counting from zero.
+2. **Writer-side** (worker, `doRevise` in `.claude/workflows/qrspi-batch.js`): the
+   CI-failure path writes `CI-Revise-Attempt: <prior+1>`; every non-CI amend
+   (feedback-only, or any amend on a not-red PR) overwrites the trailer to
+   `CI-Revise-Attempt: 0`. The trailer is written by a distinct message-only `gt modify -m`
+   after the content amend, because the content amender preserves the commit message
+   verbatim and cannot write the trailer.
+
 ---
 
 ## 6. Required technical mechanisms
