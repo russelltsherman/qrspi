@@ -106,6 +106,18 @@ const engineCmdFor = (r, rel) => `${engineRootFor(r)}/${rel}`
 
 const SKILL = engineCmd('.claude/skills/qrspi-work/SKILL.md')
 
+// runId — the orchestrator's per-invocation run id, stamped onto every appended
+// CriticMetricsLedgerLine so a summarizer (scripts/qrspi_critic_summary.py) can scope
+// a base-rate report to exactly one run (RUS-78, AC-Instrumentation). Computed ONCE at
+// the top of the imperative shell: the env var when the harness exports one, else a
+// generated id, so the appender's "runId always present, always a string" contract
+// holds. The crypto guards mirror the defensive `typeof process` style above — a
+// sandbox without webcrypto falls back to a timestamp+random id (still a unique string).
+const runId =
+  (typeof process !== 'undefined' && process.env && process.env.QRSPI_RUN_ID) ||
+  ((typeof crypto !== 'undefined' && crypto.randomUUID && crypto.randomUUID()) ||
+    `run-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+
 // --- args ------------------------------------------------------------------
 // Optional overrides: { statuses?: string[], ticket?: string, project?: string,
 //                       allProjects?: boolean,
@@ -1065,7 +1077,7 @@ async function recordCriticMetrics(id, phase, verdicts, terminalAction) {
     `You are the CRITIC-METRICS worker. Your cwd is the main repo root. Run EXACTLY this one
 command verbatim (no path edits, no exploration) and return its JSON stdout verbatim:
 
-  printf '%s' ${JSON.stringify(JSON.stringify(verdicts))} | python3 ${engineCmd('scripts/qrspi_critic_metrics.py')} --terminal-action ${terminalAction} --phase ${phase} | tee /tmp/qrspi-metrics-${id}-${phase}.json && python3 ${engineCmd('scripts/qrspi_metrics_append.py')} --ticket ${id} --record "$(cat /tmp/qrspi-metrics-${id}-${phase}.json)" >/dev/null && cat /tmp/qrspi-metrics-${id}-${phase}.json
+  printf '%s' ${JSON.stringify(JSON.stringify(verdicts))} | python3 ${engineCmd('scripts/qrspi_critic_metrics.py')} --terminal-action ${terminalAction} --phase ${phase} | tee /tmp/qrspi-metrics-${id}-${phase}.json && python3 ${engineCmd('scripts/qrspi_metrics_append.py')} --ticket ${id} --run-id '${runId}' --record "$(cat /tmp/qrspi-metrics-${id}-${phase}.json)" >/dev/null && cat /tmp/qrspi-metrics-${id}-${phase}.json
 
 It builds the CriticStepMetrics record, appends it to the per-ticket ledger, then re-prints the
 record as JSON { phase, rounds, terminalAction }. Parse and return that record verbatim. If any
