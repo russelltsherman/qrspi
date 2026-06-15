@@ -1,0 +1,12 @@
+{
+  "fixture": "design_dropped_criterion_broken.md",
+  "droppedCriterion": "403 unless admin",
+  "mustSurface": true,
+  "statedCriteria": [
+    "returns notification and display prefs",
+    "p95 < 200ms",
+    "401 on unauthorized",
+    "403 unless admin"
+  ],
+  "note": "The Desired End State states four acceptance criteria; the Delta and Pattern Decisions silently drop '403 unless admin' (no handler authorization, no 403 test, no decision). A faithful completeness lens must surface the dropped criterion. The teeth test asserts droppedCriterion is exactly the (stated - covered) gap and that repairing the fixture removes the detection."
+}

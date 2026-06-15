@@ -135,3 +135,33 @@
 - **Disabled-path guarantee preserved:** all three levers default OFF (`digest`/`gateBehindEdge` resolve to `{enabled:false}`; `lensModel` key absent — Slice 3). With all OFF, the panel builds no digest, adds no `DIGEST_PATH`/`model`, and never enters the gate branch — byte-for-byte the pre-RUS-77 lens inputs and dispatch. This is the T41 final-gate guarantee (Session 6).
 
 ---
+
+## Session 5 — Slice 5
+
+**Timestamp:** 2026-06-15T02:53:06Z
+**Tasks completed:** T33, T34, T35, T36, T37, T38
+**Tasks failed:** none
+
+**Tests:**
+
+- `python3 scripts/run_tests.py teeth` → 1 test file passed (`qrspi_teeth_test.py`), 0 failed
+- `python3 scripts/run_tests.py --list | grep teeth` → `qrspi_teeth_test.py` (the new module IS enumerated by the aggregating CI runner — T37)
+- `python3 -m unittest -v scripts/qrspi_teeth_test.py` → 5 tests OK; confirms both the flaw-detection cases (`FixtureWellFormedTest`) AND the teeth-of-the-teeth repair cases (`TeethOfTheTeethTest.test_repaired_fixture_has_no_dropped_criterion`, `test_repair_only_changes_the_dropped_criterion`) pass — the repaired fixture yields an EMPTY dropped set, proving the assertion is load-bearing (T38)
+- `python3 scripts/run_tests.py` → 35 passed, 0 failed (full regression suite green; was 34 in Slice 4, the +1 is the new teeth test — no prior-slice breakage)
+
+**Deviations from structure.md:**
+
+- **Golden extension fixed to `.json`** (`evals/golden/design_dropped_criterion_broken.json`) — structure.md Slice 5 listed `evals/golden/design_dropped_criterion_broken.<ext>` with the extension as an Unverified Assumption; plan.md step 34 pins it to `.json`. Implemented as `.json` per the plan.
+
+**Deviations from plan.md:**
+
+- none — steps 33–36 implemented as written; the deterministic teeth mechanism (the structure/design Unverified Assumption) is the stated-minus-covered criterion-coverage check from plan step 35, with importable pure helpers so the repair case (step 36) re-runs detection on an in-memory repaired copy.
+- Note on the concrete coverage mechanism (plan left the assertion form to settle here): `dropped_criteria(design_text)` = `stated_criteria` (quoted labels parsed from the Desired End State bullets) minus `covered_criteria` (criteria whose signature tokens appear in the Delta + Pattern Decisions). The fixture's dropped "403 unless admin" criterion has signature tokens (`403`, `canAccess`, `admin`) that appear NOWHERE in its Delta/Decisions, so it reads as the sole gap, matching the golden's `droppedCriterion`.
+
+**Notes for next session:**
+
+- Slice 5 is the LAST implementation slice (Slices 1–4 done; this completes AC-TEETH). Next is the PR-summary phase (`/qrspi-pr RUS-77`), then the final full-suite gate (plan steps 39–41).
+- **Scope honesty (carried from plan §219–232 / design OQ1):** the teeth test is a DETERMINISTIC STRUCTURAL check over the *fixture*, NOT a live exercise of any lens. It verifies the fixture is well-formed (carries a detectable dropped-criterion flaw) and that detection is load-bearing (repair removes it). It does NOT run/mock the completeness lens, so it does NOT verify AC-TEETH's "a flawed design makes each lens fail" intent — that (Decision 4 Option A) requires reviving the `evals/run_eval.py` placeholder and is deferred. The fixture + golden are the durable substrate a revived runner would consume.
+- Three new files, all independent of the JS orchestrator: `evals/fixtures/design_dropped_criterion_broken.md` (the flawed design — DO NOT "fix" it; repairing it defeats the eval), `evals/golden/design_dropped_criterion_broken.json` (golden: `droppedCriterion`, `mustSurface`, `statedCriteria`), `scripts/qrspi_teeth_test.py` (importable pure helpers `split_sections`/`stated_criteria`/`covered_criteria`/`dropped_criteria`/`repair_fixture` + the two test classes).
+
+---
