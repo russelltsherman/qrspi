@@ -13,6 +13,7 @@
     "discardPhases": [],
     "commentTargets": [],
     "changeRequested": false,
+    "ciFailing": false,
     "reason": "Entry gate satisfied (assigned + Selected); no design branch yet."
   },
   "commentTargets": [],
