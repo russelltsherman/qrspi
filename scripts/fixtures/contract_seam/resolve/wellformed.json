@@ -17,6 +17,8 @@
     "reason": "Entry gate satisfied (assigned + Selected); no design branch yet."
   },
   "commentTargets": [],
+  "ciFailing": false,
+  "ciFailingChecks": [],
   "reviewers": "@me",
   "teamReviewers": "",
   "ticketContentPath": "/repo/.worktrees/RUS-1/.qrspi/RUS-1/ticket.md",
