@@ -45,6 +45,23 @@ query($owner:String!, $repo:String!, $head:String!) {
         comments(first:100) {
           nodes { databaseId body createdAt author { login } }
         }
+        commits(last:1) {
+          nodes {
+            commit {
+              message
+              statusCheckRollup {
+                state
+                contexts(first:100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun { name conclusion detailsUrl }
+                    ... on StatusContext { context state targetUrl }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -58,6 +75,85 @@ def unresolved_thread_count(review_threads):
     """Count threads whose isResolved is falsey. `review_threads` is the list of
     {isResolved: bool} nodes from the GraphQL reviewThreads field."""
     return sum(1 for t in (review_threads or []) if not t.get("isResolved"))
+
+
+def _head_commit(pr_node):
+    """The head (last) commit node from a PR's commits(last:1) selection, or {} if
+    absent. Guarded like unresolved_thread_count so a missing commits selection (e.g.
+    an empty parse, or a hermetic test node without commits) degrades to {} rather
+    than crashing."""
+    commits = ((pr_node or {}).get("commits") or {}).get("nodes") or []
+    return (commits[-1] or {}).get("commit") or {} if commits else {}
+
+
+def check_rollup_state(pr_node):
+    """Normalize a PR head commit's statusCheckRollup.state to a CiState string.
+
+    Pure (unit-tested). Maps the GitHub StatusState enum:
+        SUCCESS              -> "green"
+        FAILURE | ERROR      -> "red"
+        PENDING | EXPECTED   -> "pending"
+        null / absent / any  -> "none"
+    A null rollup (no checks configured) or an absent commits/rollup selection
+    (a committed-but-not-yet-PR'd slice, or an empty parse) yields "none". Guarded
+    against missing keys exactly like unresolved_thread_count (ref: Contracts;
+    structure §New Types CiState). `pr_node` is the parsed GraphQL PR node."""
+    rollup = _head_commit(pr_node).get("statusCheckRollup") or {}
+    state = rollup.get("state")
+    if state == "SUCCESS":
+        return "green"
+    if state in ("FAILURE", "ERROR"):
+        return "red"
+    if state in ("PENDING", "EXPECTED"):
+        return "pending"
+    return "none"
+
+
+_CI_REVISE_ATTEMPT_RE = re.compile(r"^CI-Revise-Attempt:\s*(\d+)\s*$", re.MULTILINE)
+
+
+def ci_revise_attempt(message):
+    """Parse the `CI-Revise-Attempt: N` trailer from a head-commit message -> int.
+
+    Pure (unit-tested). The durable, observable-from-GitHub consecutive-red-CI
+    counter (Decision 2 Option C). Absent or malformed (non-integer / no trailer)
+    -> 0; guarded like the other parsers so a None/empty message yields 0. If the
+    trailer appears more than once the last occurrence wins (mirroring git trailer
+    semantics). `message` is the head-commit message string (ref: Contracts;
+    structure §New Types CI-Revise-Attempt)."""
+    matches = _CI_REVISE_ATTEMPT_RE.findall(message or "")
+    if not matches:
+        return 0
+    try:
+        return int(matches[-1])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _failing_checks(pr_node):
+    """The failing check entries from a PR head commit's statusCheckRollup contexts,
+    as a list of {name, detailsUrl} dicts. Pure; guarded for absent selections.
+
+    A CheckRun is failing iff its conclusion is FAILURE/ERROR/TIMED_OUT/CANCELLED/
+    STARTUP_FAILURE/ACTION_REQUIRED; a StatusContext is failing iff its state is
+    FAILURE/ERROR. The check name comes from CheckRun.name or StatusContext.context;
+    the URL from CheckRun.detailsUrl or StatusContext.targetUrl. Empty unless there
+    are failing checks (the populated parse only attaches this when ciState=="red")."""
+    rollup = _head_commit(pr_node).get("statusCheckRollup") or {}
+    nodes = (rollup.get("contexts") or {}).get("nodes") or []
+    out = []
+    for c in nodes:
+        c = c or {}
+        typename = c.get("__typename")
+        if typename == "CheckRun":
+            if (c.get("conclusion") or "") in (
+                    "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED",
+                    "STARTUP_FAILURE", "ACTION_REQUIRED"):
+                out.append({"name": c.get("name"), "detailsUrl": c.get("detailsUrl")})
+        elif typename == "StatusContext":
+            if (c.get("state") or "") in ("FAILURE", "ERROR"):
+                out.append({"name": c.get("context"), "detailsUrl": c.get("targetUrl")})
+    return out
 
 
 def _comment_login(comment):
@@ -196,9 +292,20 @@ def parse_pr_nodes(nodes, bot_login=None):
         return {"prExists": False, "number": None,
                 "reviewDecision": None, "unresolvedThreads": 0,
                 "merged": False, "state": None, "mergedAt": None,
-                "commentTargets": []}
+                "commentTargets": [],
+                "ciState": "none", "ciFailingChecks": [], "ciReviseAttempt": 0}
     threads = (node.get("reviewThreads") or {}).get("nodes", [])
     targets = unaddressed_reviewer_comments(node, bot_login) if bot_login else []
+    # Additive CI fields (ref: structure §Modified Types, plan §1.6-1.7). ciState is
+    # the normalized rollup; ciFailingChecks is empty unless red; ciReviseAttempt is
+    # the EFFECTIVE consecutive-red counter — the parsed trailer forced to 0 whenever
+    # ciState != "red" (the not-red->0 reset). Inert to consumers that don't read them.
+    ci_state = check_rollup_state(node)
+    failing = _failing_checks(node) if ci_state == "red" else []
+    if ci_state == "red":
+        attempt = ci_revise_attempt(_head_commit(node).get("message"))
+    else:
+        attempt = 0
     return {
         "prExists": True,
         "number": node.get("number"),
@@ -208,6 +315,9 @@ def parse_pr_nodes(nodes, bot_login=None):
         "state": node.get("state"),
         "mergedAt": node.get("mergedAt"),
         "commentTargets": targets,
+        "ciState": ci_state,
+        "ciFailingChecks": failing,
+        "ciReviseAttempt": attempt,
     }
 
 

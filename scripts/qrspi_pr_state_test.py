@@ -19,6 +19,8 @@ from qrspi_pr_state import (
     is_stack_fully_merged,
     build_state,
     unaddressed_reviewer_comments,
+    check_rollup_state,
+    ci_revise_attempt,
 )
 
 failures = 0
@@ -57,29 +59,37 @@ check("missing isResolved treated as unresolved",
       unresolved_thread_count([{}, {"isResolved": True}]), 1)
 
 # --- parse_pr_nodes ---------------------------------------------------------
+# Additive CI fields default to none/[]/0 for any node without a statusCheckRollup
+# selection (Slice 1): every legacy parse_pr_nodes expectation carries them inert.
+_CI_DEFAULTS = {"ciState": "none", "ciFailingChecks": [], "ciReviseAttempt": 0}
+
 check("no PR nodes -> prExists False",
       parse_pr_nodes([]),
       {"prExists": False, "number": None, "reviewDecision": None, "unresolvedThreads": 0,
-       "merged": False, "state": None, "mergedAt": None, "commentTargets": []})
+       "merged": False, "state": None, "mergedAt": None, "commentTargets": [],
+       **_CI_DEFAULTS})
 
 check("approved, all threads resolved",
       parse_pr_nodes([{"number": 52, "reviewDecision": "APPROVED", "state": "OPEN",
                        "reviewThreads": {"nodes": [{"isResolved": True}]}}]),
       {"prExists": True, "number": 52, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
-       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": []})
+       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": [],
+       **_CI_DEFAULTS})
 
 check("changes requested with unresolved threads",
       parse_pr_nodes([{"number": 7, "reviewDecision": "CHANGES_REQUESTED", "state": "OPEN",
                        "reviewThreads": {"nodes": [{"isResolved": False},
                                                    {"isResolved": True}]}}]),
       {"prExists": True, "number": 7, "reviewDecision": "CHANGES_REQUESTED", "unresolvedThreads": 1,
-       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": []})
+       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": [],
+       **_CI_DEFAULTS})
 
 check("null reviewDecision normalized to None",
       parse_pr_nodes([{"number": 9, "reviewDecision": None, "state": "OPEN",
                        "reviewThreads": {"nodes": []}}]),
       {"prExists": True, "number": 9, "reviewDecision": None, "unresolvedThreads": 0,
-       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": []})
+       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": [],
+       **_CI_DEFAULTS})
 
 # --- parse_pr_nodes: additive merge fields (Decision 1, Q2, Q7) -------------
 check("merged PR surfaces merged/state/mergedAt",
@@ -88,7 +98,97 @@ check("merged PR surfaces merged/state/mergedAt",
                        "reviewThreads": {"nodes": []}}]),
       {"prExists": True, "number": 60, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
        "merged": True, "state": "MERGED", "mergedAt": "2026-06-08T00:00:00Z",
-       "commentTargets": []})
+       "commentTargets": [], **_CI_DEFAULTS})
+
+# --- check_rollup_state (CiState normalizer, Slice 1 T8) --------------------
+def _rollup_node(state):
+    """A parsed PR node carrying a head commit with a statusCheckRollup of `state`
+    (the commits(last:1) shape). state=None models a null rollup."""
+    rollup = None if state is None else {"state": state}
+    return {"commits": {"nodes": [{"commit": {"statusCheckRollup": rollup}}]}}
+
+
+for _state, _want in [("SUCCESS", "green"), ("FAILURE", "red"), ("ERROR", "red"),
+                      ("PENDING", "pending"), ("EXPECTED", "pending"),
+                      (None, "none")]:
+    check("check_rollup_state %s -> %s" % (_state, _want),
+          check_rollup_state(_rollup_node(_state)), _want)
+
+# Absent commits / rollup selection (e.g. an empty parse, or a not-yet-PR'd slice)
+# -> "none", guarded like unresolved_thread_count.
+check("check_rollup_state no commits selection -> none",
+      check_rollup_state({}), "none")
+check("check_rollup_state None node -> none",
+      check_rollup_state(None), "none")
+check("check_rollup_state unknown state -> none",
+      check_rollup_state(_rollup_node("WAT")), "none")
+
+# --- ci_revise_attempt (trailer parser, Slice 1 T9) -------------------------
+check("ci_revise_attempt present trailer -> int",
+      ci_revise_attempt("Fix the thing\n\nCI-Revise-Attempt: 2\n"), 2)
+check("ci_revise_attempt absent trailer -> 0",
+      ci_revise_attempt("Fix the thing\n\nCo-Authored-By: x <y>\n"), 0)
+check("ci_revise_attempt malformed (non-integer) -> 0",
+      ci_revise_attempt("Fix\n\nCI-Revise-Attempt: notanumber\n"), 0)
+check("ci_revise_attempt empty message -> 0", ci_revise_attempt(""), 0)
+check("ci_revise_attempt None message -> 0", ci_revise_attempt(None), 0)
+check("ci_revise_attempt repeated trailer -> last wins",
+      ci_revise_attempt("CI-Revise-Attempt: 1\nCI-Revise-Attempt: 4\n"), 4)
+
+# --- parse_pr_nodes: CI fields computed from the head commit (Slice 1) -------
+def _ci_pr_node(number, rollup_state, message, contexts=None):
+    """A parsed PR node with a statusCheckRollup + head-commit message, for exercising
+    the populated parse_pr_nodes CI path."""
+    rollup = {"state": rollup_state}
+    if contexts is not None:
+        rollup["contexts"] = {"nodes": contexts}
+    return {"number": number, "reviewDecision": "APPROVED", "state": "OPEN",
+            "reviewThreads": {"nodes": []},
+            "commits": {"nodes": [{"commit": {"message": message,
+                                              "statusCheckRollup": rollup}}]}}
+
+
+# Red rollup: ciState red, trailer parsed through, failing checks surfaced.
+_red = parse_pr_nodes([_ci_pr_node(
+    80, "FAILURE", "Fix\n\nCI-Revise-Attempt: 2\n",
+    contexts=[{"__typename": "CheckRun", "name": "tests", "conclusion": "FAILURE",
+               "detailsUrl": "http://x/1"},
+              {"__typename": "CheckRun", "name": "lint", "conclusion": "SUCCESS",
+               "detailsUrl": "http://x/2"},
+              {"__typename": "StatusContext", "context": "ci/legacy",
+               "state": "ERROR", "targetUrl": "http://x/3"}])])
+check("red rollup -> ciState red", _red["ciState"], "red")
+check("red rollup -> ciReviseAttempt from trailer (2)", _red["ciReviseAttempt"], 2)
+check("red rollup -> only failing checks surfaced (CheckRun + StatusContext)",
+      _red["ciFailingChecks"],
+      [{"name": "tests", "detailsUrl": "http://x/1"},
+       {"name": "ci/legacy", "detailsUrl": "http://x/3"}])
+
+# T10 — not-red->0 reset: a stale CI-Revise-Attempt: 2 trailer on a GREEN rollup
+# yields effective ciReviseAttempt 0 (the counter only counts consecutive RED).
+_green_stale = parse_pr_nodes([_ci_pr_node(
+    81, "SUCCESS", "Fix\n\nCI-Revise-Attempt: 2\n")])
+check("not-red->0 reset: green rollup with stale trailer -> ciReviseAttempt 0",
+      _green_stale["ciReviseAttempt"], 0)
+check("not-red->0 reset: green rollup -> ciState green", _green_stale["ciState"], "green")
+check("not-red->0 reset: green rollup -> ciFailingChecks empty",
+      _green_stale["ciFailingChecks"], [])
+
+# Pending rollup similarly forces attempt 0 and no failing checks.
+_pending = parse_pr_nodes([_ci_pr_node(
+    82, "PENDING", "Fix\n\nCI-Revise-Attempt: 5\n")])
+check("pending rollup -> ciState pending", _pending["ciState"], "pending")
+check("pending rollup -> ciReviseAttempt 0 (not red)", _pending["ciReviseAttempt"], 0)
+
+# T11 — additive-shape guard: both the empty-default and populated dicts carry the
+# three CI keys.
+for _label, _shape in [("empty-default", parse_pr_nodes([])),
+                       ("populated", parse_pr_nodes([{"number": 90,
+                            "reviewDecision": "APPROVED", "state": "OPEN",
+                            "reviewThreads": {"nodes": []}}]))]:
+    for _k in ("ciState", "ciFailingChecks", "ciReviseAttempt"):
+        check("%s dict carries %s key" % (_label, _k), _k in _shape, True)
+
 
 # --- select_pr (named selection primitive: advancement vs merge/land) -------
 _multi = [{"number": 100, "merged": False, "reviewDecision": "APPROVED",
@@ -132,7 +232,8 @@ check("select_pr active single-PR identity (same object)",
 check("parse_pr_nodes single-PR shape unchanged (commentTargets [] without bot_login)",
       parse_pr_nodes([_single]),
       {"prExists": True, "number": 52, "reviewDecision": "APPROVED", "unresolvedThreads": 0,
-       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": []})
+       "merged": False, "state": "OPEN", "mergedAt": None, "commentTargets": [],
+       **_CI_DEFAULTS})
 
 check("select_pr unknown prefer raises ValueError",
       _raises(lambda: select_pr(_multi, "bogus"), ValueError), True)
