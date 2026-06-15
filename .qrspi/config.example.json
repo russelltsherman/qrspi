@@ -2,6 +2,7 @@
   "$comment": "Optional QRSPI local config — copy to .qrspi/config.json (gitignored) to use it. Every '$comment' key is documentation only and ignored by the harness; each block below carries its own. Omit any block to take its defaults; with no config file at all, the defaults described per-block apply.",
   "$comment_linear": "LINEAR — 'linearTeam' is the Linear team /qrspi-ticket files new issues under (if unset, the skill discovers/asks). 'linearProject' is the Linear project, defaulting to 'QRSPI'; it scopes BOTH ticket creation AND batch runs (qrspi-batch sweeps only this project's assigned tickets by default; pass {\"project\":\"...\"} to override for one run, or {\"allProjects\":true} to sweep every project).",
   "$comment_reviewers": "REVIEWERS — by default (no config file) the qrspi-batch finalizer requests review from '@me' (the gh-authenticated user running the harness), so a fresh clone needs zero setup and ships no hard-coded username. 'reviewers' are GitHub logins (the literal '@me' expands to the authenticated user; set [] to request no reviewer). 'teamReviewers' are Graphite/GitHub team slugs ('org/team' or 'team').",
+  "$comment_ci": "CI-GATED REVISION — 'ciReviseCap' (flat top-level key, positive integer, default 3) caps the consecutive autonomous CI-failure revises qrspi-batch will attempt on a red frontier PR before parking it as 'wait' for manual attention. A red frontier under the cap is auto-revised (the worker reads the failing-check output, fixes the code, amends, re-pushes); at/above the cap it stops. Any non-positive-integer value (0, negative, non-integer) falls back to 3. Omit the key to take the default.",
   "critics": {
     "$comment": "Per-phase critic config, resolved by scripts/qrspi_critics_config.py (the tested resolver). Every phase honors a uniform 'enabled' flag that defaults OFF — critics are opt-in across the board (questions, research, design, structure, plan, implementation, and implementation's coherence sub-pass). A phase runs its critic ONLY when its block sets 'enabled': true; only an explicit boolean overrides the default (a non-boolean value falls back to OFF). This example mirrors the defaults — every phase 'enabled': false — so as written it changes nothing; flip a phase's 'enabled' to true to opt it in. Omit the whole 'critics' block, or any phase, to take the same defaults. Each phase block below documents its own knobs.",
     "design": {
@@ -53,6 +54,7 @@
       "maxRounds": 2
     }
   },
+  "ciReviseCap": 3,
   "linearProject": "QRSPI",
   "linearTeam": "Your Linear Team",
   "reviewers": [

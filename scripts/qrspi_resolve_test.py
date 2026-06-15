@@ -20,13 +20,19 @@ from qrspi_resolve import (
     slice_branches,
     build_envelope,
     comment_targets_of,
+    ci_failing_of,
+    ci_failing_checks_of,
+    coerce_cap,
+    load_ci_revise_cap,
     select_source,
     references_me,
     resolve_reviewers,
     ARTIFACTS,
+    CI_REVISE_CAP_DEFAULT,
     ENGINE_ROOT,
     REPO_ROOT,
 )
+import qrspi_config
 import qrspi_paths
 
 failures = 0
@@ -316,6 +322,93 @@ check("team reviewers from config",
       (["alice"], ["org/eng", "org/sec"]))
 check("config opt-out yields no reviewers",
       resolve_reviewers({"reviewers": []}, "carol"), ([], []))
+
+
+# --- coerce_cap (config ciReviseCap -> positive int, default 3) -------------------
+# RUS-81 Slice 3 (T21/T29a): the configurable CI-revise cap. A positive integer is
+# honoured; absent / non-positive / non-integer / bool falls back to the default 3.
+check("default constant is 3", CI_REVISE_CAP_DEFAULT, 3)
+check("coerce_cap honours a positive int", coerce_cap(5), 5)
+check("coerce_cap keeps 1", coerce_cap(1), 1)
+check("coerce_cap None -> default", coerce_cap(None), 3)
+check("coerce_cap zero -> default", coerce_cap(0), 3)
+check("coerce_cap negative -> default", coerce_cap(-2), 3)
+check("coerce_cap float -> default", coerce_cap(2.5), 3)
+check("coerce_cap string -> default", coerce_cap("4"), 3)
+check("coerce_cap True (bool) -> default, not 1", coerce_cap(True), 3)
+check("coerce_cap False (bool) -> default", coerce_cap(False), 3)
+
+# --- load_ci_revise_cap (reads the flat ciReviseCap from config.json) -------------
+# Stub qrspi_config.read_config so the loader is exercised without touching disk: the
+# cap is read from the SINGLE flat top-level `ciReviseCap` key (no dot-path), coerced.
+_real_read_config = qrspi_config.read_config
+try:
+    qrspi_config.read_config = lambda repo_root=None: {"ciReviseCap": 7}
+    check("load_ci_revise_cap reads the configured positive cap",
+          load_ci_revise_cap("/x"), 7)
+    qrspi_config.read_config = lambda repo_root=None: {}
+    check("load_ci_revise_cap absent key -> default 3", load_ci_revise_cap("/x"), 3)
+    qrspi_config.read_config = lambda repo_root=None: {"ciReviseCap": 0}
+    check("load_ci_revise_cap non-positive -> default 3", load_ci_revise_cap("/x"), 3)
+    qrspi_config.read_config = lambda repo_root=None: {"ciReviseCap": "nope"}
+    check("load_ci_revise_cap non-int -> default 3", load_ci_revise_cap("/x"), 3)
+finally:
+    qrspi_config.read_config = _real_read_config
+
+# --- ci_failing_of / ci_failing_checks_of (top-level envelope re-emit) ------------
+# RUS-81 Slice 3 (T22/T29b): the helpers mirror comment_targets_of, surfacing the
+# frontier CI signal at the envelope top level from the decision / phase shape.
+check("ci_failing_of None -> False", ci_failing_of(None), False)
+check("ci_failing_of non-dict -> False", ci_failing_of("oops"), False)
+check("ci_failing_of decision without key -> False",
+      ci_failing_of({"action": "wait"}), False)
+check("ci_failing_of False flag -> False",
+      ci_failing_of({"action": "run_design", "ciFailing": False}), False)
+check("ci_failing_of True flag -> True",
+      ci_failing_of({"action": "revise", "ciFailing": True}), True)
+
+# ci_failing_checks_of: [] unless the decision is CI-driven; for a CI decision it
+# re-aggregates the decision phase's gathered ciFailingChecks from `phases`.
+check("ci_failing_checks_of non-CI decision -> []",
+      ci_failing_checks_of({"action": "run_design", "ciFailing": False, "phase": "design"},
+                           {"design": {"ciFailingChecks": [{"name": "ci"}]}}), [])
+check("ci_failing_checks_of None decision -> []",
+      ci_failing_checks_of(None, {}), [])
+check("ci_failing_checks_of CI decision, None phases -> []",
+      ci_failing_checks_of({"ciFailing": True, "phase": "design"}, None), [])
+_design_checks = [{"name": "build", "detailsUrl": "https://x/1"}]
+check("ci_failing_checks_of design CI decision surfaces the phase's checks",
+      ci_failing_checks_of({"action": "revise", "ciFailing": True, "phase": "design"},
+                           {"design": {"ciFailingChecks": _design_checks}}),
+      _design_checks)
+check("ci_failing_checks_of missing phase data -> []",
+      ci_failing_checks_of({"ciFailing": True, "phase": "design"}, {}), [])
+# implementation aggregates per-slice failing-check lists (stack reviewed as a whole).
+_s1 = [{"name": "lint", "detailsUrl": "u1"}]
+_s2 = [{"name": "test", "detailsUrl": "u2"}]
+check("ci_failing_checks_of implementation concatenates per-slice checks",
+      ci_failing_checks_of({"ciFailing": True, "phase": "implementation"},
+                           {"implementation": {"slices": [
+                               {"ciFailingChecks": _s1}, {"ciFailingChecks": _s2},
+                               {"ciFailingChecks": []}]}}),
+      _s1 + _s2)
+
+# --- build_envelope top-level CI re-emit (additive; default False/[]) -------------
+check("default envelope ciFailing is False", ok_env["ciFailing"], False)
+check("default envelope ciFailingChecks is empty list", ok_env["ciFailingChecks"], [])
+check("err envelope ciFailing default False", err_env["ciFailing"], False)
+check("err envelope ciFailingChecks default empty", err_env["ciFailingChecks"], [])
+_ci_dec = {"action": "revise", "phase": "design", "ciFailing": True,
+           "changeRequested": False, "commentTargets": [], "reason": "red CI"}
+_ci_phases = {"design": {"ciFailingChecks": _design_checks}}
+ci_env = build_envelope("/wt/RUS-1", _ci_dec, _ex, ok=True, phases=_ci_phases)
+check("envelope re-emits top-level ciFailing from a CI decision",
+      ci_env["ciFailing"], True)
+check("envelope re-emits top-level ciFailingChecks from the phase shape",
+      ci_env["ciFailingChecks"], _design_checks)
+# additive: the CI re-emit leaves pre-existing fields untouched.
+check("CI re-emit leaves decision untouched", ci_env["decision"], _ci_dec)
+check("CI re-emit leaves commentTargets default untouched", ci_env["commentTargets"], [])
 
 
 def run():

@@ -52,6 +52,7 @@ sys.path.insert(0, ENGINE_ROOT)
 from qrspi_pr_state import build_state, branch_set, slice_numbers  # noqa: E402
 from qrspi_resolve_state import resolve  # noqa: E402
 import qrspi_paths  # noqa: E402
+import qrspi_config  # noqa: E402
 
 REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
 
@@ -187,9 +188,50 @@ def comment_targets_of(decision):
     return targets if isinstance(targets, list) else []
 
 
+def ci_failing_of(decision):
+    """The frontier-PR CI-failure flag to surface at the TOP LEVEL of the envelope.
+
+    Mirrors `comment_targets_of`: the resolver already folds the frontier's CI signal
+    into `decision["ciFailing"]` (True only on a `revise`/`wait` decision driven by a
+    red frontier PR). We re-emit it at the top level so the consumer (qrspi-batch
+    doRevise) reads `r.ciFailing` directly without reaching into `decision`. Pure: a
+    None/non-dict decision (e.g. the ok:false error envelope) yields False."""
+    if not isinstance(decision, dict):
+        return False
+    return bool(decision.get("ciFailing", False))
+
+
+def ci_failing_checks_of(decision, phases):
+    """The failing-check `{name, detailsUrl}` entries for the decision's phase, to
+    surface at the TOP LEVEL of the envelope (mirroring `comment_targets_of`).
+
+    The gather (qrspi_pr_state) attaches `ciFailingChecks` to every per-PR shape; the
+    resolver carries those through inside `phases` but the fixed-key `decision` dict
+    cannot. We re-aggregate the decision phase's failing checks here so the doRevise
+    consumer iterates `r.ciFailingChecks` directly. Only emitted when the decision is a
+    CI-driven one (`ciFailing` True); [] otherwise. For implementation, the per-slice
+    failing-check lists are concatenated (the stack revises as a whole, mirroring how
+    qrspi_resolve_state.ci_state aggregates across slices). Pure: a None/non-dict
+    decision, a non-CI decision, or absent phase data yields []."""
+    if not ci_failing_of(decision):
+        return []
+    if not isinstance(phases, dict):
+        return []
+    name = decision.get("phase")
+    if name == "implementation":
+        out = []
+        for s in phases.get("implementation", {}).get("slices", []) or []:
+            checks = s.get("ciFailingChecks")
+            if isinstance(checks, list):
+                out.extend(checks)
+        return out
+    checks = phases.get(name, {}).get("ciFailingChecks") if name else None
+    return checks if isinstance(checks, list) else []
+
+
 def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
                    reviewers="", team_reviewers="", ticket_content_path="",
-                   tip=None, slices=None, repo_root=None):
+                   tip=None, slices=None, repo_root=None, phases=None):
     """Assemble the JSON envelope the qrspi-batch resolveTicket() step consumes.
     Pure; `repoRoot` is the resolved host checkout root — `repo_root` when supplied
     (the runtime root from resolve_repo_root, honouring --repo-root), else the
@@ -203,6 +245,13 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
     targets the resolver folded into `decision`) so the unified `revise` consumer
     iterates `r.commentTargets` without reaching into `decision`. It is [] for every
     non-`revise` decision (additive; unknown to old consumers, which ignore it).
+
+    `ciFailing` (bool) and `ciFailingChecks` (list of `{name, detailsUrl}`) are
+    re-emitted at the TOP LEVEL the same way (via ci_failing_of / ci_failing_checks_of):
+    `ciFailing` mirrors the resolver's frontier CI-failure flag folded into `decision`,
+    and `ciFailingChecks` re-aggregates the decision phase's failing checks from
+    `phases` (the fixed-key `decision` cannot carry them). Both are inert defaults
+    (`False` / `[]`) for any non-CI decision; the doRevise consumer reads them directly.
 
     `tip`/`slices` carry the stack's tip branch (`<ticket>/slice-<maxN>`, or the
     plan/design fallback from pick_tip(), `None` when the ticket has no branch) and
@@ -226,6 +275,8 @@ def build_envelope(worktree_dir, decision, existing, ok=True, error=None,
         "existing": existing,
         "decision": decision,
         "commentTargets": comment_targets_of(decision),
+        "ciFailing": ci_failing_of(decision),
+        "ciFailingChecks": ci_failing_checks_of(decision, phases),
         "reviewers": reviewers,
         "teamReviewers": team_reviewers,
         "ticketContentPath": ticket_content_path,
@@ -292,6 +343,30 @@ def load_reviewers(repo_root=REPO_ROOT):
     me_login = _gh_authenticated_login(repo_root) if references_me(config) else None
     revs, teams = resolve_reviewers(config, me_login)
     return ",".join(revs), ",".join(teams)
+
+
+CI_REVISE_CAP_DEFAULT = 3
+
+
+def coerce_cap(value):
+    """Coerce a config `ciReviseCap` value into a positive int, falling back to the
+    documented default (3). Anything that is not a positive integer — absent (None),
+    a non-positive int, a bool, a float, a string, etc. — yields the default. Pure, so
+    it is unit-testable without touching disk (ref: structure Contracts Config read,
+    plan T21: default 3, non-positive-integer -> 3)."""
+    # bool is an int subclass; reject it explicitly so True/False never reads as 1/0.
+    if isinstance(value, bool) or not isinstance(value, int):
+        return CI_REVISE_CAP_DEFAULT
+    return value if value > 0 else CI_REVISE_CAP_DEFAULT
+
+
+def load_ci_revise_cap(repo_root=REPO_ROOT):
+    """Resolve the `ciReviseCap` from <repo>/.qrspi/config.json (a SINGLE flat
+    top-level key — the reader handles no dot-path; ref: project memory), coerced to a
+    positive int with the default-3 / non-positive->3 fallback. Best-effort: a missing
+    or invalid config file reads {} and yields the default, never raising."""
+    config = qrspi_config.read_config(repo_root)
+    return coerce_cap(config.get("ciReviseCap"))
 
 
 def _existing_branches(ticket, repo_root=REPO_ROOT):
@@ -386,7 +461,8 @@ def main():
         state = build_state(owner, repo, args.ticket, args.assigned, args.linear_status,
                             trunk=args.trunk, blocked_open=args.blocked_open,
                             blocked_by=blocked_by)
-        decision = resolve(state)
+        ci_revise_cap = load_ci_revise_cap(repo_root)
+        decision = resolve(state, ci_revise_cap=ci_revise_cap)
         worktree = setup_worktree(args.ticket, trunk=args.trunk,
                                   create_design=(decision["action"] == "run_design"),
                                   repo_root=repo_root)
@@ -398,7 +474,8 @@ def main():
                              ticket_content_path=ticket_content_path,
                              tip=pick_tip(branches, args.ticket),
                              slices=slice_branches(branches, args.ticket),
-                             repo_root=repo_root)
+                             repo_root=repo_root,
+                             phases=state.get("phases", {}))
     except Exception as exc:  # noqa: BLE001 - any failure is reported, not retried
         # Best-effort host root for the error envelope: prefer the override (unvalidated
         # here — we are already in the error path), else the module default.

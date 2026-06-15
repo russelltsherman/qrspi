@@ -110,6 +110,10 @@ class WellFormedAcceptance(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["decision"]["action"], "run_design")
         self.assertEqual(result["worktreeDir"], "/repo/.worktrees/RUS-1")
+        # RUS-81 Slice 3: the consumer reads the additive top-level CI re-emit keys
+        # (False/[] for this non-CI run_design envelope).
+        self.assertEqual(result["ciFailing"], False)
+        self.assertEqual(result["ciFailingChecks"], [])
 
     def test_resolve_prose_wrapped_accepted(self):
         # The brace-depth extractor locates the balanced object inside prose.
