@@ -30,3 +30,38 @@
 - Slice 2 still needs to gitignore `.qrspi/<id>/critic-metrics.jsonl` (structure.md Slice 2 verification item) — NOT done in Slice 1.
 
 ---
+
+## Session 2 — Slice 2
+
+**Timestamp:** 2026-06-15T02:36:00Z
+**Tasks completed:** T8, T9, T10, T11, T12, T13 (T13 to the extent runnable in the implement-agent sandbox — see Tests)
+**Tasks failed:** none
+
+**Tests:**
+
+- `python3 scripts/run_tests.py metrics` → 2 test files passed (`qrspi_critic_metrics_test.py`, `qrspi_metrics_append_test.py`), 0 failed — confirms the Slice-1 reducer is unbroken after adding its CLI shim
+- `python3 scripts/run_tests.py` → 33 passed, 0 failed (full regression suite green)
+- `node --check .claude/workflows/qrspi-batch.js` → JS-SYNTAX-OK (no parse errors after the wiring edits)
+- Integration smoke test (the EXACT chained worker command, run from a temp main-checkout): reducer emits the bare `CriticStepMetrics` (Python-derived `findingsCount`), appender wraps it as the `CriticMetricsLedgerLine` envelope (`ticketId` + `timestamp`) and appends; a second call appends (no overwrite) → 2 lines; each ledger line is the envelope-wrapped record, NOT the bare record
+- `git check-ignore -v .worktrees/RUS-77/.qrspi/RUS-77/critic-metrics.jsonl` → matches `.gitignore:3:.worktrees/` (ledger already gitignored; no `.gitignore` edit needed — see deviations)
+- NOT runnable in this sandbox: the live critics-ENABLED vs critics-DISABLED end-to-end design run (T13 checkpoint) — it requires live agents/Linear. Verified instead by code inspection (disabled path: `criticConfig` falsy ⇒ loops un-dispatched in `runPhase` ⇒ no `recordCriticMetrics` call ⇒ no ledger write; `doDesign` surfaces zero records ⇒ `criticMetrics` key OMITTED ⇒ byte-for-byte-unchanged result object) + the integration smoke test of the enabled-path shell-out.
+
+**Deviations from structure.md:**
+
+- **Added a thin stdin→stdout CLI shim to the Slice-1 file `scripts/qrspi_critic_metrics.py`** (a `main()`/`__main__` over the pure `build_record`, mirroring `qrspi_critic_synthesize.py`). Structure.md/plan.md step 9 say "Build the record via the reducer (`qrspi_critic_metrics.py`)", and the impl-log Slice-1 note mandates `findingsCount` be derived in Python (not JS) — but Slice 1 shipped `build_record` with NO callable CLI, so the JS worker had no way to invoke the reducer. The shim is a PURE ADDITION (it does not touch `build_record`); it reads the verdicts JSON array on stdin and takes `--terminal-action`/`--phase`, emitting the bare `CriticStepMetrics`. This is the only faithful way to satisfy both "reduce via the reducer" and "count derived in Python". No type/signature of `build_record` changed.
+- **`tokensIn`/`tokensOut` ship unmeasured** (OQ2, already acknowledged at design/structure level): the live JS path supplies no `usage`, so the CLI shim does NOT expose a usage flag and the cost fields stay absent. No behavioral deviation — matches the design.
+
+**Deviations from plan.md:**
+
+- **T8 (gitignore): NO `.gitignore` edit made**, per plan §8's own review finding (the worktree.md T8 row still says "add `**/.qrspi/*/critic-metrics.jsonl`", but plan §8 supersedes it as redundant). The ledger lands under `.worktrees/<id>/…`, already ignored by `.gitignore:3:.worktrees/` — verified via `git check-ignore`. Adding a `**/.qrspi/*/critic-metrics.jsonl` rule would be dead, so it was deliberately NOT added. The plan is the authority here over the stale worktree.md row.
+- **Disabled-path result shape:** plan §12 explicitly requires the `criticMetrics` key be OMITTED on the fully-disabled path ("doDesign adds no `criticMetrics` key … byte-for-byte-unchanged result object"). Structure.md Modified Types lists `criticMetrics` as an added field, which could read as always-present. I followed plan §12 (the more specific authority for the disabled-path guarantee): `doDesign` adds the key ONLY when ≥1 record was surfaced; the disabled path returns the unchanged object.
+
+**Notes for next session:**
+
+- Slice 2 is the LAST instrumentation slice; Slice 3 (Session 3) is an independent tested Python config core + JS mirror — no Slice 2 internals are needed.
+- Wiring summary for anyone touching the critic loops later: each loop (`runCriticLoop`, `runCriticPanelLoop`) now keeps a `metricRounds[]` accumulator of raw `{lens, pass, findings}` verdicts (single critic ⇒ `lens:null`; panel ⇒ one entry per lens per round) and, at EVERY return site (converged / cap_reached / exhausted / aborted — including all `ok:false` aborts), calls `recordCriticMetrics(id, name, metricRounds, terminalAction)` and returns the produced record on the envelope as `{ …, metrics }`. NEVER pass `revise` (mid-loop; the reducer rejects it).
+- `recordCriticMetrics(id, phase, verdicts, terminalAction)` is the new JS helper (defined right after `synthesizeVerdicts`). It runs ONE chained worker command at main-repo-root cwd via `engineCmd('scripts/…')` (same convention as `synthesizeVerdicts`/`criticDecision`, because `r`/`repoRoot` is NOT in scope in the loops): pipe verdicts → `qrspi_critic_metrics.py --terminal-action <a> --phase <p>` → tee to a temp file → `qrspi_metrics_append.py --ticket <id> --record "$(cat tmp)"` → re-`cat` the record. The reducer record is the return value (for the result fold); the appender is the side-effecting durability gate (non-zero exit fails the chain ⇒ null ⇒ logged step-instrumentation failure). It is guarded by `CRITIC_METRICS_SCHEMA`.
+- `runPhase` surfaces the record onto `criticConfig.criticMetrics` (same back-channel pattern as `criticConfig.residualFindings`/`criticSummary`), so it stays inside the existing `if (criticConfig)` guard and keeps its boolean return contract. `doDesign` collects `questionsCritic/researchCritic/designCritic .criticMetrics` (filter Boolean) into the result's `criticMetrics` array.
+- The reducer CLI shim added here means `qrspi_critic_metrics.py` is now BOTH an importable pure module AND a CLI — if a later slice needs to extend the record, change `build_record` (pure, unit-tested) and the shim just re-exposes it.
+
+---
