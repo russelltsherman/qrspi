@@ -612,7 +612,10 @@ const DEFAULT_DESIGN_FRAMINGS = ['mvp-first', 'risk-first', 'extensibility-first
 const DEFAULT_CRITIC_PHASES = {
   questions: { enabled: false, maxRounds: 2 },
   research: { enabled: false, maxRounds: 2 },
-  design: { enabled: false, maxRounds: 2, lenses: DEFAULT_DESIGN_LENSES, candidates: 1 },
+  // RUS-77 cost-lever gates all default OFF/absent (lockstep with resolve_design):
+  // `digest`/`gateBehindEdge` are nested {enabled:false} blocks; `lensModel` is ABSENT
+  // (the key is omitted, not null) until config supplies a non-empty model string.
+  design: { enabled: false, maxRounds: 2, lenses: DEFAULT_DESIGN_LENSES, candidates: 1, digest: { enabled: false }, gateBehindEdge: { enabled: false } },
   structure: { enabled: false, maxRounds: 2 },
   plan: { enabled: false, maxRounds: 2 },
   implementation: { enabled: false, maxRounds: 2, coherence: { enabled: false, maxRounds: 2 } },

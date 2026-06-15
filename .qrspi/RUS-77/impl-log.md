@@ -65,3 +65,36 @@
 - The reducer CLI shim added here means `qrspi_critic_metrics.py` is now BOTH an importable pure module AND a CLI — if a later slice needs to extend the record, change `build_record` (pure, unit-tested) and the shim just re-exposes it.
 
 ---
+
+## Session 3 — Slice 3
+
+**Timestamp:** 2026-06-15T02:40:33Z
+**Tasks completed:** T14, T15, T16, T17, T18
+**Tasks failed:** none
+
+**Tests:**
+
+- `python3 scripts/run_tests.py critics_config` → 1 test file passed (`qrspi_critics_config_test.py`), 0 failed — all default-OFF/absent assertions, per-lever parse cases, and the JS-mirror parity test pass
+- `python3 -m unittest scripts.qrspi_critics_config_test.JsMirrorParityTests -v` → 2 passed (confirms the parity test is non-vacuous; it actually parses `DEFAULT_CRITIC_PHASES` out of `qrspi-batch.js` and compares field-for-field — verified the parsed JS design block now carries `digest:{enabled:false}` + `gateBehindEdge:{enabled:false}` and NO `lensModel` key)
+- `node --check .claude/workflows/qrspi-batch.js` → JS-SYNTAX-OK (mirror edit parses)
+- `python3 -c "import json; json.load(open('.qrspi/config.example.json'))"` → VALID (example JSON still well-formed after documenting the three knobs)
+- `python3 scripts/run_tests.py` → 33 passed, 0 failed (full regression suite green; no Slice-1/2 breakage)
+
+**Deviations from structure.md:**
+
+- **`lensModel` ships ABSENT (key omitted), not `None`.** structure.md Modified Types says `lensModel?: str` "defaulting OFF / absent". I resolved "absent" literally: when config supplies no (or an empty/whitespace/non-string) `lensModel`, the `resolve_design` result OMITS the key entirely rather than emitting `lensModel: None`. This keeps the default design block byte-identical to its pre-RUS-77 shape plus only the two nested gate blocks, and the JS `DEFAULT_CRITIC_PHASES.design` mirror likewise omits the key — so the lockstep parity test compares equal. (The `?` in `lensModel?: str` denotes optional/absent, so this matches the contract.)
+
+**Deviations from plan.md:**
+
+- none — steps 14–17 implemented as written; step 18 checkpoint passes.
+- Note on step 15(e) parity mechanism: the plan left the parity-assertion form open ("e.g. load/compare the expected default dict literal kept in sync with step 16"). I implemented it as a `JsMirrorParityTests` class that parses the live `DEFAULT_CRITIC_PHASES` object literal out of `.claude/workflows/qrspi-batch.js` by regex (the JS file is harness-coupled / not importable, per the codebase convention note) and compares it field-for-field against `default_phases()`. This is a stronger lockstep guard than a hand-maintained dict literal because it reads the ACTUAL JS source, so a future drift in either side fails the test. The parser resolves the `DEFAULT_DESIGN_LENSES` reference, strips `//` comment lines, quotes bare keys, and drops trailing commas before `json.loads`.
+
+**Notes for next session:**
+
+- Slice 3 is config-only: `resolve_design(config)` now returns the extended `DesignCriticConfig` with `digest:{enabled}`, `gateBehindEdge:{enabled}` (both default `{"enabled": False}`) and an OPTIONAL `lensModel` (string, key absent unless config supplies a non-empty string). No wiring consumes these yet — Slice 4 (T19–T32) is where the levers actually do work.
+- The uniform `enabled` vocabulary is reused: `digest`/`gateBehindEdge` inner `enabled` go through `resolve_enabled(cfg, False)`, so only an explicit boolean flips them; a non-dict outer value or non-bool inner value falls back to the default-OFF block.
+- For Slice 4, read the gates off the resolved design config as: `criticConfig.digest.enabled`, `criticConfig.gateBehindEdge.enabled`, and `criticConfig.lensModel` (test for key presence — it may be absent). The JS `DEFAULT_CRITIC_PHASES.design` fallback guarantees `digest`/`gateBehindEdge` blocks are always present on a default-config read; `lensModel` is NOT in the fallback, so Slice 4 must treat it as optional (`criticConfig.lensModel` may be `undefined`).
+- LOCKSTEP CONTRACT: any future change to `resolve_design`'s default shape MUST be mirrored in `DEFAULT_CRITIC_PHASES` in `qrspi-batch.js`, or `JsMirrorParityTests` fails. Keep the Python default and the JS mirror reverted/changed together.
+- `.qrspi/config.example.json` documents the three knobs under `critics.design` via a `$comment_cost_levers` key + representative default-OFF values (`digest.enabled:false`, `gateBehindEdge.enabled:false`; `lensModel` is described in the comment but NOT shown as a key, since its default is absent).
+
+---

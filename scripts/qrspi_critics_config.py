@@ -115,9 +115,20 @@ def resolve_edge_phase(cfg):
 def resolve_design(cfg, warnings):
     """Resolve the design-critic PANEL phase. Default OFF (opt-in).
 
-    Returns {enabled, maxRounds, lenses, candidates}. Unknown lenses are dropped (warned);
-    an all-unknown/empty set falls back to the default four. `candidates` (N-select) is 1
-    (OFF) unless a finite number > 1, then clamped to [2, len(framings)] (clamp-down warned).
+    Returns {enabled, maxRounds, lenses, candidates, digest, lensModel?, gateBehindEdge}.
+    Unknown lenses are dropped (warned); an all-unknown/empty set falls back to the default
+    four. `candidates` (N-select) is 1 (OFF) unless a finite number > 1, then clamped to
+    [2, len(framings)] (clamp-down warned).
+
+    The three RUS-77 AC-COST cost-lever gates all default OFF / absent so the default
+    resolution preserves current behavior (ref: design.md §Delta Decision 3; OQ3 RESOLVED
+    keeps `gateBehindEdge` default OFF):
+      - `digest: {enabled: bool}`     — shared research digest (default {"enabled": False})
+      - `lensModel: str`              — per-lens model override (default ABSENT — the key is
+                                        omitted entirely, not None, when not configured)
+      - `gateBehindEdge: {enabled}`   — gate the panel behind an edge-critic pass
+                                        (default {"enabled": False})
+
     `warnings` is appended to in place so the CLI can surface what JS used to `log()`."""
     cfg = cfg if isinstance(cfg, dict) else {}
     enabled = resolve_enabled(cfg, False)
@@ -152,7 +163,33 @@ def resolve_design(cfg, warnings):
                 f"(max framings: [{', '.join(DEFAULT_DESIGN_FRAMINGS)}])"
             )
 
-    return {"enabled": enabled, "maxRounds": max_rounds, "lenses": lenses, "candidates": candidates}
+    # --- RUS-77 cost-lever gates (all default OFF / absent) -----------------
+    # digest: nested {enabled} block, default {"enabled": False}. Only an explicit
+    # boolean flips it (same uniform vocabulary as every other enabled flag).
+    digest_cfg = cfg.get("digest") if isinstance(cfg.get("digest"), dict) else {}
+    digest = {"enabled": resolve_enabled(digest_cfg, False)}
+
+    # gateBehindEdge: nested {enabled} block, default {"enabled": False}.
+    gate_cfg = cfg.get("gateBehindEdge") if isinstance(cfg.get("gateBehindEdge"), dict) else {}
+    gate_behind_edge = {"enabled": resolve_enabled(gate_cfg, False)}
+
+    result = {
+        "enabled": enabled,
+        "maxRounds": max_rounds,
+        "lenses": lenses,
+        "candidates": candidates,
+        "digest": digest,
+        "gateBehindEdge": gate_behind_edge,
+    }
+
+    # lensModel: optional model-name override. The key is OMITTED entirely (not None)
+    # unless config supplies a non-empty string, so the default resolution is
+    # byte-identical to the pre-RUS-77 shape plus the two nested gate blocks.
+    lens_model = cfg.get("lensModel")
+    if isinstance(lens_model, str) and lens_model.strip():
+        result["lensModel"] = lens_model
+
+    return result
 
 
 def resolve_implementation(cfg):

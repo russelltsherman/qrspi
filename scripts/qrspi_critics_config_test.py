@@ -108,8 +108,13 @@ class ResolveDesignTests(unittest.TestCase):
                 "maxRounds": DEFAULT_MAX_ROUNDS,
                 "lenses": DEFAULT_DESIGN_LENSES,
                 "candidates": 1,
+                # RUS-77 cost-lever gates all default OFF/absent.
+                "digest": {"enabled": False},
+                "gateBehindEdge": {"enabled": False},
             },
         )
+        # lensModel key is OMITTED entirely (absent, not None) by default.
+        self.assertNotIn("lensModel", out)
         self.assertEqual(warnings, [])
 
     def test_enabled_true_honored(self):
@@ -163,6 +168,108 @@ class ResolveDesignTests(unittest.TestCase):
 
     def test_candidates_non_finite_ignored(self):
         self.assertEqual(self._resolve({"candidates": math.inf})[0]["candidates"], 1)
+
+    # --- RUS-77 cost-lever gates ------------------------------------------
+
+    def test_digest_default_off(self):
+        out, _ = self._resolve({})
+        self.assertEqual(out["digest"], {"enabled": False})
+
+    def test_digest_enabled_true_parses(self):
+        out, _ = self._resolve({"digest": {"enabled": True}})
+        self.assertEqual(out["digest"], {"enabled": True})
+
+    def test_digest_non_dict_falls_back_off(self):
+        # A non-dict digest value (junk/string/null) resolves to the default-OFF block.
+        self.assertEqual(self._resolve({"digest": "yes"})[0]["digest"], {"enabled": False})
+        self.assertEqual(self._resolve({"digest": True})[0]["digest"], {"enabled": False})
+
+    def test_digest_non_bool_enabled_falls_back_off(self):
+        # Uniform enabled vocabulary — a non-bool inner enabled falls to default OFF.
+        self.assertEqual(self._resolve({"digest": {"enabled": 1}})[0]["digest"], {"enabled": False})
+
+    def test_lens_model_absent_by_default(self):
+        self.assertNotIn("lensModel", self._resolve({})[0])
+
+    def test_lens_model_string_parses(self):
+        out, _ = self._resolve({"lensModel": "claude-haiku"})
+        self.assertEqual(out["lensModel"], "claude-haiku")
+
+    def test_lens_model_empty_or_blank_omitted(self):
+        # Empty/whitespace-only model strings leave the key absent (treated as unset).
+        self.assertNotIn("lensModel", self._resolve({"lensModel": ""})[0])
+        self.assertNotIn("lensModel", self._resolve({"lensModel": "   "})[0])
+
+    def test_lens_model_non_string_omitted(self):
+        self.assertNotIn("lensModel", self._resolve({"lensModel": 7})[0])
+        self.assertNotIn("lensModel", self._resolve({"lensModel": True})[0])
+        self.assertNotIn("lensModel", self._resolve({"lensModel": None})[0])
+
+    def test_gate_behind_edge_default_off(self):
+        out, _ = self._resolve({})
+        self.assertEqual(out["gateBehindEdge"], {"enabled": False})
+
+    def test_gate_behind_edge_enabled_true_parses(self):
+        out, _ = self._resolve({"gateBehindEdge": {"enabled": True}})
+        self.assertEqual(out["gateBehindEdge"], {"enabled": True})
+
+    def test_gate_behind_edge_non_dict_falls_back_off(self):
+        self.assertEqual(
+            self._resolve({"gateBehindEdge": "yes"})[0]["gateBehindEdge"],
+            {"enabled": False},
+        )
+
+    def test_all_three_levers_on_parse_together(self):
+        out, warnings = self._resolve({
+            "digest": {"enabled": True},
+            "lensModel": "claude-haiku",
+            "gateBehindEdge": {"enabled": True},
+        })
+        self.assertEqual(out["digest"], {"enabled": True})
+        self.assertEqual(out["lensModel"], "claude-haiku")
+        self.assertEqual(out["gateBehindEdge"], {"enabled": True})
+        self.assertEqual(warnings, [])
+
+
+class JsMirrorParityTests(unittest.TestCase):
+    """Lockstep: the Python default resolution must equal the JS DEFAULT_CRITIC_PHASES
+    mirror in .claude/workflows/qrspi-batch.js (structure.md Modified Types). The JS
+    object is parsed out of the source file by regex (the file is harness-coupled and
+    not importable), then compared field-for-field against default_phases()."""
+
+    def _js_default_critic_phases(self):
+        import json as _json
+        import re
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        js_path = os.path.join(repo_root, ".claude", "workflows", "qrspi-batch.js")
+        with open(js_path, "r", encoding="utf-8") as fh:
+            src = fh.read()
+        # Grab the object literal assigned to DEFAULT_CRITIC_PHASES.
+        m = re.search(r"const DEFAULT_CRITIC_PHASES = (\{.*?\n\})", src, re.DOTALL)
+        self.assertIsNotNone(m, "could not locate DEFAULT_CRITIC_PHASES in qrspi-batch.js")
+        body = m.group(1)
+        # Resolve the `lenses: DEFAULT_DESIGN_LENSES` reference to the literal array,
+        # then strip JS-only constructs (the `// ...` comment lines) before JSON-parsing.
+        body = body.replace("DEFAULT_DESIGN_LENSES", _json.dumps(DEFAULT_DESIGN_LENSES))
+        body = re.sub(r"^\s*//.*$", "", body, flags=re.MULTILINE)
+        # Quote bare object keys (identifier: -> "identifier":) and drop trailing commas.
+        body = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', body)
+        body = re.sub(r",(\s*[}\]])", r"\1", body)
+        body = body.replace("false", "false").replace("true", "true")
+        return _json.loads(body)
+
+    def test_design_defaults_match_js_mirror(self):
+        py = default_phases()["design"]
+        js = self._js_default_critic_phases()["design"]
+        self.assertEqual(py, js, "Python resolve_design defaults and JS DEFAULT_CRITIC_PHASES.design diverged")
+
+    def test_all_phase_defaults_match_js_mirror(self):
+        py = default_phases()
+        js = self._js_default_critic_phases()
+        self.assertEqual(set(py), set(js))
+        for phase in py:
+            self.assertEqual(py[phase], js[phase], f"phase {phase!r} default diverged between Python and JS mirror")
 
 
 class ResolveImplementationTests(unittest.TestCase):
