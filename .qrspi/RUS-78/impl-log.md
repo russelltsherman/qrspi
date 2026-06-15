@@ -58,3 +58,34 @@
 - Cited RUS-77 tests confirmed green this session: `qrspi_research_digest_test.py` and `qrspi_critics_config_test.py` both pass under `run_tests.py`. Full suite still 38/38.
 
 ---
+
+## Session 3 — Slice 3: Teeth eval (flawed-design fixtures + pure assertion core + opt-in workflow runner)
+
+**Timestamp:** 2026-06-15T21:10:00Z
+**Tasks completed:** T27, T28, T29, T30, T31, T32, T33, T34 (plan steps 27–34)
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py teeth_assert` → 1 file passed (`qrspi_teeth_assert_test.py`), 0 failed (the pure majority/marker core — deterministic, in CI)
+- `python3 scripts/run_tests.py` → 39 passed, 0 failed (full suite; +1 vs prior 38, the new `qrspi_teeth_assert_test.py`; no regression, AC-No-regression)
+- `node scripts/check_workflows.js .claude/workflows/*.js` → 2 ok, 0 failed (both `qrspi-batch.js` and the new `qrspi-teeth-eval.js` compile under the harness loader)
+- `python3 scripts/run_tests.py --list | grep -i teeth` → lists `qrspi_teeth_assert_test.py` (and the pre-existing RUS-77 `qrspi_teeth_test.py`); NO `.js` workflow appears — the runner stays off the deterministic CI gate (AC-Teeth-eval, Q11).
+- Inspection (non-vacuity / digest-risk, review finding #1): built the digest from the new fixture — `python3 scripts/qrspi_research_digest.py --research evals/teeth/research.md --out /tmp/x` then grep — the `frobnicate_widget()` fact and its "synchronous and idempotent" prose SURVIVE the digest (it lives in prose, not a fenced block; the digest strips only fences). So a correct digest retains the edge-alignment fact and the lens still catches it digest-ON; a digest that trimmed it would make edge-alignment pass and `overallPass` go false.
+- Manual (opt-in, NOT run here — requires `Workflow({name:"qrspi-teeth-eval", args:{trials:3}})` agent spawning, off CI): deferred. The deterministic decision math it relies on is fully CI-covered by `qrspi_teeth_assert_test.py`.
+
+**Deviations from structure.md:**
+
+- none material. Followed the AUTHORITATIVE corrected layout (structure §Contracts / plan §Plan-phase pins), NOT the stale worktree.md Session-3 table (which still named `scripts/qrspi_teeth_eval.py`). Shipped: 4 fixtures under `evals/teeth/` (`design.md`, `research.md`, `ticket.md`, `questions.md`), the pure CI-tested `scripts/qrspi_teeth_assert.py` (+ `_test.py`), and the opt-in workflow runner `.claude/workflows/qrspi-teeth-eval.js`.
+
+**Deviations from plan.md:**
+
+- none material. Plan step 30 pinned `evaluate(trials_by_lens, markers, threshold=2)` — implemented exactly, with a fail-closed catch rule (`pass is False AND marker ∈ some finding`) and a guarded non-positive-threshold fallback to 2 (a non-positive threshold would let a lens "pass" with zero catches). The workflow derives `THRESHOLD = floor(trials/2)+1` so the default `trials:3` yields the structure's ">=2-of-3" (2); a custom trial count still gets an integer majority. The workflow uses its own local `ENGINE_ROOT`/`engineCmd` (no per-ticket worktree here — the eval runs against the engine's own `evals/teeth/` fixtures), mirroring qrspi-batch.js's constant.
+
+**Notes for next session:**
+
+- Slice 3 is all-additive: `evals/teeth/{design,research,ticket,questions}.md`, `scripts/qrspi_teeth_assert.py` + `_test.py`, `.claude/workflows/qrspi-teeth-eval.js`. NO existing file modified. Only `qrspi_teeth_assert_test.py` joins CI (suite is now 39).
+- DISTINCT from the pre-existing RUS-77 `scripts/qrspi_teeth_test.py` (a structural fixture check over `evals/fixtures/`, untouched, out of scope). My core is `scripts/qrspi_teeth_assert.py` — different name, different fixture dir (`evals/teeth/`).
+- The lens→marker ownership map (single source: both the workflow's `LENS_MARKERS` and the test's `MARKERS`): completeness→`AC-TEETH-COMPLETENESS` (omitted AC, lives in `ticket.md`), internal-consistency→`TEETH-INCONSISTENCY` (`MAX_RETRIES` stated as both 3 and 5 in `design.md`), edge-alignment→`frobnicate_widget()` (design claims it's async; research verifies sync+idempotent). If a fixture marker changes, update BOTH the fixture text and the map.
+- The opt-in eval has not been run end-to-end (agent spawning is off-CI and non-deterministic). All deterministic pieces verified. After all slices, the qrspi-pr phase writes `pr-summary.md`.
+
+---
