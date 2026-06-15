@@ -122,13 +122,64 @@ tricky residual is the `extractJson*` brace-scanners.
    which is node-version-dependent on this file.
 
 3. **(Strongest repo-specific fit) Contract / golden fixtures at the JS↔Python
-   seam.** Capture real Python-script output envelopes as committed fixtures, and
-   assert **both** sides against them: Python tests that the script *produces*
-   the envelope, JS tests that the parser *consumes* it. This is consumer-driven
-   contract + record/replay applied to the internal seam — fully deterministic
-   (no LLM), and it directly covers the residual untested JS parsers. The
-   fixtures double as documentation of the contract. *(Tracked as a QRSPI
-   ticket.)*
+   seam. — IMPLEMENTED.** Capture real Python-script output envelopes as
+   committed fixtures, and assert **both** sides against them: Python tests that
+   the script *produces* the envelope, JS tests that the parser *consumes* it.
+   This is consumer-driven contract + record/replay applied to the internal seam
+   — fully deterministic (no LLM), and it directly covers the residual untested
+   JS parsers. The fixtures double as documentation of the contract.
+
+   **Status: shipped (RUS-76).** The contract lives in
+   `scripts/fixtures/contract_seam/<seam>/<variant>.json`, with both sides
+   asserted against the same committed goldens:
+   - **Producer side:** `scripts/qrspi_contract_fixtures_producer_test.py`
+     asserts each Python producer's actual output conforms (shape +
+     byte-for-byte serialization) to that seam's `wellformed.json`.
+   - **Consumer side:** `scripts/qrspi_contract_fixtures_consumer_test.py`
+     drives `scripts/contract_seam_runner.js` (a `node:vm` harness that loads
+     `qrspi-batch.js` via the strip-`export` + async-wrap + injected-globals
+     recipe and exposes the parsers through an appended shim), asserting each
+     parser accepts the well-formed fixture and fail-closes (exact sentinel
+     shape) on the malformed/edge variants. It skips cleanly via
+     `shutil.which("node")` when node is absent.
+
+   Both tests are `scripts/*_test.py`, auto-discovered by `run_tests.py` + the
+   CI gate with zero registration. Coverage is **all eight `parse*` seams** —
+   `parseResolveEnvelope`, `parseConfigEnvelope`, `parseSyncTrunkEnvelope`,
+   `parseLandVerdict`, `parseRestackEnvelope` (restack),
+   `parseCleanupEnvelope` (cleanup), `parseOrderedTickets`, and
+   `parseCriticsEnvelope` — so the cross-language drift guard holds across the
+   whole seam: changing either side's shape without updating the fixture breaks
+   that side's test. Scope caveat: this guard pins the *parsers* plus the
+   *serialized goldens*, not the orchestrator's full field consumption — each
+   parser validates only the few fields it dereferences (e.g.
+   `parseResolveEnvelope` checks `ok` / `worktreeDir` / `decision.action`),
+   while the other envelope fields the orchestrator later reads (e.g.
+   `repoRoot`, `reviewers`, `decision.nextPhase` / `decision.reason`) are
+   guarded *only* by the producer-side byte-match — i.e. only because the
+   fixture happens to contain them. The contract is therefore as strong as the
+   fixtures are complete.
+
+   **Two known limitations (deliberate; not yet closed):**
+   - **(a) Silent-seam debuggability gap.** Two parsers fail *silently* at
+     runtime — `parseOrderedTickets` returns `null` and `parseCriticsEnvelope`
+     fails *open* to `DEFAULT_CRITIC_PHASES` — emitting no log/error signal a
+     test could assert on. The consumer test guards these with
+     **value-difference** assertions (sorted vs. unsorted result; merged
+     defaults vs. a custom phase set, incl. the shallow-merge edge) rather than
+     a sentinel/log check, because no runtime signal exists to observe. A real
+     drift in these seams is therefore caught only by the value difference, not
+     by any in-pipeline diagnostic — there is nothing to log when they degrade.
+   - **(b) IO-bound `main()` serializer not pinned (resolve / restack /
+     cleanup).** These three producers' `main()` cannot run headless (they
+     touch live git/gh/worktree state), so the producer test pins their
+     formatting via `json.dumps(builder, <hardcoded kwargs>)` chosen to match
+     what `main()` does *today* — it does **not** exercise `main()`'s own
+     `json.dump`/`print` call. A future edit to one of these three `main()`
+     serializers (e.g. flipping `indent`, dropping the trailing newline) would
+     **not** fail this test, because the test's serialization and `main()`'s
+     drift independently. The other five seams run `main()` (or its headless
+     equivalent) and so are fully pinned. (Ref: design.md Risk register row 5.)
 
 4. **(Conditional) JS-side unit coverage.** The harness does **not** support
    `import`/`require` of a sibling file (confirmed — see "Open experiment"), so
