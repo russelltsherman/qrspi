@@ -98,3 +98,40 @@
 - `.qrspi/config.example.json` documents the three knobs under `critics.design` via a `$comment_cost_levers` key + representative default-OFF values (`digest.enabled:false`, `gateBehindEdge.enabled:false`; `lensModel` is described in the comment but NOT shown as a key, since its default is absent).
 
 ---
+
+## Session 4 — Slice 4
+
+**Timestamp:** 2026-06-15T02:48:45Z
+**Tasks completed:** T19, T20, T21, T22, T23, T24, T25, T26, T27, T28
+**Tasks failed:** none (T29–T32 are live-agent/Linear manual e2e checkpoints — not runnable in the implement-agent sandbox; verified by code inspection + the digest sanity run against the real research.md — see Tests)
+
+**Tests:**
+
+- `python3 scripts/run_tests.py research_digest` → 1 test file passed (`qrspi_research_digest_test.py`), 0 failed — strip-fences, determinism, headers+prose retained, digest strictly shorter, fail-closed on empty input AND on all-fenced input, and the CLI subprocess cases (exit 0 on success, non-zero + no/empty output on empty/all-fenced/missing-input)
+- T28 sanity (the lever must work on a REAL research.md, not just a synthetic fixture): `python3 scripts/qrspi_research_digest.py --research .qrspi/RUS-77/research.md --out /tmp/digest-sanity.md` → exit 0; input 40497B → digest 32490B (strictly shorter, ~20% trim); `grep -c '```' /tmp/digest-sanity.md` → 0 fences remaining
+- `python3 scripts/run_tests.py` → 34 passed, 0 failed (full regression suite green; was 33 in Slice 3, the +1 is the new digest test — no Slice-1/2/3 breakage)
+- `python3 scripts/run_tests.py --list | grep digest` → `qrspi_research_digest_test.py` (the new module IS enumerated by the aggregating CI runner)
+- `node --check .claude/workflows/qrspi-batch.js` → JS-SYNTAX-OK; `node scripts/check_workflows.js .claude/workflows/qrspi-batch.js` → `OK` (the workflow meta/syntax gate passes after the wiring edits)
+- NOT runnable in this sandbox: T29 (digest ON e2e), T30 (all-levers-OFF e2e), T31 (lensModel single-spawn observation), T32 (gateBehindEdge ON-vs-OFF e2e) — they require live agents/Linear. Verified instead by code inspection: digest OFF (default) ⇒ `digestPath` stays null ⇒ no `DIGEST_PATH` line in the lens prompt ⇒ lenses read full `RESEARCH_PATH` (unchanged); lensModel absent ⇒ no `model` option added to `agentOpts` (unchanged); `gateBehindEdge` default OFF ⇒ the new gate branch is never entered ⇒ panel dispatch unchanged.
+
+**Deviations from structure.md:**
+
+- none — `qrspi_research_digest.py` matches the Contract `--research <path> --out <path>`; the Lens agent input contract (optional `DIGEST_PATH`, Read in place of `RESEARCH_PATH` when present) is applied to all four lens files.
+
+**Deviations from plan.md:**
+
+- **Digest extraction policy follows the REVISED plan steps 19–20 (content-reducing fence-strip), NOT the stale worktree.md T20 row.** worktree.md T20 still says "whitelist Current State / Desired End State / Delta in order" — those are DESIGN/STRUCTURE template headers that do NOT appear in research.md (confirmed against `.qrspi/RUS-77/research.md`, whose top-level sections are `## Q1`…`## Q<n>` + `## Discovered Patterns` + `## Inconsistencies`). plan.md steps 19–20 supersede that row (its Revised line documents the fix). Implemented as: keep ALL headers + prose, strip only fenced ` ``` ` code blocks (the verbose Evidence fences); fail-closed only on genuinely-empty input/output. The plan is the authority over the stale worktree.md row.
+- **`gateBehindEdge` ships as the honestly-conditional no-op the plan §25 scope note mandates, NOT a working panel-skip optimization in the default call graph.** Per plan §25 + the Slice-4 scope-honesty note: `runPhase` routes the design phase to EITHER the panel OR a single edge critic at one mutually-exclusive dispatch — there is no in-scope upstream edge-critic pass/fail outcome for the panel to gate behind. The wiring (in `runPhase`, the named gate site) skips the panel ONLY when `gateBehindEdge.enabled` AND `criticConfig.edgePassed === true`; since nothing in the current call graph plumbs `edgePassed` for the design phase, the lever logs the gap and runs the panel (a no-op, exactly as the plan requires — it records the gap rather than fabricating a sequence). The config gate (Slice 3) + this honest wiring are shipped; the lever does real work only if a future ticket plumbs an upstream edge outcome onto `criticConfig.edgePassed`.
+
+**Notes for next session:**
+
+- Slice 4 is the last cost-lever slice. Slice 5 (Session 5) is an INDEPENDENT eval-fixture/teeth-test core (`evals/fixtures/`, `evals/golden/`, `scripts/qrspi_teeth_test.py`) that loads no batch.js or config internals — no Slice 4 internals are needed.
+- **Digest contract for any later consumer:** `scripts/qrspi_research_digest.py --research <path> --out <path>` writes a deterministic digest = research.md with all fenced ` ``` ` code blocks stripped (headers + prose kept), trailing newline preserved. Pure helpers `strip_fences(text)` and `build_digest(research_text) -> (digest, error)` are importable + unit-tested. Fail-closed (exit non-zero, write nothing) on empty input OR empty-after-strip output.
+- **JS wiring summary (RUS-77 AC-COST levers, all default-OFF):**
+  - `buildResearchDigest(id, researchPath, digestPath)` (new helper, after `synthesizeVerdicts`): runs the digest via a main-repo-root worker using `engineCmd('scripts/qrspi_research_digest.py')` (the SAME convention as `synthesizeVerdicts`/`recordCriticMetrics`, since `r`/`repoRoot` is not in scope in the panel loop), then `test -s` guards the output. Returns true only on a non-empty digest; false fails the phase fail-closed.
+  - `runCriticPanelLoop` now: builds the digest ONCE before the round loop when `criticConfig.digest.enabled` (all rounds reuse it — research.md does not change across revise rounds; only the staged design does); threads `DIGEST_PATH=<path>` into each lens prompt when the digest is on (omitted when off ⇒ lenses read `RESEARCH_PATH`); and when `criticConfig.lensModel` is a non-empty string, adds `model: lensModel` to the lens `agentOpts` (speculative seam — Risk Register/Q4: no evidence the harness honors `agent()` `model`; inert if ignored, does NOT block the ticket).
+  - `gateBehindEdge` lives in `runPhase` at the panel-vs-edge dispatch (NOT a mythical edge-then-panel function): skips the panel + still runs the persist gate when `gateBehindEdge.enabled` AND `criticConfig.edgePassed === true`; otherwise logs the no-edge-outcome gap and runs the panel. To make this lever actually do work later, plumb a passing prior-phase edge outcome onto the design `criticConfig.edgePassed` in `doDesign` (where `r` is in scope, the same channel as `ticketContentPath`/`questionsPath`).
+- **Lens agent contract:** each of the four `.claude/agents/qrspi-design-critic-*.md` now has (a) an optional `DIGEST_PATH` Inputs bullet, (b) the "Read … in full" step phrased as "the research input (`DIGEST_PATH` if it was provided, otherwise `RESEARCH_PATH`)", and (c) the "Read only" rule permitting `DIGEST_PATH`. Identical wording across all four.
+- **Disabled-path guarantee preserved:** all three levers default OFF (`digest`/`gateBehindEdge` resolve to `{enabled:false}`; `lensModel` key absent — Slice 3). With all OFF, the panel builds no digest, adds no `DIGEST_PATH`/`model`, and never enters the gate branch — byte-for-byte the pre-RUS-77 lens inputs and dispatch. This is the T41 final-gate guarantee (Session 6).
+
+---

@@ -827,20 +827,52 @@ async function runCriticPanelLoop(name, id, criticConfig) {
   // step terminates into one CriticStepMetrics ledger record (findingsCount reduced in Python).
   const metricRounds = []
 
+  // AC-COST primary lever (RUS-77): when criticConfig.digest.enabled, build ONE shared research
+  // digest before the round loop and pass its PATH (not research.md) to every lens. Default OFF
+  // (digest absent or {enabled:false}) ⇒ digestPath stays null ⇒ lenses read full RESEARCH_PATH,
+  // byte-for-byte the prior behavior. The digest is built once for the whole step (all rounds reuse
+  // it; the staged design is what changes across revise rounds, not research.md). An empty/missing
+  // digest fails the phase fail-closed (buildResearchDigest guards with `test -s`) so no lens ever
+  // reads an empty digest.
+  let digestPath = null
+  if (criticConfig.digest && criticConfig.digest.enabled) {
+    digestPath = `/tmp/phase-stage/${id}/research-digest.md`
+    const built = await buildResearchDigest(id, researchPath, digestPath)
+    if (!built) {
+      log(`  ${id}: ${name} digest generation failed/empty — stopping this ticket (fail-closed)`)
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
+      return { ok: false, residualFindings: [], metrics }
+    }
+    log(`  ${id}: ${name} shared research digest built → ${digestPath} (lenses read the digest)`)
+  }
+  // AC-COST speculative lever (RUS-77): per-lens model override. When criticConfig.lensModel is a
+  // non-empty string, pass it as the agent() `model` option on each lens spawn; otherwise pass no
+  // model option (current behavior). NOTE (Risk Register / Q4): there is no evidence the harness
+  // honors an agent() `model` option, so this lever may be inert — it ships default-OFF (key absent)
+  // and does not block the ticket; the digest is the primary cost lever.
+  const lensModel = typeof criticConfig.lensModel === 'string' && criticConfig.lensModel ? criticConfig.lensModel : null
+
   for (let round = 0; round < maxRounds; round++) {
     // Fan out one agent PER LENS in parallel. Each returns the schema'd { pass, findings }
     // verdict; we tag each reply with its lens id so synthesize can audit-tag findings.
     const replies = await parallel(
       lenses.map(lens => async () => {
         const agentType = `qrspi-design-critic-${lens}`
+        // AC-COST: when the shared digest is ON, thread DIGEST_PATH so the lens reads the smaller
+        // digest in place of the full research; when OFF (digestPath null) pass no DIGEST_PATH so
+        // the lens falls back to RESEARCH_PATH, unchanged.
+        const digestLine = digestPath ? `\nDIGEST_PATH = ${digestPath}` : ''
+        // AC-COST: when lensModel is set, ride it as the agent() `model` option (speculative seam).
+        const agentOpts = { label: `critic:${id}:${name}:${lens}#${round + 1}`, phase: 'Critic', agentType, schema: CRITIC_VERDICT_SCHEMA }
+        if (lensModel) agentOpts.model = lensModel
         const verdict = await agent(
           `You are the ${lens} lens of the qrspi design-phase critic panel for ${id}, round ${round + 1}/${maxRounds}.
 DESIGN_PATH = ${artifactPath}
 TICKET_CONTENT_PATH = ${ticketContentPath}
 RESEARCH_PATH = ${researchPath}
-QUESTIONS_PATH = ${questionsPath}
+QUESTIONS_PATH = ${questionsPath}${digestLine}
 Read all four paths and judge DESIGN_PATH through your lens. Return { pass, findings } per the schema.`,
-          { label: `critic:${id}:${name}:${lens}#${round + 1}`, phase: 'Critic', agentType, schema: CRITIC_VERDICT_SCHEMA }
+          agentOpts
         )
         return { lens, verdict }
       })
@@ -950,6 +982,32 @@ as-is — HARD STOP, do NOT retry or improvise.`,
   if (!out || typeof out.pass !== 'boolean') return null
   if (!Array.isArray(out.findings)) out.findings = []
   return out
+}
+
+// Build the shared research digest ONCE before the panel fan-out (RUS-77, AC-COST primary lever).
+// Runs the tested deterministic qrspi_research_digest.py via a worker (the JS sandbox cannot run
+// python) and then GUARDS the output with `test -s` so an empty/missing digest fails CLOSED — a
+// lens must never read an empty digest (Q1, Q8). Mirrors synthesizeVerdicts/recordCriticMetrics:
+// the python runs at the worker's main-repo-root cwd via engineCmd('scripts/…'), the SAME single
+// convention the sibling reducers prove — `r`/`repoRoot` is NOT in scope in runCriticPanelLoop
+// (it takes only name/id/criticConfig), so engineCmdFor(r,…) cannot be used here.
+//
+// `researchPath` is the full research.md input; `digestPath` is the output the lenses will read.
+// Returns true only when the digest was generated AND is non-empty; false on any failure (worker /
+// generation / empty-output) so the caller fails the phase fail-closed rather than fanning out.
+async function buildResearchDigest(id, researchPath, digestPath) {
+  const out = await agent(
+    `You are the RESEARCH-DIGEST worker. Your cwd is the main repo root. Run EXACTLY this one
+command verbatim (no path edits, no exploration) and return its JSON stdout verbatim:
+
+  python3 ${engineCmd('scripts/qrspi_research_digest.py')} --research ${researchPath} --out ${digestPath} && test -s ${digestPath} && printf '{"ok":true}\\n' || printf '{"ok":false}\\n'
+
+It generates the digest then verifies it is non-empty, printing { "ok": true } on success or
+{ "ok": false } on any failure. Parse and return that JSON verbatim. HARD STOP, do NOT retry or
+improvise.`,
+    { label: `research-digest:${id}`, phase: 'Critic', schema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } } } }
+  )
+  return out?.ok === true
 }
 
 // The CriticStepMetrics record the qrspi_critic_metrics.py reducer emits (RUS-77, AC-INSTR):
@@ -1379,6 +1437,30 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel, criti
   // still-staged artifact, so persist remains the single success gate. No-critic phases skip
   // this block entirely and behave byte-for-byte as before.
   if (criticConfig) {
+    // AC-COST speculative lever (RUS-77): gate the panel behind a passing upstream edge-critic.
+    // HONESTY (plan §25 scope note): the design phase routes to EITHER the panel OR a single edge
+    // critic at THIS dispatch — they are mutually-exclusive alternatives, not a sequence — so there
+    // is no in-scope edge-critic pass/fail outcome for the design panel to gate behind in the
+    // current call graph. The honest behavior is therefore: when gateBehindEdge.enabled AND an
+    // upstream edge outcome was plumbed onto criticConfig.edgePassed and is true, SKIP the panel;
+    // otherwise (default OFF, or no edge outcome available) run the panel as today and RECORD the
+    // gap rather than fabricating a sequence. Default OFF ⇒ this branch is never taken ⇒ unchanged.
+    if (criticConfig.lenses?.length && criticConfig.gateBehindEdge && criticConfig.gateBehindEdge.enabled) {
+      if (criticConfig.edgePassed === true) {
+        log(`  ${id}: ${name} panel SKIPPED — gateBehindEdge ON and upstream edge critic passed`)
+        criticConfig.residualFindings = []
+        criticConfig.criticSummary = 'panel skipped (gateBehindEdge: edge passed)'
+        // Persist still runs below — skipping the panel does NOT skip the success gate.
+        const p = await persistArtifact(id, name, phaseLabel)
+        if (!p || !p.ok) {
+          log(`  ${id}: ${name} reported done but no artifact was staged/persisted — ${p?.error ?? 'no result'} (stopping this ticket)`)
+          return false
+        }
+        log(`  ${id}: ${name} → saved ${p.bytes ?? '?'}B (panel gated out)`)
+        return true
+      }
+      log(`  ${id}: ${name} gateBehindEdge ON but no upstream edge outcome in scope (design routes to panel OR edge, not a sequence) — running panel (lever no-op; see plan §25)`)
+    }
     // Dispatch on lenses: a non-empty criticConfig.lenses selects the multi-lens PANEL
     // (design phase); its absence (the single-critic plan phase, or any other caller) keeps
     // the landed single-critic path byte-for-byte unchanged.
