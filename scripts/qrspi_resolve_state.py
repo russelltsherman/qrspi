@@ -192,6 +192,7 @@ def resolve(state, ci_revise_cap=3):
             "commentTargets": kw.get("commentTargets", []),
             "changeRequested": kw.get("changeRequested", False),
             "ciFailing": kw.get("ciFailing", False),
+            "ciGaveUp": kw.get("ciGaveUp", False),
             "reason": kw.get("reason", ""),
         }
         return out
@@ -295,10 +296,11 @@ def resolve(state, ci_revise_cap=3):
                             reason="%s frontier PR has failing CI (attempt %d/%d); "
                                    "auto-revise to fix the red checks." % (
                                        frontier, attempt, ci_revise_cap))
-        return decision("wait", phase=frontier, ciFailing=True,
+        return decision("wait", phase=frontier, ciFailing=True, ciGaveUp=True,
                         reason="%s frontier PR still has failing CI after %d/%d "
-                               "consecutive auto-revise attempt(s); cap reached, parked "
-                               "for manual attention." % (frontier, attempt, ci_revise_cap))
+                               "consecutive auto-revise attempt(s); CI-revise cap reached "
+                               "— gave up auto-revising, parked for manual diagnosis."
+                               % (frontier, attempt, ci_revise_cap))
     if fci == "pending":
         return decision("wait", phase=frontier,
                         reason="%s frontier PR CI is still pending; wait for checks to "

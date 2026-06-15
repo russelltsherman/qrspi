@@ -14,6 +14,7 @@
     "commentTargets": [],
     "changeRequested": false,
     "ciFailing": false,
+    "ciGaveUp": false,
     "reason": "Entry gate satisfied (assigned + Selected); no design branch yet."
   },
   "commentTargets": [],
