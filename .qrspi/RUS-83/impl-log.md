@@ -27,3 +27,31 @@
 - **Publish form confirmed:** `gt modify --no-interactive -m <message>` (message-only amend, no staging) then `gt submit --publish --no-edit --no-interactive` (+`--stack` for implementation). Matches the canonical forms in `qrspi-batch.js` (revise re-publish at line ~2343/2406) — no flag deviation.
 
 ---
+
+## Session 2 — Slice 2
+
+**Timestamp:** 2026-06-15T23:05:00Z
+**Tasks completed:** T8, T9, T10, T11, T12, T13, T14
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/qrspi_resolve_state_test.py` → 68 passed, 0 failed (was 60; +8 new `ciGaveUp` cases)
+- `python3 scripts/run_tests.py resolve` → 2 files passed, 0 failed
+- `python3 scripts/run_tests.py` → 40 files passed, 0 failed (full suite green)
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none functional. The plan (steps 8–14) listed only `qrspi_resolve_state.py` + `qrspi_resolve_state_test.py` as touched. Adding the additive `ciGaveUp` field to the resolver decision dict tripped one byte-pinned golden — `scripts/fixtures/contract_seam/resolve/wellformed.json` (consumed by `qrspi_contract_fixtures_producer_test.py::test_resolve`, which byte-matches the producer's serialized envelope). This is the expected consequence of step 13's "confirm the additive defaulted field regresses no consumer" gate catching the one consumer that pins exact serialization. The golden was **regenerated mechanically from the producer itself** (re-ran `qrspi_resolve.build_envelope(qrspi_resolve_state.resolve(...))` and rewrote the file with the same `json.dumps(env, indent=2) + "\n"` form `main()` uses) — NOT hand-edited — so it stays a faithful pin. Net effect: `ciGaveUp: false` is now inserted in the embedded decision dict between `ciFailing` and `reason`, matching the resolver's key order. No logic, no other consumer changed.
+
+**Notes for next session:**
+
+- **`ciGaveUp` decision-field contract (for Slice 3 JS surfacing, T18):** Every decision dict now carries `ciGaveUp: bool`, defaulting `False` on every path (added to the `decision(...)` builder in `qrspi_resolve_state.py`, mirroring `ciFailing`). It is set `True` **only** on the cap-reached red→`wait` branch (`fci == "red"` and `attempt >= ci_revise_cap`). The give-up `wait` decision also carries `ciFailing: True`. Slice 3 reads `d.ciGaveUp` (or the envelope's re-emitted copy if step 21 re-emits it like `ciFailing`) — it must NOT re-derive give-up from `attempt`/`cap`; the resolver is the sole authority.
+- **Distinct give-up reason string:** the cap-reached `wait` reason now reads `"<phase> frontier PR still has failing CI after <a>/<cap> consecutive auto-revise attempt(s); CI-revise cap reached — gave up auto-revising, parked for manual diagnosis."` (contains the substrings `"cap reached"` and `"gave up"`, asserted by the new test). Any JS log line that wants a human-readable park reason can use `d.reason` directly.
+- **Additive field, byte-pinned golden caveat:** any FUTURE additive field on the resolver decision dict will likewise trip `qrspi_contract_fixtures_producer_test.py::test_resolve` — regenerate `scripts/fixtures/contract_seam/resolve/wellformed.json` from the producer (do NOT hand-edit) the same way this slice did. The `prose_wrapped` / `unknown_action` / `no_json` resolve variants are consumer-side parser-tolerance fixtures (not byte-pinned producer output) and did NOT need the new field.
+- **No write-side coupling:** Slice 2 only READS the gathered `ciReviseAttempt` (via `ci_revise_attempt_of`) to compute `ciGaveUp`; it does not write the trailer. The trailer increment authority remains Slice 1's `qrspi_ci_revise_bump.py`. Slice 3 wires the two together.
+
+---

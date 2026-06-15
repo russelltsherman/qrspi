@@ -437,6 +437,63 @@ case("CI red frontier attempt=1, cap=5 -> revise (cap threaded)",
      cap=5)
 
 
+# --- ciGaveUp terminal-state field (Slice 2, plan §2.8-2.10, AC4/AC5) --------
+# The decision dict carries an additive `ciGaveUp: bool` (default False), raised True ONLY
+# on the cap-reached red->wait branch so the orchestrator can distinguish a CI-revise
+# give-up park from an ordinary wait. The `attempt < cap` comparison is unchanged.
+
+# T10a — cap-reached red frontier -> wait with ciGaveUp True and a distinct reason naming
+# the cap give-up (so the JS surfacing/log can flag it; AC4).
+case("CI red frontier at cap -> wait + ciGaveUp True + distinct give-up reason",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=3)}),
+     {"action": "wait", "phase": "design", "ciFailing": True, "ciGaveUp": True,
+      "_reasonContains": ["cap reached", "gave up"]},
+     cap=3)
+
+# Red frontier ABOVE cap also gives up (ciGaveUp True).
+case("CI red frontier above cap -> wait + ciGaveUp True",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=5)}),
+     {"action": "wait", "phase": "design", "ciFailing": True, "ciGaveUp": True},
+     cap=3)
+
+# Implementation at cap (max-aggregated) -> wait + ciGaveUp True.
+case("CI impl at cap (max-aggregated) -> wait + ciGaveUp True",
+     state(phases={"design": _phase(decision="APPROVED"),
+                   "plan": _phase(decision="APPROVED"),
+                   "implementation": _impl([_slice(1, decision="REVIEW_REQUIRED",
+                                                   ci_state="red", ci_attempt=1),
+                                            _slice(2, decision="REVIEW_REQUIRED",
+                                                   ci_state="red", ci_attempt=3)])}),
+     {"action": "wait", "phase": "implementation", "ciFailing": True, "ciGaveUp": True},
+     cap=3)
+
+# T10b — UNDER-cap red frontier -> revise with ciGaveUp False (still trying; not parked).
+case("CI red frontier under cap -> revise + ciGaveUp False (still auto-revising)",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="red", ci_attempt=2)}),
+     {"action": "revise", "phase": "design", "ciFailing": True, "ciGaveUp": False},
+     cap=3)
+
+# T10c — non-CI wait paths carry the default ciGaveUp False (additive field unchanged
+# behavior): a pending-CI frontier wait...
+case("CI pending frontier wait -> ciGaveUp False (default unchanged)",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED", ci_state="pending")}),
+     {"action": "wait", "phase": "design", "ciGaveUp": False})
+
+# ...and a thread-only (no CR, no CI failure) wait.
+case("thread-only wait (no CR, no CI) -> ciGaveUp False (default unchanged)",
+     state(phases={"design": _phase(decision="APPROVED", threads=2)}),
+     {"action": "wait", "phase": "design", "ciGaveUp": False})
+
+# ...and a plain under-review wait, plus non-wait actions default False too.
+case("under-review wait -> ciGaveUp False (default)",
+     state(phases={"design": _phase(decision="REVIEW_REQUIRED")}),
+     {"action": "wait", "phase": "design", "ciGaveUp": False})
+
+case("advance decision -> ciGaveUp False (default on non-wait actions)",
+     state(phases={"design": _phase(decision="APPROVED", threads=0)}),
+     {"action": "advance", "phase": "design", "ciGaveUp": False})
+
+
 # --- precedence cases (Slice 2, plan §2.18) ---------------------------------
 # T18a — a NON-frontier CHANGES_REQUESTED still resets at step 2 even with a red frontier:
 # design CR (non-frontier, plan above) with a red plan frontier -> reset to design, discard
