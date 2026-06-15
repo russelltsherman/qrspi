@@ -652,7 +652,13 @@ const art = (wd, id, name) => `${wd}/.qrspi/${id}/${name}`
 const stg = (id, name) => `/tmp/phase-stage/${id}/${name}.md`
 
 function skip(t, decision, note) {
-  return { ticketId: t.id, action: decision.action, summary: note }
+  const res = { ticketId: t.id, action: decision.action, summary: note }
+  // RUS-83: surface the resolver's terminal give-up signal on the skip record. A
+  // cap-reached red frontier resolves to `wait` with ciGaveUp=True (auto-revising gave
+  // up; parked for manual diagnosis) — carry it through so the wait record / per-ticket
+  // log is not silent about a PR that the loop stopped auto-fixing (Risk Register row 4).
+  if (decision && decision.ciGaveUp) res.ciGaveUp = true
+  return res
 }
 
 // Build the reviewer flags for `gt submit` from the resolver envelope (r.reviewers /
@@ -2230,6 +2236,9 @@ Return: ok, newStatus, summary (name what was discarded).`,
 //   - r.decision.changeRequested  whether a formal change request is present
 //   - r.decision.ciFailing / r.ciFailing  whether the frontier CI is RED (a CI-driven revise)
 //   - r.ciFailingChecks   the failing-check {name, detailsUrl} entries (RUS-81), [] otherwise
+//   - r.ciRedBranches     the deterministic, ascending list of red branches to bump this
+//                         pass (RUS-83) — each red slice for implementation, the single
+//                         phase branch for a red design/plan frontier, [] for non-CI
 // The worker runs coherent steps within ONE pass (this is the unification — comment AND CI
 // handling no longer slip to separate later runs):
 //   1. PER-COMMENT INTENT ENGINE — for each commentTarget, an honest peer-reviewer worker
@@ -2238,10 +2247,12 @@ Return: ok, newStatus, summary (name what was discarded).`,
 //      change-request feedback (e.g. the review SUMMARY body, which is not a reply-able
 //      thread comment) AND, when `ciFailing`, reads the REAL failing-check output before any
 //      fix (honesty-bound), fixes ALL red slice PRs in one pass (OQ3), amends via
-//      qrspi_revise_amend.py, writes the path-dependent `CI-Revise-Attempt` trailer
-//      (increment on the CI-failure path; overwrite to 0 on every non-CI amend), then ALWAYS
-//      re-requests review. Re-requesting flips reviewDecision back to REVIEW_REQUIRED — the
-//      loop-safe termination signal that lets the next pass return `wait` instead of re-firing.
+//      qrspi_revise_amend.py, then ALWAYS re-requests review. The worker NEVER touches the
+//      `CI-Revise-Attempt` counter (RUS-83): the orchestrator owns it — after the worker
+//      returns, doRevise itself advances it via the deterministic helper qrspi_ci_revise_bump.py
+//      on the CI-failure path (once per still-red branch in r.ciRedBranches) and resets it to 0
+//      via resetCiReviseTrailer on the non-CI path. Re-requesting flips reviewDecision back to
+//      REVIEW_REQUIRED — the loop-safe termination signal that lets the next pass return `wait`.
 // A comment-only PR (no formal change request, even when APPROVED) runs step 1 only and does
 // NOT re-request review — replies are the whole job; the approved PR is left undisturbed.
 // Thread RESOLUTION is always left to the reviewer (only they can mark a thread resolved); a
@@ -2303,8 +2314,9 @@ async function doRevise(t, r) {
 
   // --- Step 2b: formal change request and/or CI failure — address the review summary /
   // remaining feedback AND (when ciFailing) read the real failing-check output, fix every red
-  // slice, amend, write the path-dependent CI-Revise-Attempt trailer, then ALWAYS re-request
-  // review.
+  // slice, amend, then ALWAYS re-request review. The worker no longer writes the
+  // CI-Revise-Attempt counter (RUS-83); doRevise advances/resets it AFTER the worker returns
+  // (bumpCiReviseTrailers on the CI path; resetCiReviseTrailer on the green-CI change-request path).
   // The opening line is path-aware: it is NOT always a change request (a red frontier CI on an
   // otherwise-clean PR also reaches here).
   const trigger = changeRequested && ciFailing
@@ -2334,21 +2346,44 @@ ${ciFailing ? '4' : '3'}. Fix the REAL problems by editing the phase's artifacts
 ${ciFailing ? '5' : '4'}. When you made edits, stage them AND amend the phase commit IN PLACE by running EXACTLY this one self-locating command verbatim (no path edits, no alternatives) — for design/plan run it once; for implementation run it once per affected slice branch, lowest slice number first:
    \`python3 ${engineCmdFor(r, 'scripts/qrspi_revise_amend.py')} --ticket ${t.id} --branch <BRANCH>\` where <BRANCH> = \`${t.id}/${d.phase}\` for design/plan, or \`${t.id}/slice-<N>\` for an implementation slice.
    The script checks out the branch, stages every edit you made (excluding caches), amends the commit with \`gt modify\` keeping its EXACT subject+trailers (it does NOT rename the subject), and VERIFIES the amend captured your changes — it FAILS if nothing was staged or the tree is left dirty. It prints JSON { ok, branch, oldOid, newOid, dirty, error? }. If ANY invocation prints ok:false, return ok:false — HARD STOP; do NOT hand-run \`gt modify\`/\`git add\`/\`git commit\`/\`git reset\` to work around it. Never run a bare \`gt modify --no-interactive\` here: without staging it amends an empty index and silently drops your edits. (If the prior step determined nothing further needs changing, SKIP the content amend — do not run the amend script with no staged edits.)
-${ciFailing ? '6' : '5'}. WRITE THE \`CI-Revise-Attempt\` TRAILER (RUS-81 — the durable, observable-from-GitHub consecutive-red-CI counter). For EACH branch you touched in this pass (the design/plan branch, or each affected slice branch — checkout the branch first if not current):
-   a. Read the head commit's FULL message verbatim: \`git log -1 --format=%B\` (this is the subject + body + ALL trailers, INCLUDING any existing \`CI-Revise-Attempt: N\` line). Read the existing \`CI-Revise-Attempt: N\` value off it — absent ⇒ prior = 0.
-   b. Compute the new trailer value PATH-DEPENDENTLY:
-      ${ciFailing ? '- This is the CI-FAILURE path (CI is RED): set the new value to <prior + 1> (e.g. prior 0 → 1, prior 2 → 3).' : '- This is a NON-CI amend (no CI failure): overwrite the value to 0.'}
-   c. Rewrite the message: take the verbatim message from (a), and set EXACTLY one trailing \`CI-Revise-Attempt: <new value>\` line — replace the existing \`CI-Revise-Attempt:\` line in place if present, else append it as the LAST trailer. Preserve the subject and EVERY other line/trailer byte-for-byte; change ONLY the \`CI-Revise-Attempt\` value. Do NOT add a duplicate trailer.
-   d. Apply it as a message-only amend (NO file changes): \`gt modify --no-interactive -m "<the full rewritten message>"\`. (This is the one place a bare \`gt modify\` is correct — there is nothing to stage; you are only rewriting the message.) Confirm with \`git log -1 --format=%B\` that exactly one \`CI-Revise-Attempt: <new value>\` trailer is present and the subject/other trailers are unchanged. Note: amending the message re-stacks descendants; that is expected.
-${ciFailing ? '7' : '6'}. Re-request review so any stale CHANGES_REQUESTED is cleared and the re-pushed head (with the trailer + fixes) re-enters review (ALWAYS do this, whether or not you amended content): \`gt submit --publish --no-edit --rerequest-review${reviewerFlags(r)}${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`. (This pushes the new head — including the trailer — to the PR. No gh body edit is involved here.)
-${ciFailing ? '8' : '7'}. BEST-EFFORT keep Linear in the current review status (a failed Linear write is a WARN, still return ok:true if review was re-requested).
-Return: ok, prUrl, newStatus, summary (name what you fixed${ciFailing ? ' — including the real CI failure(s) you read and the resulting CI-Revise-Attempt value(s) you wrote' : ''} — or state that the prior comment replies covered it and you only re-requested review — and confirm review was re-requested; if you could not address the failure/feedback, return ok:false with the verbatim reason — never fabricate a fix).`,
+${ciFailing ? '6' : '5'}. Re-request review so any stale CHANGES_REQUESTED is cleared and the re-pushed head (with your fixes) re-enters review (ALWAYS do this, whether or not you amended content): \`gt submit --publish --no-edit --rerequest-review${reviewerFlags(r)}${d.phase === 'implementation' ? ' --stack' : ''} --no-interactive\`. (This pushes the new head to the PR. No gh body edit is involved here.) Do NOT touch the \`CI-Revise-Attempt\` trailer — the orchestrator owns that counter (it bumps it on the CI path via the deterministic helper and resets it on the non-CI path); you never write it.
+${ciFailing ? '7' : '6'}. BEST-EFFORT keep Linear in the current review status (a failed Linear write is a WARN, still return ok:true if review was re-requested).
+Return: ok, prUrl, newStatus, summary (name what you fixed${ciFailing ? ' — including the real CI failure(s) you read' : ''} — or state that the prior comment replies covered it and you only re-requested review — and confirm review was re-requested; if you could not address the failure/feedback, return ok:false with the verbatim reason — never fabricate a fix).`,
     { label: `revise:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
   const out = finResult(t, fin, `revise:${d.phase}`)
   if (out && commentSummary) {
     out.summary = `${out.summary || ''} Also ${commentSummary}.`.trim()
   }
+
+  // --- RUS-83 path-dependent counter writes (orchestrator-owned; the worker no longer
+  // touches the trailer). Exactly one writer per path: bump on the CI path, reset on the
+  // non-CI path. These run AFTER the content worker returns, regardless of its `ok`.
+  if (ciFailing) {
+    // CI path: advance the CI-Revise-Attempt counter by 1 on EVERY still-red branch
+    // (r.ciRedBranches), UNCONDITIONALLY — even when the worker reported failure / pushed no
+    // content amend — so an unfixable red PR still marches toward the cap (AC1/AC6). This
+    // fires for both the combined (changeRequested && ciFailing) and the pure-CI revise; do
+    // NOT gate it on !changeRequested. A helper non-zero exit is a HARD failure surfaced on
+    // the result (OQ1): a count that could not advance is never silent.
+    const bump = await bumpCiReviseTrailers(t, r, d)
+    if (out && !bump.ok) {
+      const branches = bump.failures.map(f => f.branch).join(', ')
+      out.ciReviseBumpFailed = true
+      out.summary = `${out.summary || ''} CI-Revise-Attempt counter FAILED to advance on: ${branches} — the consecutive-red cap cannot make progress until this is resolved.`.trim()
+    }
+  } else if (changeRequested) {
+    // Non-CI path (green-CI change request): re-home the reset the deleted worker step-6 used
+    // to own. Call resetCiReviseTrailer UNCONDITIONALLY — it is idempotent (no-ops when the
+    // trailer is absent or already 0), so no "did the worker amend?" detection is needed —
+    // preserving the CLAUDE.md invariant "every non-CI amend overwrites the trailer to 0".
+    await resetCiReviseTrailer(t, r, d, answered)
+  }
+
+  // --- RUS-83: surface ciGaveUp on the revise result for operator visibility. A revise
+  // decision never carries ciGaveUp=True (give-up resolves to `wait`, not `revise`), but
+  // we pass it through verbatim from the resolver so the field is uniform across records.
+  if (out && d && d.ciGaveUp) out.ciGaveUp = true
   return out
 }
 
@@ -2455,6 +2490,65 @@ Return: ok, summary (which branch(es) you reset, or that no trailer was present 
     log(`  ${t.id}: CI-Revise-Attempt trailer reset (comment-only amend) WARN — ${fin?.error ?? 'no result'} (effective count is already 0 via the gather's read-side reset)`)
   }
   return fin
+}
+
+// The JSON the deterministic increment helper qrspi_ci_revise_bump.py prints to stdout:
+// { ok, branch, prior, new, error? }. The thin bump worker reads it off the script's
+// STDOUT (NOT exit code alone) and returns it verbatim.
+const CI_REVISE_BUMP_SCHEMA = {
+  type: 'object',
+  required: ['ok', 'branch'],
+  properties: {
+    ok: { type: 'boolean' },
+    branch: { type: 'string' },
+    prior: { type: 'number' },
+    new: { type: 'number' },
+    error: { type: 'string' },
+  },
+}
+
+// ---------------------------------------------------------------------------
+// HELPER: bumpCiReviseTrailers — orchestrator-owned advance of the CI-Revise-Attempt
+// counter on the CI-FAILURE path (RUS-83). Replaces the deleted worker step-6 CI +1.
+// ---------------------------------------------------------------------------
+// The resolver pre-aggregates the EXACT red branches to bump into r.ciRedBranches (each
+// red slice branch for implementation, ascending; the single phase branch for a red
+// design/plan frontier), so the JS never re-derives per-slice CI nor delegates "which
+// slices are red" to an LLM worker. For EACH such branch we spawn a thin worker that runs
+// the one verbatim, self-locating `qrspi_ci_revise_bump.py --ticket --branch [--stack]`
+// command (the sole increment authority: pure trailer rewrite + gt modify -m + gt submit
+// publish + verify, fail-closed). The bump fires UNCONDITIONALLY after the content worker
+// returns whenever ciFailing is true — regardless of the worker's ok and regardless of
+// changeRequested — so a still-red pass that pushed no content amend STILL advances the
+// counter toward the cap (the AC1/AC6 guarantee). A non-zero helper exit / ok:false is a
+// HARD failure surfaced to the caller (OQ1): a count that could not advance is never silent.
+// Returns { ok, bumped: [{branch, prior, new}], failures: [{branch, error}] }.
+async function bumpCiReviseTrailers(t, r, d) {
+  const branches = Array.isArray(r.ciRedBranches) ? r.ciRedBranches : []
+  const stackFlag = d.phase === 'implementation' ? ' --stack' : ''
+  const bumped = []
+  const failures = []
+  // Lowest-first (r.ciRedBranches is already ascending). Sequential: tickets share one
+  // .git index and a gt modify/submit on a stacked branch must not race a sibling.
+  for (const branch of branches) {
+    const fin = await agent(
+      `You are the CI-REVISE-BUMP worker for ${t.id} (phase: ${d.phase}), in ${r.worktreeDir}. The frontier CI is RED; the orchestrator owns the durable \`CI-Revise-Attempt\` counter (RUS-83) and advances it deterministically. Run EXACTLY this one self-locating command verbatim — no path edits, no alternatives, no extra git/gt mutations:
+
+  python3 ${engineCmdFor(r, 'scripts/qrspi_ci_revise_bump.py')} --ticket ${t.id} --branch ${branch}${stackFlag}
+
+It checks out ${branch}, reads the head commit message, increments the \`CI-Revise-Attempt\` trailer by 1 (absent ⇒ 1), applies it as a message-only amend, re-publishes the branch, VERIFIES exactly one trailer at the new value, and prints JSON { ok, branch, prior, new, error? }. Parse that JSON off its STDOUT (do NOT infer success from the exit code alone) and return it verbatim. If it prints ok:false, return that as-is — HARD STOP; do NOT hand-run \`gt modify\`/\`git commit\` to work around it.`,
+      { label: `ci-revise-bump:${t.id}:${branch}`, phase: 'Finalize', schema: CI_REVISE_BUMP_SCHEMA }
+    )
+    if (!fin || !fin.ok) {
+      const error = fin?.error ?? 'no result'
+      log(`  ${t.id}: CI-Revise-Attempt bump FAILED on ${branch} — ${error} (counter did not advance — surfacing as a hard failure)`)
+      failures.push({ branch, error })
+      continue
+    }
+    log(`  ${t.id}: CI-Revise-Attempt bumped on ${branch} (${fin.prior ?? '?'} → ${fin.new ?? '?'})`)
+    bumped.push({ branch, prior: fin.prior, new: fin.new })
+  }
+  return { ok: failures.length === 0, bumped, failures }
 }
 
 // ===========================================================================
@@ -2905,7 +2999,9 @@ for (let i = 0; i < tickets.length; i++) {
       case 'entry_blocked':
       default:
         res = skip(t, r.decision, `Skipped (${a}): ${r.decision.reason}`)
-        log(`  ${t.id}: skipped (${a})`)
+        // RUS-83: a cap-reached red frontier waits with ciGaveUp — make the park explicit
+        // in the per-ticket log so a human sees it needs manual diagnosis (not just "wait").
+        log(`  ${t.id}: skipped (${a})${r.decision.ciGaveUp ? ' — CI-revise cap reached, auto-revise GAVE UP; parked for manual diagnosis' : ''}`)
     }
     results.push(res)
     // RUS-68: a land whose cleanup left stranded origin refs (ok:true + non-empty
@@ -2914,7 +3010,7 @@ for (let i = 0; i < tickets.length; i++) {
     // this run's Reconcile pass (when enabled) re-attempt the prune; otherwise the
     // (still-present) origin refs keep it in the backlog for a later run's pass.
     if (!res.reconcileRetry) processed.add(t.id)
-    log(`[${i + 1}/${tickets.length}] ${t.id} → ${res.action}${res.newStatus ? ` (${res.newStatus})` : ''}${res.reconcileRetry ? ' (Reconcile retry scheduled — stranded remotes)' : ''}`)
+    log(`[${i + 1}/${tickets.length}] ${t.id} → ${res.action}${res.newStatus ? ` (${res.newStatus})` : ''}${res.ciGaveUp ? ' (CI-revise cap reached — auto-revise gave up, manual diagnosis needed)' : ''}${res.ciReviseBumpFailed ? ' (CI-Revise-Attempt counter failed to advance)' : ''}${res.reconcileRetry ? ' (Reconcile retry scheduled — stranded remotes)' : ''}`)
   } catch (err) {
     const summary = err?.message ?? String(err)
     log(`  ${t.id}: ERRORED — ${summary} (side effects may have partially landed; resolver reconciles on re-run)`)

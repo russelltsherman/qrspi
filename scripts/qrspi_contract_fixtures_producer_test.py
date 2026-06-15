@@ -99,15 +99,19 @@ class ProducerShapeAndFormatTests(unittest.TestCase):
         # Shape: top-level envelope keys + the embedded decision's action. The CI-gated
         # revision feature (RUS-81 Slice 3) adds two additive top-level re-emit keys —
         # `ciFailing` (bool) and `ciFailingChecks` (list) — surfaced from the decision /
-        # phase shape, defaulting to False/[] for this non-CI run_design decision.
+        # phase shape, defaulting to False/[] for this non-CI run_design decision. The
+        # CI-revise-cap feature (RUS-83 Slice 3) adds one more additive re-emit key —
+        # `ciRedBranches` (list) — the deterministic red-branch list for doRevise,
+        # defaulting to [] for this non-CI decision.
         for key in ("ok", "repoRoot", "worktreeDir", "existing", "decision",
-                    "commentTargets", "ciFailing", "ciFailingChecks", "reviewers",
-                    "teamReviewers", "ticketContentPath", "tip", "slices"):
+                    "commentTargets", "ciFailing", "ciFailingChecks", "ciRedBranches",
+                    "reviewers", "teamReviewers", "ticketContentPath", "tip", "slices"):
             self.assertIn(key, env)
         self.assertIn("action", env["decision"])
         self.assertEqual(env["decision"]["action"], "run_design")
         self.assertEqual(env["ciFailing"], False)
         self.assertEqual(env["ciFailingChecks"], [])
+        self.assertEqual(env["ciRedBranches"], [])
         # Formatting: byte-for-byte.
         self.assertEqual(json.dumps(env, indent=2) + "\n", _read_fixture("resolve"))
 

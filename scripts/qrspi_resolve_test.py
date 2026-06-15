@@ -22,6 +22,7 @@ from qrspi_resolve import (
     comment_targets_of,
     ci_failing_of,
     ci_failing_checks_of,
+    red_branches_of,
     coerce_cap,
     load_ci_revise_cap,
     select_source,
@@ -409,6 +410,62 @@ check("envelope re-emits top-level ciFailingChecks from the phase shape",
 # additive: the CI re-emit leaves pre-existing fields untouched.
 check("CI re-emit leaves decision untouched", ci_env["decision"], _ci_dec)
 check("CI re-emit leaves commentTargets default untouched", ci_env["commentTargets"], [])
+
+# --- red_branches_of (top-level envelope re-emit; RUS-83 Slice 3) ------------------
+# The deterministic list of branches doRevise must bump this pass. [] for any non-CI
+# decision; per-red-slice branches (ascending) for implementation; the single phase
+# branch for a red design/plan frontier.
+check("red_branches_of None decision -> []", red_branches_of(None, {}, "RUS-1"), [])
+check("red_branches_of non-dict decision -> []",
+      red_branches_of("oops", {}, "RUS-1"), [])
+check("red_branches_of non-CI decision -> []",
+      red_branches_of({"action": "run_design", "ciFailing": False, "phase": "design"},
+                      {"design": {"ciState": "red"}}, "RUS-1"), [])
+check("red_branches_of CI decision, None phases -> []",
+      red_branches_of({"ciFailing": True, "phase": "design"}, None, "RUS-1"), [])
+# design/plan: the single frontier phase branch when its gathered ciState is red.
+check("red_branches_of red design frontier -> [the design branch]",
+      red_branches_of({"action": "revise", "ciFailing": True, "phase": "design"},
+                      {"design": {"ciState": "red"}}, "RUS-1"),
+      ["RUS-1/design"])
+check("red_branches_of red plan frontier -> [the plan branch]",
+      red_branches_of({"action": "revise", "ciFailing": True, "phase": "plan"},
+                      {"plan": {"ciState": "red"}}, "RUS-1"),
+      ["RUS-1/plan"])
+check("red_branches_of design CI decision but phase not red -> []",
+      red_branches_of({"action": "revise", "ciFailing": True, "phase": "design"},
+                      {"design": {"ciState": "green"}}, "RUS-1"), [])
+# implementation: each red slice branch, ascending. A [red, green, red] stack yields
+# slice-1 + slice-3; the green slice-2 is excluded (no needless re-push).
+check("red_branches_of implementation [red, green, red] -> slice-1 + slice-3",
+      red_branches_of({"action": "revise", "ciFailing": True, "phase": "implementation"},
+                      {"implementation": {"slices": [
+                          {"n": 1, "ciState": "red"},
+                          {"n": 2, "ciState": "green"},
+                          {"n": 3, "ciState": "red"}]}}, "RUS-7"),
+      ["RUS-7/slice-1", "RUS-7/slice-3"])
+check("red_branches_of implementation no red slices -> []",
+      red_branches_of({"action": "revise", "ciFailing": True, "phase": "implementation"},
+                      {"implementation": {"slices": [
+                          {"n": 1, "ciState": "green"},
+                          {"n": 2, "ciState": "pending"}]}}, "RUS-7"),
+      [])
+check("red_branches_of implementation missing slices -> []",
+      red_branches_of({"action": "revise", "ciFailing": True, "phase": "implementation"},
+                      {"implementation": {}}, "RUS-7"), [])
+
+# build_envelope re-emits ciRedBranches at the top level (additive; default []).
+check("default envelope ciRedBranches is empty list", ok_env["ciRedBranches"], [])
+check("err envelope ciRedBranches default empty", err_env["ciRedBranches"], [])
+_rb_dec = {"action": "revise", "phase": "implementation", "ciFailing": True,
+           "changeRequested": False, "commentTargets": [], "reason": "red CI"}
+_rb_phases = {"implementation": {"slices": [
+    {"n": 1, "ciState": "red"}, {"n": 2, "ciState": "green"}]}}
+rb_env = build_envelope("/wt/RUS-7", _rb_dec, _ex, ok=True, phases=_rb_phases,
+                        ticket="RUS-7")
+check("envelope re-emits top-level ciRedBranches from a CI decision",
+      rb_env["ciRedBranches"], ["RUS-7/slice-1"])
+check("ciRedBranches re-emit leaves decision untouched", rb_env["decision"], _rb_dec)
 
 
 def run():
