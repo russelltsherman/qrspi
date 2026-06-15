@@ -713,6 +713,12 @@ async function runCriticLoop(name, id, criticConfig) {
   const artifactPath = stg(id, name)
   const rubricLine = criticConfig.rubric ? `RUBRIC = ${criticConfig.rubric}\n` : ''
 
+  // AC-INSTR: accumulate the per-round verdict ({lens, pass, findings}) so every termination
+  // (including aborts) can be reduced+appended to the per-ticket ledger as one CriticStepMetrics
+  // record. The reduction (findingsCount) is done in PYTHON (recordCriticMetrics → reducer); JS
+  // only collects the raw verdicts. The single critic has no panel lens, so lens is null.
+  const metricRounds = []
+
   for (let round = 0; round < maxRounds; round++) {
     // One critic per round (single-critic, not parallel() — OQ2). The agent reads both
     // paths itself and returns the schema'd { pass, findings } verdict.
@@ -725,10 +731,13 @@ ${rubricLine}Read BOTH paths and judge ARTIFACT_PATH as a faithful derivation of
     )
     if (verdict === null) {
       log(`  ${id}: ${name} critic round ${round + 1} failed/skipped — stopping this ticket`)
-      return { ok: false, residualFindings: [] }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
+      return { ok: false, residualFindings: [], metrics }
     }
     const passed = verdict.pass === true
     const findings = Array.isArray(verdict.findings) ? verdict.findings : []
+    // AC-INSTR: capture this round's verdict (single-critic ⇒ no lens) for the ledger record.
+    metricRounds.push({ lens: null, pass: passed, findings })
     log(`  ${id}: ${name} critic round ${round + 1}/${maxRounds} → ${passed ? 'PASS' : `FAIL (${findings.length} finding(s))`}`)
 
     // Delegate the converge/revise/cap decision to the tested pure module. The verdict is
@@ -736,15 +745,18 @@ ${rubricLine}Read BOTH paths and judge ARTIFACT_PATH as a faithful derivation of
     const decision = await criticDecision([verdict], round, maxRounds)
     if (!decision) {
       log(`  ${id}: ${name} critic-loop decision failed to compute — stopping this ticket`)
-      return { ok: false, residualFindings: [] }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
+      return { ok: false, residualFindings: [], metrics }
     }
     if (decision.action === 'converged') {
       log(`  ${id}: ${name} critic CONVERGED at round ${round + 1}`)
-      return { ok: true, residualFindings: [] }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'converged')
+      return { ok: true, residualFindings: [], metrics }
     }
     if (decision.action === 'cap_reached') {
       log(`  ${id}: ${name} critic CAP-REACHED at round ${round + 1} — ${decision.residual_findings.length} residual finding(s) carried to PR body`)
-      return { ok: true, residualFindings: decision.residual_findings }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'cap_reached')
+      return { ok: true, residualFindings: decision.residual_findings, metrics }
     }
     // action === 'revise': spawn a reviser to rewrite stg(id, name) in place addressing the
     // findings, then re-critique on the next iteration. The reviser is the same typed phase
@@ -763,14 +775,16 @@ Read the current artifact at ARTIFACT_PATH and the upstream at UPSTREAM_PATH, th
     )
     if (rev === null) {
       log(`  ${id}: ${name} reviser round ${round + 1} failed/skipped — stopping this ticket`)
-      return { ok: false, residualFindings: [] }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
+      return { ok: false, residualFindings: [], metrics }
     }
   }
   // Loop exhausted without an explicit decision return (defensive — next_action's cap branch
   // returns cap_reached at round == maxRounds-1, so we normally exit inside the loop). Treat
   // as cap-reached with no captured findings rather than silently passing.
   log(`  ${id}: ${name} critic loop exhausted ${maxRounds} round(s) without converging`)
-  return { ok: true, residualFindings: [] }
+  const metrics = await recordCriticMetrics(id, name, metricRounds, 'exhausted')
+  return { ok: true, residualFindings: [], metrics }
 }
 
 // Multi-lens edge-critic PANEL loop (RUS-56) — the design-phase peer to the single-critic
@@ -806,6 +820,9 @@ async function runCriticPanelLoop(name, id, criticConfig) {
   const ticketContentPath = criticConfig.ticketContentPath
   const questionsPath = criticConfig.questionsPath
   const summaryRounds = []
+  // AC-INSTR: accumulate EVERY lens verdict across rounds ({lens, pass, findings}) so the panel
+  // step terminates into one CriticStepMetrics ledger record (findingsCount reduced in Python).
+  const metricRounds = []
 
   for (let round = 0; round < maxRounds; round++) {
     // Fan out one agent PER LENS in parallel. Each returns the schema'd { pass, findings }
@@ -831,7 +848,15 @@ Read all four paths and judge DESIGN_PATH through your lens. Return { pass, find
     const failedLens = replies.find(rp => !rp || rp.verdict === null)
     if (failedLens) {
       log(`  ${id}: ${name} panel round ${round + 1} — lens "${failedLens.lens}" failed/skipped, stopping this ticket`)
-      return { ok: false, residualFindings: [] }
+      // AC-INSTR: a lens failed to spawn — capture the lenses that DID reply this round so the
+      // aborted record reflects partial progress, then emit the record (aborts count too).
+      for (const rp of replies) {
+        if (rp && rp.verdict !== null) {
+          metricRounds.push({ lens: rp.lens, pass: rp.verdict.pass === true, findings: Array.isArray(rp.verdict.findings) ? rp.verdict.findings : [] })
+        }
+      }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
+      return { ok: false, residualFindings: [], metrics }
     }
 
     // Build the per-lens verdict list (each tagged with its lens id) for the pure reducer.
@@ -840,12 +865,15 @@ Read all four paths and judge DESIGN_PATH through your lens. Return { pass, find
       findings: Array.isArray(rp.verdict.findings) ? rp.verdict.findings : [],
       lens: rp.lens,
     }))
+    // AC-INSTR: capture every lens verdict this round for the ledger record.
+    for (const v of lensVerdicts) metricRounds.push({ lens: v.lens, pass: v.pass, findings: v.findings })
 
     // Reduce M lens verdicts to one authoritative round verdict via the tested pure module.
     const synth = await synthesizeVerdicts(lensVerdicts)
     if (!synth) {
       log(`  ${id}: ${name} panel round ${round + 1} — synthesize failed to compute, stopping this ticket`)
-      return { ok: false, residualFindings: [] }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
+      return { ok: false, residualFindings: [], metrics }
     }
     const passed = synth.pass === true
     const synthFindings = Array.isArray(synth.findings) ? synth.findings : []
@@ -859,15 +887,18 @@ Read all four paths and judge DESIGN_PATH through your lens. Return { pass, find
     const decision = await criticDecision([{ pass: passed, findings: synthFindings }], round, maxRounds)
     if (!decision) {
       log(`  ${id}: ${name} panel critic-loop decision failed to compute — stopping this ticket`)
-      return { ok: false, residualFindings: [] }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
+      return { ok: false, residualFindings: [], metrics }
     }
     if (decision.action === 'converged') {
       log(`  ${id}: ${name} panel CONVERGED at round ${round + 1} [${summaryRounds.join(' ')}]`)
-      return { ok: true, residualFindings: [], summary: `panel converged@r${round + 1} [${summaryRounds.join(' ')}]` }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'converged')
+      return { ok: true, residualFindings: [], summary: `panel converged@r${round + 1} [${summaryRounds.join(' ')}]`, metrics }
     }
     if (decision.action === 'cap_reached') {
       log(`  ${id}: ${name} panel CAP-REACHED at round ${round + 1} — ${decision.residual_findings.length} residual finding(s) carried to PR body`)
-      return { ok: true, residualFindings: decision.residual_findings, summary: `panel cap-reached@r${round + 1} (${decision.residual_findings.length} residual) [${summaryRounds.join(' ')}]` }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'cap_reached')
+      return { ok: true, residualFindings: decision.residual_findings, summary: `panel cap-reached@r${round + 1} (${decision.residual_findings.length} residual) [${summaryRounds.join(' ')}]`, metrics }
     }
     // action === 'revise': re-spawn the design producer to rewrite stg(id, name) in place
     // addressing the synthesized findings, then re-run the panel next iteration. The findings
@@ -887,13 +918,15 @@ Read the current artifact at ARTIFACT_PATH and the upstream inputs, then REWRITE
     )
     if (rev === null) {
       log(`  ${id}: ${name} panel reviser round ${round + 1} failed/skipped — stopping this ticket`)
-      return { ok: false, residualFindings: [] }
+      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
+      return { ok: false, residualFindings: [], metrics }
     }
   }
   // Defensive: next_action returns cap_reached at round == maxRounds-1, so we normally exit
   // inside the loop. Treat exhaustion as cap-reached with no captured findings.
   log(`  ${id}: ${name} panel loop exhausted ${maxRounds} round(s) without converging`)
-  return { ok: true, residualFindings: [], summary: `panel exhausted ${maxRounds} round(s) [${summaryRounds.join(' ')}]` }
+  const metrics = await recordCriticMetrics(id, name, metricRounds, 'exhausted')
+  return { ok: true, residualFindings: [], summary: `panel exhausted ${maxRounds} round(s) [${summaryRounds.join(' ')}]`, metrics }
 }
 
 // Invoke the tested pure reducer qrspi_critic_synthesize.py via a worker (the JS sandbox cannot
@@ -913,6 +946,71 @@ as-is — HARD STOP, do NOT retry or improvise.`,
   )
   if (!out || typeof out.pass !== 'boolean') return null
   if (!Array.isArray(out.findings)) out.findings = []
+  return out
+}
+
+// The CriticStepMetrics record the qrspi_critic_metrics.py reducer emits (RUS-77, AC-INSTR):
+// one terminated critic step (one edge-critic loop OR one panel loop) reduced to { phase,
+// rounds:[{lens, pass, findingsCount}], terminalAction }. tokensIn/tokensOut are OPTIONAL and
+// ABSENT in the live path (OQ2 — no per-lens usage exposed). The JS glue never re-derives this
+// reduction; the tested pure module (scripts/qrspi_critic_metrics.py) is the single source of
+// truth (findingsCount is derived in Python, never in JS — ref: impl-log Slice 1 notes).
+const CRITIC_METRICS_SCHEMA = {
+  type: 'object',
+  required: ['phase', 'rounds', 'terminalAction'],
+  properties: {
+    phase: { type: ['string', 'null'] },
+    terminalAction: { type: 'string', enum: ['converged', 'cap_reached', 'exhausted', 'aborted'] },
+    rounds: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['lens', 'pass', 'findingsCount'],
+        properties: {
+          lens: { type: ['string', 'null'] },
+          pass: { type: 'boolean' },
+          findingsCount: { type: 'integer' },
+        },
+      },
+    },
+    tokensIn: { type: 'integer' },
+    tokensOut: { type: 'integer' },
+  },
+}
+
+// Build one CriticStepMetrics record from a terminated critic step's accumulated per-round
+// verdicts AND durably append it to the per-ticket ledger — via a worker, because the JS sandbox
+// cannot run python (RUS-77, AC-INSTR). Mirrors synthesizeVerdicts/criticDecision: the fragile
+// verdict text is piped on stdin so it never round-trips through the worker's stdout echo, and the
+// python runs at the worker's main-repo-root cwd via engineCmd('scripts/…') — the SAME convention
+// the sibling reducers (synthesize/decision) already prove, since r/repoRoot is NOT in scope in the
+// loops (they take only name/id/criticConfig).
+//
+// The reduction (findingsCount per round) is derived in PYTHON by qrspi_critic_metrics.py — never
+// in JS. Its bare-record stdout is captured and handed to qrspi_metrics_append.py, the single
+// envelope authority (it injects ticketId + timestamp and appends one JSON line, failing CLOSED on
+// a bad write). One chained command runs both: the reducer's record is the worker's return value
+// (for the criticMetrics fold), and the appender is the side-effecting durability gate — a non-zero
+// appender exit fails the chain so the worker surfaces no record (treated here as null ⇒ a
+// step-instrumentation failure the caller logs, never a silent skip).
+//
+// `verdicts` is the accumulated rounds[] (each {lens, pass, findings}); `terminalAction` is the
+// loop's matched termination (converged|cap_reached|exhausted|aborted — NEVER revise, which is a
+// mid-loop continuation the reducer rejects). Returns the parsed CriticStepMetrics record, or null
+// on any failure (worker / parse / append).
+async function recordCriticMetrics(id, phase, verdicts, terminalAction) {
+  const out = await agent(
+    `You are the CRITIC-METRICS worker. Your cwd is the main repo root. Run EXACTLY this one
+command verbatim (no path edits, no exploration) and return its JSON stdout verbatim:
+
+  printf '%s' ${JSON.stringify(JSON.stringify(verdicts))} | python3 ${engineCmd('scripts/qrspi_critic_metrics.py')} --terminal-action ${terminalAction} --phase ${phase} | tee /tmp/qrspi-metrics-${id}-${phase}.json && python3 ${engineCmd('scripts/qrspi_metrics_append.py')} --ticket ${id} --record "$(cat /tmp/qrspi-metrics-${id}-${phase}.json)" >/dev/null && cat /tmp/qrspi-metrics-${id}-${phase}.json
+
+It builds the CriticStepMetrics record, appends it to the per-ticket ledger, then re-prints the
+record as JSON { phase, rounds, terminalAction }. Parse and return that record verbatim. If any
+step errors (non-zero exit), return that error as-is — HARD STOP, do NOT retry or improvise.`,
+    { label: `critic-metrics:${id}:${phase}`, phase: 'Critic', schema: CRITIC_METRICS_SCHEMA }
+  )
+  if (!out || !Array.isArray(out.rounds) || typeof out.terminalAction !== 'string') return null
   return out
 }
 
@@ -1292,6 +1390,11 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel, criti
     // panel also returns a one-line summary the caller can fold into its result summary.
     criticConfig.residualFindings = cr.residualFindings
     if (cr.summary) criticConfig.criticSummary = cr.summary
+    // AC-INSTR: surface this step's CriticStepMetrics record to the caller the SAME way (on the
+    // config object), so doDesign can fold it into the ticket result's criticMetrics array. The
+    // loop already appended it to the ledger; this is the in-memory copy for the result object.
+    // Null when the metrics shell-out itself failed (logged, never silently dropped).
+    if (cr.metrics) criticConfig.criticMetrics = cr.metrics
   }
   // The agent wrote to a token-free staging path; move it to the canonical worktree
   // path deterministically. This is also the real success gate: an agent that
@@ -1567,6 +1670,20 @@ Return: ok, prUrl, newStatus, summary (1-2 sentences).`,
     { label: `finalize-design:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
   const out = finResult(t, fin, 'run_design')
+  // AC-INSTR (RUS-77 Modified Types: TicketResult.criticMetrics): collect each phase's
+  // CriticStepMetrics record (surfaced by runPhase onto its criticConfig when that phase's critic
+  // ran) into one array and fold it into the result object. A phase whose critic was disabled by
+  // config has an undefined criticConfig (so no `.criticMetrics`); records ride one design
+  // branch/PR in phase order (questions → research → design). Per plan §12, when EVERY phase
+  // critic is disabled (the critics-DISABLED path) NO record is surfaced and the `criticMetrics`
+  // key is OMITTED entirely — the disabled path returns the byte-for-byte-unchanged result object
+  // (no ledger write either: the loops were never dispatched).
+  const criticMetrics = [
+    questionsCritic?.criticMetrics,
+    researchCritic?.criticMetrics,
+    designCritic?.criticMetrics,
+  ].filter(Boolean)
+  if (criticMetrics.length) out.criticMetrics = criticMetrics
   if (out.action === 'run_design' && fin && fin.ok) {
     // Fold the N-select stage summary (per-candidate judge scores + winner + graft) and the
     // panel's per-round pass/fail summary (and any residual-finding count) into the result

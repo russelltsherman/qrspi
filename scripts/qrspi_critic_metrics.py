@@ -101,3 +101,56 @@ def build_record(verdicts, terminalAction, usage=None, phase=None):
             record["tokensOut"] = usage["tokensOut"]
 
     return record
+
+
+# --- thin CLI (RUS-77 Slice 2) ---------------------------------------------
+# A deterministic stdin->stdout shim so the JS orchestrator (which cannot run python
+# in its sandbox) can invoke the pure `build_record` reducer via a worker, exactly
+# like qrspi_critic_synthesize.py exposes `synthesize`. The pure function above is
+# unchanged; this only exposes it so the slice-2 wiring can derive `findingsCount`
+# in Python (never in JS — ref: impl-log Slice 1 notes) before handing the BARE
+# CriticStepMetrics record to qrspi_metrics_append.py for the envelope + append.
+#
+#   printf '%s' '<json verdicts array>' \
+#     | python3 qrspi_critic_metrics.py --terminal-action <action> [--phase <p>]
+#
+# Reads a JSON ARRAY of per-round/per-lens verdict entries (each {lens, pass,
+# findings}) from stdin, builds the canonical CriticStepMetrics record, and prints
+# it as JSON on stdout. An invalid --terminal-action fails CLOSED (exit 2 via the
+# ValueError from build_record); a non-array / unparseable stdin reduces to the
+# empty rounds list (a terminated step that ran zero captured rounds — still a valid
+# record carrying the terminalAction). `usage` is intentionally NOT exposed: the
+# live path supplies no per-lens token usage (OQ2), so the cost fields stay absent.
+def main(argv=None):
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser(
+        description="Reduce one critic step's verdicts (stdin JSON array) to a "
+                    "CriticStepMetrics record (self-contained CLI)")
+    parser.add_argument("--terminal-action", required=True,
+                        help="One of %s" % sorted(VALID_TERMINAL_ACTIONS))
+    parser.add_argument("--phase", default=None,
+                        help="Phase label this critic step belongs to")
+    args = parser.parse_args(argv)
+
+    raw = sys.stdin.read()
+    try:
+        verdicts = json.loads(raw) if raw.strip() else []
+    except (ValueError, TypeError):
+        verdicts = []
+    if not isinstance(verdicts, list):
+        verdicts = []
+
+    # build_record raises ValueError on an invalid terminalAction (fail-closed);
+    # let it propagate to a non-zero exit so the JS worker surfaces the failure.
+    record = build_record(verdicts, args.terminal_action, phase=args.phase)
+    json.dump(record, sys.stdout)
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
