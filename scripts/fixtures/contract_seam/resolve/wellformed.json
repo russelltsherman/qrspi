@@ -1,0 +1,24 @@
+{
+  "ok": true,
+  "repoRoot": "/repo",
+  "worktreeDir": "/repo/.worktrees/RUS-1",
+  "existing": [
+    "design"
+  ],
+  "decision": {
+    "action": "run_design",
+    "phase": "design",
+    "nextPhase": null,
+    "resetToPhase": null,
+    "discardPhases": [],
+    "commentTargets": [],
+    "changeRequested": false,
+    "reason": "Entry gate satisfied (assigned + Selected); no design branch yet."
+  },
+  "commentTargets": [],
+  "reviewers": "@me",
+  "teamReviewers": "",
+  "ticketContentPath": "/repo/.worktrees/RUS-1/.qrspi/RUS-1/ticket.md",
+  "tip": "RUS-1/design",
+  "slices": []
+}

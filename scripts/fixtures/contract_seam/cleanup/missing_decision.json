@@ -1,0 +1,1 @@
+{"ok": true, "repoRoot": "/repo", "reason": "envelope omits the decision string", "removed": {"worktree": false, "branches": [], "remotes": []}, "failedRemotes": [], "dryRun": false}

@@ -1,0 +1,21 @@
+{
+  "ok": true,
+  "repoRoot": "/repo",
+  "decision": "cleanup",
+  "reason": "stack fully merged; reaping worktree and branches",
+  "removed": {
+    "worktree": true,
+    "branches": [
+      "RUS-1/design",
+      "RUS-1/plan",
+      "RUS-1/slice-1"
+    ],
+    "remotes": [
+      "RUS-1/design",
+      "RUS-1/plan",
+      "RUS-1/slice-1"
+    ]
+  },
+  "failedRemotes": [],
+  "dryRun": false
+}
