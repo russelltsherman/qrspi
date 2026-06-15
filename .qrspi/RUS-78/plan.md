@@ -3,14 +3,14 @@
 **Structure basis:** structure.md @ 2026-06-15T00:00:00Z
 **Generated:** 2026-06-15T00:00:00Z
 **Status:** draft
-**Total steps:** 31
+**Total steps:** 34
 
 > **Plan-phase pins (decisions the structure deferred):**
 > - **`runId` source** — the JS append call site passes the orchestrator's per-invocation id when present, else a generated id. Mechanism: a module-level `runId` constant computed once at the top of `qrspi-batch.js` (the imperative shell) as `process.env.QRSPI_RUN_ID || crypto.randomUUID()`; the Python appender takes `run_id` as a required string argument (no default), so the contract "always present, always a string on every appended line" holds. Step 8 confirms the actual call site against the file before editing; if the line-building site differs in shape, thread the same constant there.
 > - **`perLens` key shape** — `perLens` is keyed by the lens string; the single edge critic (`lens` is `null`) rolls under the literal key `"edge"`. No other lens key is rewritten.
 > - **Slice 2 runbook home** — a markdown runbook section, not a script (the structure left it open; a doc avoids adding an untested script to satisfy a manual/opt-in measurement). Home: `docs/critic-cost-ab.md`.
-> - **Teeth-eval layout** — fixtures under `evals/teeth/` (`design.md`, `research.md`); runner is `scripts/qrspi_teeth_eval.py` (consistent with the `scripts/qrspi_*` convention, off `run_tests.py` by living outside the `*_test.py` glob).
-> - **Trial count / threshold** — `--trials` default 3, majority threshold ≥2-of-3 (matches `run_eval.py:38`). Per the structure's unverified-assumption #3, the runner implements its own trial/majority loop rather than assuming `run_eval.py`'s `--trials` is wired to a working trial loop; Step 28 confirms `run_eval.py` reusability before deciding whether to call into it or self-implement.
+> - **Teeth-eval layout (corrected — the design's `scripts/qrspi_teeth_eval.py` is infeasible).** A lens is a registered `agentType` spawnable **only from a Workflow runner** (qrspi-batch.js:20–24) and Reads its inputs as files (`tools: Read`), so a plain `python3` script cannot drive it and `run_eval.py`'s tool-less single-turn seam cannot either. The runner is therefore the workflow **`.claude/workflows/qrspi-teeth-eval.js`**. Fixtures live under `evals/teeth/`: `design.md`, `research.md`, **`ticket.md`** (carries the omitted AC the completeness lens anchors on), **`questions.md`** (the completeness lens Reads `QUESTIONS_PATH`). The majority/marker decision is extracted to a pure CI-tested core **`scripts/qrspi_teeth_assert.py`** (+ `_test.py`) so Slice 3 has a deterministic test contribution while the agent spawning stays off CI.
+> - **Trial count / threshold** — `--trials` default 3, majority threshold ≥2-of-3. The workflow runs the trial loop (it does NOT reuse `run_eval.py` — confirmed not reusable: its `call_model` is a tool-less single-turn API call that cannot let a lens Read fixtures); the threshold math lives in `qrspi_teeth_assert.py`. Each defect carries a **unique quotable marker** the owning lens must cite, turning "names its defect" into a deterministic substring test on the verdict `findings`.
 
 ## Slice 1: Instrumentation — runId field + critic summarizer
 
@@ -86,24 +86,33 @@
 
 ---
 
-## Slice 3: Teeth eval — flawed-design fixture + opt-in panel runner
+## Slice 3: Teeth eval — flawed-design fixtures + pure assertion core + opt-in workflow runner
 
-### Setup
+> **Mechanism correction (pinned above):** the design named `scripts/qrspi_teeth_eval.py`, but a lens is a registered `agentType` spawnable only from a **Workflow runner** (qrspi-batch.js:20–24) and Reads its inputs as files, so a `python3` script cannot drive it and `run_eval.py`'s tool-less single-turn seam cannot either. Slice 3 therefore ships: (1) four fixtures under `evals/teeth/`, (2) a pure CI-tested decision core `scripts/qrspi_teeth_assert.py`, (3) the workflow runner `.claude/workflows/qrspi-teeth-eval.js`. Steps renumbered accordingly.
 
-27. ✨ Create `evals/teeth/research.md` — companion research fixture that explicitly documents one identifiable fact (e.g. that a named file/behavior is X). This is the fact the flawed design will contradict; it anchors the edge-alignment defect (structure §Contracts teeth lens→defect map, design review finding #1).
+### Fixtures
 
-### Core Logic
+27. ✨ Create `evals/teeth/research.md` — companion research fixture documenting one identifiable, quotable fact (e.g. a named symbol `frobnicate_widget()` behaves as X). This is the fact the flawed design will contradict; it anchors the edge-alignment defect. The fact must be one a **correct** digest retains (so digest-ON the lens must still catch it) — structure §Contracts teeth lens→defect map, design review finding #1.
+28. ✨ Create `evals/teeth/ticket.md` + `evals/teeth/questions.md` — the completeness lens anchors on ticket ACs (Reads `TICKET_CONTENT_PATH`) and answered questions (Reads `QUESTIONS_PATH`), so the omitted-AC defect must live in `ticket.md` (carry an AC with a unique marker, e.g. `AC-TEETH-COMPLETENESS`); `questions.md` is a minimal valid answered-questions fixture that the design fully covers (so completeness fails ONLY on the omitted AC, not on a question gap).
+29. ✨ Create `evals/teeth/design.md` — single flawed design fixture carrying **three** clearly-labelled defects, each citing its unique marker: (a) silently omits `AC-TEETH-COMPLETENESS` from `ticket.md` → **completeness**; (b) a named internal contradiction (e.g. states a constant as two different values) → **internal-consistency**; (c) a claim contradicting the `frobnicate_widget()` fact in `evals/teeth/research.md` → **edge-alignment**. One combined fixture per OQ3 (reviewer: "single design"), each defect labelled so per-lens attribution stays unambiguous.
 
-28. ✨ Create `evals/teeth/design.md` — single flawed design fixture carrying **three** clearly-labelled defects: (a) a named omitted acceptance criterion → **completeness**; (b) a named internal contradiction → **internal-consistency**; (c) a design claim that contradicts the named fact in `evals/teeth/research.md` → **edge-alignment**. One combined fixture per OQ3 (reviewer: "single design"), each defect labelled so per-lens attribution stays unambiguous.
-29. ✨ Create `scripts/qrspi_teeth_eval.py` — opt-in runner that spawns the real design panel **digest-ON** against `evals/teeth/design.md` + `evals/teeth/research.md`. First confirm whether `scripts/run_eval.py`'s `--trials` is wired to a working trial loop (structure Unverified Assumption #3): if reusable, call into it; otherwise implement the runner's own trial/majority loop. For each owning lens (completeness, internal-consistency, edge-alignment), run the assertion over `--trials` (default 3) and pass iff the lens returns `pass=false` naming its defect in a **majority** (≥2-of-3) of trials. Expose `--trials` (default 3). Must NOT match the `*_test.py` glob, so `run_tests.py`/CI never picks it up.
-30. ⚠️ Modify `scripts/qrspi_teeth_eval.py` — ensure the edge-alignment assertion explicitly references the research-contradicting fact present in `evals/teeth/research.md`, so a digest that trims that fact makes edge-alignment pass and the eval fail (the non-vacuity / digest-risk-gating check, design review finding #1).
+### Core Logic — pure assertion core (CI-tested)
+
+30. ✨ Create `scripts/qrspi_teeth_assert.py` — pure decision core, no agents. `evaluate(trials_by_lens: dict[str, list[dict]], markers: dict[str, str], threshold: int = 2) -> dict` where each verdict is `{pass: bool, findings: list[str]}`: a trial **catches** iff `verdict["pass"] is False AND markers[lens] in some finding string`; a lens passes iff `caught >= threshold`. Returns `{perLens: {lens: {caught, total, pass}}, overallPass: all-lenses-pass}`. Add a thin `main(argv)` reading the trials JSON on stdin + markers/threshold args and printing the report JSON (the `synthesizeVerdicts` stdin pattern, qrspi-batch.js:972–986), so the workflow can call it via a worker.
+31. ✨ Create `scripts/qrspi_teeth_assert_test.py` — stdlib `unittest` over synthetic verdicts: catch-via-marker-with-fail, no-catch-when-pass-true, no-catch-when-marker-absent, majority threshold (2-of-3 passes, 1-of-3 fails), `overallPass` aggregation. Auto-discovered by `run_tests.py`.
+
+### Core Logic — opt-in workflow runner (off CI)
+
+32. ✨ Create `.claude/workflows/qrspi-teeth-eval.js` — opt-in runner (REPLACES the infeasible `scripts/qrspi_teeth_eval.py`). `meta` with `name: 'qrspi-teeth-eval'`; `args.trials` default 3. Resolve the four `evals/teeth/*` fixture paths to absolute. **Build the digest** by spawning a worker that runs `python3 <engineCmd>scripts/qrspi_research_digest.py --research <evals/teeth/research.md> --out /tmp/teeth/research-digest.md && test -s …` (verbatim `buildResearchDigest` pattern, qrspi-batch.js:999–1004); fail loud if empty. **Fan out** `parallel()` over `{completeness, internal-consistency, edge-alignment} × trials`, each `agent({ agentType: 'qrspi-design-critic-<lens>', schema: CRITIC_VERDICT_SCHEMA })` with the SAME prompt shape `runCriticPanelLoop` uses (qrspi-batch.js:870–875): `DESIGN_PATH`/`TICKET_CONTENT_PATH`/`RESEARCH_PATH`/`QUESTIONS_PATH` + the threaded `DIGEST_PATH` line (digest-ON). Group verdicts by lens.
+33. ⚠️ Modify `.claude/workflows/qrspi-teeth-eval.js` — hand the grouped verdicts + the per-lens markers + threshold (2) to `scripts/qrspi_teeth_assert.py` via a worker (the `synthesizeVerdicts` stdin worker pattern), and `return` its `{perLens, overallPass}` report augmented with `{digestOn: true, trials}`. The edge-alignment marker is the `frobnicate_widget()` fact present in `evals/teeth/research.md`, so a digest that trimmed it makes edge-alignment pass and `overallPass` go false (the non-vacuity / digest-risk-gating check, review finding #1).
 
 ### Verify Slice 3
 
-31. **Checkpoint:** `python3 scripts/qrspi_teeth_eval.py --trials 3` (opt-in, off CI)
-    - [ ] Manual (opt-in): completeness, internal-consistency, and edge-alignment each return `pass=false` naming their respective defect in ≥2-of-3 trials, with the digest lever ON.
-    - [ ] `python3 scripts/run_tests.py --list` does NOT list `qrspi_teeth_eval` (it stays off the deterministic CI gate; AC-Teeth-eval, Q11).
-    - [ ] Inspection: the edge-alignment assertion references a fact present in `evals/teeth/research.md` (the non-vacuity / digest-risk check, review finding #1).
+34. **Checkpoint:** `python3 scripts/run_tests.py teeth_assert` (deterministic, in CI) **and** the opt-in workflow run.
+    - [ ] `python3 scripts/run_tests.py teeth_assert` passes (the pure majority/marker core).
+    - [ ] Manual (opt-in): `Workflow({name:"qrspi-teeth-eval", args:{trials:3}})` returns a report where completeness, internal-consistency, and edge-alignment each show `pass=false` naming their marker in ≥2-of-3 trials, `digestOn:true`, `overallPass:true`.
+    - [ ] `python3 scripts/run_tests.py --list` does NOT list any teeth runner (the workflow lives in `.claude/workflows/`, outside the `scripts/*_test.py` glob — off the deterministic CI gate; AC-Teeth-eval, Q11).
+    - [ ] Inspection: the edge-alignment marker references a fact present in `evals/teeth/research.md` that a correct digest retains (the non-vacuity / digest-risk check, review finding #1).
 
 ---
 
@@ -112,4 +121,5 @@
 - **Step 8 (`qrspi_metrics_append.py` `run_id` param):** the new parameter is required; reverting means removing the `run_id` parameter and the `"runId"` field. Because Step 10's JS call site passes it, revert Steps 8 and 10 together (and Step 9's constant) to avoid a call-site/signature mismatch that would break the append seam at runtime.
 - **Step 9/10 (`qrspi-batch.js` call site):** edits touch only the append call site, not critic-loop control flow; revert by removing the `runId` constant and restoring the original append argument list. No data migration — the ledger is append-only and a missing `runId` on old lines is tolerated by the summarizer (`run_id` filter simply excludes them).
 - **Step 23 (`.qrspi/config.example.json`):** config example only; no default-behavior change (default stays OFF). Revert by removing the example entry. No runtime config is altered (the example file is not the active `config.json`).
+- **Steps 30–33 (teeth eval):** all-additive new files (`evals/teeth/*`, `scripts/qrspi_teeth_assert.py`/`_test.py`, `.claude/workflows/qrspi-teeth-eval.js`). No existing file is modified and nothing is wired into CI, so revert = delete the new files; the deterministic suite is unaffected either way (only the additive `teeth_assert` test joins `run_tests.py`).
 - **No DB migrations and no destructive operations** in this plan. The ledger schema change is purely additive (one new field on new lines; existing lines unchanged).

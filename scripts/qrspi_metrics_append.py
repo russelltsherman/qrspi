@@ -64,15 +64,18 @@ def ledger_path(repo_root, ticket):
                         "critic-metrics.jsonl")
 
 
-def wrap_envelope(record, ticket, timestamp):
+def wrap_envelope(record, ticket, timestamp, run_id):
     """Wrap a CriticStepMetrics ``record`` in the CriticMetricsLedgerLine envelope.
 
-    Returns a shallow copy of ``record`` with ``ticketId`` and ``timestamp``
-    injected — the appender is the single envelope authority, so its values win
-    over any pre-existing ``ticketId``/``timestamp`` in the record. Pure."""
+    Returns a shallow copy of ``record`` with ``ticketId``, ``timestamp`` and
+    ``runId`` injected — the appender is the single envelope authority, so its
+    values win over any pre-existing ``ticketId``/``timestamp``/``runId`` in the
+    record. ``run_id`` is required and always lands as the string field ``runId``
+    on every appended line (RUS-78). Pure."""
     line = dict(record)
     line["ticketId"] = ticket
     line["timestamp"] = timestamp
+    line["runId"] = run_id
     return line
 
 
@@ -105,6 +108,9 @@ def main(argv=None):
     parser.add_argument("--ticket", required=True, help="Ticket id, e.g. RUS-77")
     parser.add_argument("--record", required=True,
                         help="A CriticStepMetrics record as a JSON string")
+    parser.add_argument("--run-id", dest="run_id", required=True,
+                        help="The orchestrator's per-invocation run id (always "
+                             "stamped onto the appended line as runId)")
     args = parser.parse_args(argv)
 
     # Fail-closed on malformed input: exit non-zero, write nothing.
@@ -125,7 +131,7 @@ def main(argv=None):
     repo_root = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
     path = ledger_path(repo_root, args.ticket)
     timestamp = datetime.now(timezone.utc).isoformat()
-    ledger_line = wrap_envelope(record, args.ticket, timestamp)
+    ledger_line = wrap_envelope(record, args.ticket, timestamp, args.run_id)
     lines, bytes_written, error = append_line(path, ledger_line)
 
     env = {
