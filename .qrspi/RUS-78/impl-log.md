@@ -28,3 +28,33 @@
 - Slice 1 has no `pr-summary.md` yet (that is the qrspi-pr phase after all slices). Slices 2 and 3 are independent (`Depends on: none`) and touch disjoint files (config.example.json / docs vs. evals + teeth assert), so no cross-slice coupling from this slice.
 
 ---
+
+## Session 2 — Slice 2: Cost-reduction (document the existing digest lever)
+
+**Timestamp:** 2026-06-15T20:31:00Z
+**Tasks completed:** T23, T24, T25, T26
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py` → 38 passed, 0 failed (full suite, no regression)
+- `python3 scripts/run_tests.py research_digest` → 1 file passed (cited RUS-77 `test_digest_strictly_shorter` et al.)
+- `python3 scripts/run_tests.py critics_config` → 1 file passed (cited RUS-77 `test_digest_default_off` / `test_digest_enabled_true_parses`)
+- Manual: `python3 -c "import json; json.load(open('.qrspi/config.example.json'))"` parses; asserted `critics.design.digest.enabled` is still `false` (no default flip) AND the opt-in example (`$comment_optin`) is present/discoverable.
+- Manual: `test -s docs/critic-cost-ab.md` → runbook present, non-empty.
+
+**Deviations from structure.md:**
+
+- none material. Structure §Slice 2 said "add a commented/example `critics.design.digest.enabled: true` entry." The file ALREADY shipped a `critics.design.digest` block (`enabled: false`, mirroring the runtime default) plus a `$comment_cost_levers` note from RUS-77. To satisfy the contract's hard "**No default flip** (default stays OFF)" while making opt-in discoverable, I did NOT set the live `enabled` value to `true` (that would have flipped the default-mirror); instead I added a `$comment_optin` sibling INSIDE the `digest` block that documents the literal opt-in (`"digest": { "enabled": true }`) and points at the cited RUS-77 tests and the runbook. This keeps valid JSON (the structure-sanctioned `_comment` sibling fallback, plan step 23) and preserves OFF as the mirrored default. The discoverability + no-flip ACs both hold.
+
+**Deviations from plan.md:**
+
+- none material. Plan step 24 pinned the runbook home as `docs/critic-cost-ab.md` (markdown, not a script) — created exactly there. Plan step 23's `_comment` sibling fallback was used (see structure deviation above). Plan step 25 is an explicit no-op (no new automated test by design — the structural cost claim is cited via the shipped RUS-77 tests, not re-created).
+
+**Notes for next session:**
+
+- Slice 2 is config/docs only — zero code or default-behavior change. The runtime default for the digest lever remains OFF; only the example file and a new runbook were added/edited. No new automated test was introduced (intentional, per plan step 25).
+- The opt-in example lives at `.qrspi/config.example.json` → `critics.design.digest.$comment_optin` (a doc-only `$comment*` key the harness ignores); the live `digest.enabled` stays `false`. The runbook is `docs/critic-cost-ab.md` (manual A/B, explicitly OFF the CI gate).
+- Slice 3 (teeth eval) is independent (`Depends on: none`) and touches disjoint files (`evals/teeth/*`, `scripts/qrspi_teeth_assert.py` + `_test.py`, `.claude/workflows/qrspi-teeth-eval.js`). No coupling to Slice 2. Note: the worktree.md Session-3 table still names the OLD `scripts/qrspi_teeth_eval.py` layout (T29/T30); the AUTHORITATIVE layout is the corrected one in structure.md §Contracts / plan.md §Plan-phase pins (workflow runner `.claude/workflows/qrspi-teeth-eval.js` + pure CI-tested `scripts/qrspi_teeth_assert.py`). Follow structure/plan, not the stale worktree task descriptions.
+- Cited RUS-77 tests confirmed green this session: `qrspi_research_digest_test.py` and `qrspi_critics_config_test.py` both pass under `run_tests.py`. Full suite still 38/38.
+
+---
