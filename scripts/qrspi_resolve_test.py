@@ -66,6 +66,10 @@ check_raises("rejects too many slashes", lambda: parse_name_with_owner("a/b/c"))
 check_raises("rejects None", lambda: parse_name_with_owner(None))
 
 # --- detect_existing --------------------------------------------------------
+# RESUME GUARANTEE (phase boundary): detect_existing is the deterministic skip
+# gate. A phase is reused iff its artifact is present AND non-empty; a missing OR
+# zero-byte (truncated/aborted-write) artifact reads False and recomputes — the
+# safe direction. See docs/testing-dynamic-workflows.md "Resume guarantee".
 check("missing dir -> all False", detect_existing("/no/such/dir/anywhere"),
       {name: False for name in ARTIFACTS})
 
@@ -84,6 +88,10 @@ with tempfile.TemporaryDirectory() as d:
     check("all six keys present", sorted(got.keys()), sorted(ARTIFACTS))
 
 # --- pick_tip ---------------------------------------------------------------
+# RESUME GUARANTEE (slice boundary): pick_tip selects the highest present slice
+# (max N), gap-agnostic — it never synthesizes a missing slice, so a worktree is
+# reused on the real tip. Which slice runs *next* is the JS/LLM alreadyCommitted
+# decision (inspection-only). See docs "Resume guarantee".
 check("no branches -> None", pick_tip(set(), "RUS-1"), None)
 check("design only", pick_tip({"RUS-1/design"}, "RUS-1"), "RUS-1/design")
 check("plan beats design", pick_tip({"RUS-1/design", "RUS-1/plan"}, "RUS-1"),
@@ -96,6 +104,10 @@ check("slice beats plan even out of order",
       "RUS-1/slice-3")
 
 # --- slice_branches (ascending slice branch names from the normalized branch set) --
+# RESUME GUARANTEE (slice boundary): slice_branches lists exactly the present
+# slice branches in ascending order, gap-agnostic — it never fabricates a missing
+# slice number, so the land/resume path enumerates only real slices. See docs
+# "Resume guarantee".
 check("no slice branches -> empty list", slice_branches(set(), "RUS-1"), [])
 check("plan/design only -> no slices",
       slice_branches({"RUS-1/design", "RUS-1/plan"}, "RUS-1"), [])
@@ -105,6 +117,11 @@ check("ascending slice branch names",
 check("slices sorted ascending even when set is out of order",
       slice_branches({"RUS-1/slice-3", "RUS-1/slice-1", "RUS-1/slice-2"}, "RUS-1"),
       ["RUS-1/slice-1", "RUS-1/slice-2", "RUS-1/slice-3"])
+# Non-contiguous set: a gap (slice-2 absent) must NOT synthesize the missing slice
+# — only the present branches are listed, preserving gap-agnostic resume (AC2).
+check("slice_branches non-contiguous",
+      slice_branches({"RUS-1/slice-1", "RUS-1/slice-3"}, "RUS-1"),
+      ["RUS-1/slice-1", "RUS-1/slice-3"])
 
 # --- build_envelope ---------------------------------------------------------
 _dec = {"action": "run_design", "reason": "x"}
@@ -125,6 +142,31 @@ rev_env = build_envelope("/wt/RUS-1", _dec, _ex, ok=True,
                          reviewers="alice,bob", team_reviewers="org/team")
 check("envelope carries reviewers", rev_env["reviewers"], "alice,bob")
 check("envelope carries teamReviewers", rev_env["teamReviewers"], "org/team")
+
+# --- RESUME GUARANTEE (AC3): existing-map passthrough onto the envelope --------------
+# Seed a real <tmp>/.qrspi/<ticket>/ worktree layout, build the `existing` map from
+# it via detect_existing (the deterministic phase-skip gate), and assert build_envelope
+# carries that map VERBATIM onto the envelope's `existing` field. This is a passthrough
+# IDENTITY check, NOT a behavioral skip proof: the actual phase-skip causation is the JS
+# runPhase early-return (`if (existing && existing[name]) return true`), which is
+# harness-coupled and inspection-only, not unit-tested here. See design.md §Decision 2
+# and docs/testing-dynamic-workflows.md "Resume guarantee".
+with tempfile.TemporaryDirectory() as _wt:
+    _qd = os.path.join(_wt, ".qrspi", "RUS-1")
+    os.makedirs(_qd)
+    # Seed two persisted (non-empty) upstream phases; leave the rest absent.
+    with open(os.path.join(_qd, "design.md"), "w") as fh:
+        fh.write("persisted design")
+    with open(os.path.join(_qd, "plan.md"), "w") as fh:
+        fh.write("persisted plan")
+    _seeded_map = detect_existing(_qd)
+    # Sanity: the seeded layout produces the expected skip map (design+plan present).
+    check("AC3 seeded layout: design present", _seeded_map["design"], True)
+    check("AC3 seeded layout: plan present", _seeded_map["plan"], True)
+    check("AC3 seeded layout: research absent", _seeded_map["research"], False)
+    _ac3_env = build_envelope(_wt, _dec, _seeded_map, ok=True)
+    check("AC3 build_envelope carries the existing skip-map verbatim (passthrough)",
+          _ac3_env["existing"], _seeded_map)
 
 # --- root-level tip/slices (additive; the land worker reads the slice list from the
 # contract instead of reconstructing <id>/slice-1 from the ticket id; RUS-70) --------

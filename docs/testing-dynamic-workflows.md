@@ -174,3 +174,87 @@ A zero-agent probe workflow inspected the sandbox's capabilities.
 - **Consequence:** step 4's clean module-extraction path is ruled out. Cover the
   residual JS seam via vm-sandbox tests or by pushing parsing into the tested
   Python core; do **not** attempt a `require()`-based helper module.
+
+## Resume guarantee
+
+QRSPI is **resumable at phase and slice boundaries**: if a run is interrupted, a
+re-run reuses every already-completed unit and recomputes only the unit that was
+in flight. This is the same Functional-Core/Imperative-Shell split as everything
+else in this doc — the *inputs* to the resume decision are deterministic, tested
+Python; the *act* of skipping lives in the JS shell and is inspection-only.
+
+### What "resume" means here
+
+- **Phase boundary.** Planning-phase done-ness is decided by
+  `detect_existing(qrspi_dir)` (`scripts/qrspi_resolve.py`), which maps each of the
+  six `ARTIFACTS` to `os.path.getsize(<qrspi_dir>/<name>.md) > 0`, treating any
+  `OSError` (missing file/dir) as `False`. The orchestrator surfaces that map on
+  the resolver envelope's `existing` field, and `runPhase` in `qrspi-batch.js`
+  early-returns on `if (existing && existing[name]) return true` — skipping the
+  producer agent, node-check, critic loop, and persist for any already-persisted
+  phase.
+- **Slice boundary.** Slice done-ness is decided by branch naming, not artifacts:
+  `slice_numbers`/`slice_branches`/`pick_tip` enumerate exactly the present
+  `slice-<n>` branches (ascending, gap-agnostic — no missing slice is ever
+  synthesized). Which slice runs *next* is the setup agent's per-slice
+  `alreadyCommitted` flag.
+
+### Why a mid-unit interruption recomputes — not corrupts
+
+`persistArtifact` (shelling to `scripts/qrspi_persist.py`) is the **single,
+post-validation success gate**: within `runPhase` it runs only after the producer
+and all critic/node-check stages pass, and it refuses to move a zero-byte staged
+file, re-verifying the destination is non-empty after the move. The producer
+writes to a token-free **staging** path, never the canonical artifact path. So a
+mid-phase/mid-slice `agent()` failure (which surfaces as a bare `null` sentinel —
+see below) never reaches persist, no half-written canonical artifact exists, and
+on re-run `detect_existing` reports `False` for that unit and it recomputes. This
+is the safe direction: a truncated/aborted write reads as *recompute*, never as a
+false skip.
+
+### Two honest caveats
+
+- **"Non-empty present", not "structurally valid".** `detect_existing` gates on
+  byte count only — it never reads or validates content. A present-but-garbage
+  (e.g. 1-byte or malformed) artifact would read as `True` and be skipped on
+  re-run. The guarantee is *non-empty present*, not *structurally valid*; fixing
+  that would require a runtime change (out of scope for the lock-in work).
+- **The skip *act* is inspection-only, not unit-tested.** Every behavior that
+  *constitutes* the guarantee — a phase being skipped, only the next slice being
+  re-entered — lives in the harness-coupled JS/LLM layer: the JS `runPhase`
+  early-return (phase) and the non-deterministic setup-agent `alreadyCommitted`
+  flag (slice). The Python unit tests in `scripts/qrspi_resolve_test.py` assert
+  the **pure helpers that feed those decisions** — `detect_existing` (present /
+  missing / zero-byte → skip map), `slice_branches`/`pick_tip` (gap-agnostic
+  ascending enumeration, including non-contiguous sets), and the `build_envelope`
+  passthrough that carries the `existing` map verbatim onto the contract — **not
+  the skip decisions themselves**. The `build_envelope` test is an explicit
+  passthrough *identity* check, not a behavioral skip proof; asserting the skip
+  behavior directly would require refactoring `qrspi-batch.js`, which the harness
+  does not support (see "Open experiment" above). The skip causation is verified
+  by code inspection.
+
+### Why no transient-retry classifier exists
+
+The original intent was a signature-based classifier that would distinguish a
+*transient* network fault (429/529/`ECONNRESET`/`fetch failed`/stream
+`terminated`) from a permanent one and retry-with-backoff instead of recomputing.
+A probe (`probe-agent-failure.js`, run 2026-06-14) established that this is
+**unbuildable at the `agent()` seam**, and the classifier/allowlist/default-deny
+matching/backoff were withdrawn. Probe result, captured verbatim:
+
+> The probe induced an API/network-layer failure via an invalid model id (a 4xx —
+> the same layer as the targeted 429/529/`ECONNRESET`/`fetch failed`/stream
+> `terminated` classes). Result: the `agent()` seam returns a **bare `null` with
+> the error message discarded**; only client-side config validation (an unknown
+> `agentType`) throws a catchable message, and a transient network fault never
+> reaches that path. This is corroborated by in-scope code: every `agent()`
+> caller treats `null` as the failure sentinel and logs only a generic message
+> with no error text. With only `null` visible, a signature classifier has no
+> input — so the classifier, allowlist, default-deny matching, and backoff are
+> unbuildable here and are withdrawn.
+
+Because the seam yields only a bare `null`, the correct (and already-implemented)
+behavior is exactly the resume guarantee above: treat the unit as not-done and
+recompute it on re-run. There is nothing to classify and nothing to retry
+selectively — the post-validation persist gate makes a clean recompute safe.
