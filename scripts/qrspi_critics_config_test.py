@@ -231,6 +231,56 @@ class ResolveDesignTests(unittest.TestCase):
         self.assertEqual(warnings, [])
 
 
+class DesignReviewWhitelistTests(unittest.TestCase):
+    """RUS-82 whitelist/default decoupling: `design-review` is whitelist-acceptable
+    (config-addable via critics.design.lenses) but default-OFF (absent from the default
+    resolved set). resolve_design KEEPS it when listed, DROPS it when not, and the
+    empty-after-filter fallback is unaffected."""
+
+    def _resolve(self, cfg):
+        warnings = []
+        return resolve_design(cfg, warnings), warnings
+
+    def test_default_resolve_is_still_the_four_design_review_absent(self):
+        # T3: with no lenses config, the default resolved set is exactly the four — the
+        # default-OFF invariant; design-review must NOT appear.
+        out, warnings = self._resolve(None)
+        self.assertEqual(out["lenses"], DEFAULT_DESIGN_LENSES)
+        self.assertEqual(len(out["lenses"]), 4)
+        self.assertNotIn("design-review", out["lenses"])
+        self.assertEqual(warnings, [])
+
+    def test_unlisted_design_review_dropped(self):
+        # T4: design-review is NOT activated implicitly. A config that lists only other
+        # (unknown) ids drops them and falls back to the four; design-review stays absent.
+        out, warnings = self._resolve({"lenses": ["completeness", "internal-consistency"]})
+        self.assertNotIn("design-review", out["lenses"])
+
+    def test_listed_design_review_kept(self):
+        # T5: opt-in activation survives the whitelist filter (KNOWN_DESIGN_LENSES now
+        # admits design-review), with no warning since it is a known lens.
+        out, warnings = self._resolve({"lenses": ["completeness", "design-review"]})
+        self.assertIn("design-review", out["lenses"])
+        self.assertEqual(out["lenses"], ["completeness", "design-review"])
+        self.assertEqual(warnings, [])
+
+    def test_design_review_alone_kept(self):
+        # A config opting into ONLY design-review keeps just that lens (non-empty after
+        # filter, so no fallback to the four).
+        out, warnings = self._resolve({"lenses": ["design-review"]})
+        self.assertEqual(out["lenses"], ["design-review"])
+        self.assertEqual(warnings, [])
+
+    def test_empty_after_filter_falls_back_to_the_four(self):
+        # T6: an all-unknown lenses list resolves empty and falls back to the four
+        # DEFAULT_DESIGN_LENSES — the whitelist change does not alter the fallback path,
+        # and design-review is NOT injected by the fallback.
+        out, warnings = self._resolve({"lenses": ["nope", "nada"]})
+        self.assertEqual(out["lenses"], DEFAULT_DESIGN_LENSES)
+        self.assertNotIn("design-review", out["lenses"])
+        self.assertEqual(len(warnings), 1)
+
+
 class JsMirrorParityTests(unittest.TestCase):
     """Lockstep: the Python default resolution must equal the JS DEFAULT_CRITIC_PHASES
     mirror in .claude/workflows/qrspi-batch.js (structure.md Modified Types). The JS
