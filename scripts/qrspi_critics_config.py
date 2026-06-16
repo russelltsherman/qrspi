@@ -62,7 +62,13 @@ DEFAULT_MAX_ROUNDS = 2
 # allow-list; unknown names are dropped (with a warning) and an all-unknown set falls
 # back to the full default four rather than silently disabling the panel.
 DEFAULT_DESIGN_LENSES = ["completeness", "internal-consistency", "edge-alignment", "simplicity"]
-KNOWN_DESIGN_LENSES = set(DEFAULT_DESIGN_LENSES)
+# Whitelist/default DECOUPLING (RUS-82, design.md Decision 2 Option B): the adversarial
+# node-validity lens `design-review` is whitelist-acceptable (a config may opt in to it via
+# `critics.design.lenses`) but is DELIBERATELY NOT in DEFAULT_DESIGN_LENSES — it stays
+# default-OFF so the default resolved panel is still the four edge-fidelity lenses. Do NOT
+# re-couple KNOWN_DESIGN_LENSES back to set(DEFAULT_DESIGN_LENSES): that would either silently
+# activate the heavier lens by default or, if added to the default set, defeat the opt-in.
+KNOWN_DESIGN_LENSES = set(DEFAULT_DESIGN_LENSES) | {"design-review"}
 
 # The design-phase N-select framing axes (RUS-59) — mirrors DEFAULT_DESIGN_FRAMINGS in
 # qrspi-batch.js. `candidates` (N) is clamped to [2, len(framings)] when > 1, else 1 (OFF).
