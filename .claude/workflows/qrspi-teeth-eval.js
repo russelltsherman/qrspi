@@ -52,6 +52,13 @@ const TICKET_CONTENT_PATH = engineCmd('evals/teeth/ticket.md')
 const RESEARCH_PATH = engineCmd('evals/teeth/research.md')
 const QUESTIONS_PATH = engineCmd('evals/teeth/questions.md')
 const DIGEST_PATH = '/tmp/teeth/research-digest.md'
+// RUS-82: the repo root the node-validity `design-review` lens Reads/Greps to verify the
+// fixture's codebase claims. The teeth eval runs against the engine's OWN checkout, so the
+// engine root IS the codebase root — it holds the real scripts/ (incl.
+// qrspi_critic_synthesize.py) the design.md defect falsely claims a symbol from. The eval is
+// standalone (no runCriticPanelLoop), so it threads its OWN CODEBASE_PATH into the inline
+// prompt below; the loop-side splice in qrspi-batch.js never reaches this runner.
+const CODEBASE_PATH = ENGINE_ROOT
 
 // The lens -> defect-marker ownership map (structure §Contracts). Each owning lens must
 // cite its unique marker when it catches its defect; the marker turns "names its defect"
@@ -59,10 +66,17 @@ const DIGEST_PATH = '/tmp/teeth/research-digest.md'
 // frobnicate_widget() is a research.md fact a CORRECT digest retains (it lives in prose,
 // not a fenced block) — so a digest that trimmed it would make edge-alignment pass and
 // overallPass go false (the non-vacuity / digest-risk-gating check, review finding #1).
+// RUS-82: `design-review` (node-validity) is activated for the teeth run SOLELY by being a
+// key here (LENSES = Object.keys(LENS_MARKERS)). The eval is a standalone fan-out with NO
+// critics.design.lenses config and does NOT call resolve_design, so the production default-OFF
+// whitelist is irrelevant — this map is the only activation lever. Its marker is cited when the
+// lens catches the false-codebase-claim defect in evals/teeth/design.md (verified against real
+// source via the CODEBASE_PATH threaded into the eval's inline prompt below).
 const LENS_MARKERS = {
   'completeness': 'AC-TEETH-COMPLETENESS',
   'internal-consistency': 'TEETH-INCONSISTENCY',
   'edge-alignment': 'frobnicate_widget()',
+  'design-review': 'TEETH-NODE-VALIDITY',
 }
 const LENSES = Object.keys(LENS_MARKERS)
 
@@ -133,7 +147,8 @@ TICKET_CONTENT_PATH = ${TICKET_CONTENT_PATH}
 RESEARCH_PATH = ${RESEARCH_PATH}
 QUESTIONS_PATH = ${QUESTIONS_PATH}
 DIGEST_PATH = ${DIGEST_PATH}
-Read all four paths and judge DESIGN_PATH through your lens. Return { pass, findings } per the schema.`,
+CODEBASE_PATH = ${CODEBASE_PATH}
+Read every path provided above and judge DESIGN_PATH through your lens. Return { pass, findings } per the schema.`,
         { label: `teeth:critic:${lens}#${trial + 1}`, phase: 'Panel', agentType: `qrspi-design-critic-${lens}`, schema: CRITIC_VERDICT_SCHEMA }
       )
       return { lens, verdict }

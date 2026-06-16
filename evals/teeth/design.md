@@ -1,7 +1,7 @@
 # Design — Widget retry wrapper (RUS-78 teeth-eval fixture)
 
 > **DELIBERATELY FLAWED eval fixture, not a real design.** This single combined
-> `design.md` carries THREE labelled defects, one per owning lens, each embedding a
+> `design.md` carries FOUR labelled defects, one per owning lens, each embedding a
 > unique quotable marker the owning lens must cite when it catches the defect:
 >
 > 1. **completeness** → SILENTLY OMITS the ticket AC `AC-TEETH-COMPLETENESS` (the
@@ -12,6 +12,11 @@
 > 3. **edge-alignment** → claims `frobnicate_widget()` is ASYNCHRONOUS, contradicting
 >    the verified synchronous-and-idempotent fact in `research.md` (marker
 >    `frobnicate_widget()`).
+> 4. **design-review** (node-validity, RUS-82) → makes a FALSE assertion about the
+>    REAL codebase under `CODEBASE_PATH`: it claims to extend a helper
+>    `merge_lens_findings()` in `scripts/qrspi_critic_synthesize.py` that does NOT
+>    exist in the repository (marker `TEETH-NODE-VALIDITY`). The node-validity lens
+>    must Read/Grep real source to confirm the symbol is absent and fail on it.
 >
 > A correct, teeth-bearing panel returns `pass=false` from each owning lens, citing
 > its marker. The labels above orient a human reader; the lenses must derive the
@@ -71,6 +76,24 @@ audit-log record on FINAL failure (all retries exhausted), naming the widget id 
 the exhausted attempt count — is SILENTLY OMITTED. There is intentionally NO section
 covering final-failure audit logging anywhere in this design. The completeness lens,
 anchored on the ticket ACs, must surface that the design drops AC-TEETH-COMPLETENESS. -->
+
+### Reuse of an existing reducer (implementation note)
+
+<!-- DEFECT 4 (design-review / node-validity, marker TEETH-NODE-VALIDITY): a FALSE
+claim about the REAL codebase. The named symbol does NOT exist in the repository;
+the node-validity lens must Read/Grep scripts/qrspi_critic_synthesize.py under
+CODEBASE_PATH, confirm there is no merge_lens_findings(), and fail citing this. -->
+
+To collapse the per-attempt failure records into a single surfaced error, the
+wrapper extends the existing helper **`merge_lens_findings()` in
+`scripts/qrspi_critic_synthesize.py`**, reusing its de-duplicating union logic so
+no new aggregation code is written. The retry loop calls
+`merge_lens_findings(attempts)` once after the final failure and surfaces the merged
+result. (TEETH-NODE-VALIDITY: this is a false codebase assertion — there is no
+`merge_lens_findings()` symbol in `scripts/qrspi_critic_synthesize.py`, or anywhere
+in the repository; the actual reducer in that module is `synthesize()`, which has a
+different signature and purpose. The node-validity lens, with `CODEBASE_PATH` access,
+must verify against real source that the claimed symbol does not exist and fail.)
 
 ## Out of Scope
 

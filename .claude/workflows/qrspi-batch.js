@@ -888,6 +888,10 @@ async function runCriticPanelLoop(name, id, criticConfig) {
         // digest in place of the full research; when OFF (digestPath null) pass no DIGEST_PATH so
         // the lens falls back to RESEARCH_PATH, unchanged.
         const digestLine = digestPath ? `\nDIGEST_PATH = ${digestPath}` : ''
+        // RUS-82: thread CODEBASE_PATH (the worktree root) UNIFORMLY into every lens prompt
+        // (mirroring digestLine). The node-validity `design-review` lens Reads/Greps real source
+        // here to verify the design's codebase claims; the edge-fidelity lenses ignore it.
+        const codebaseLine = criticConfig.codebasePath ? `\nCODEBASE_PATH = ${criticConfig.codebasePath}` : ''
         // AC-COST: when lensModel is set, ride it as the agent() `model` option (speculative seam).
         const agentOpts = { label: `critic:${id}:${name}:${lens}#${round + 1}`, phase: 'Critic', agentType, schema: CRITIC_VERDICT_SCHEMA }
         if (lensModel) agentOpts.model = lensModel
@@ -896,8 +900,8 @@ async function runCriticPanelLoop(name, id, criticConfig) {
 DESIGN_PATH = ${artifactPath}
 TICKET_CONTENT_PATH = ${ticketContentPath}
 RESEARCH_PATH = ${researchPath}
-QUESTIONS_PATH = ${questionsPath}${digestLine}
-Read all four paths and judge DESIGN_PATH through your lens. Return { pass, findings } per the schema.`,
+QUESTIONS_PATH = ${questionsPath}${digestLine}${codebaseLine}
+Read every path provided above and judge DESIGN_PATH through your lens. Return { pass, findings } per the schema.`,
           agentOpts
         )
         return { lens, verdict }
@@ -1735,6 +1739,10 @@ Project scope: explore ONLY files under ${wd}. The ticket is intentionally hidde
     lenses: critics.design.lenses,
     ticketContentPath: r.ticketContentPath,
     questionsPath: art(wd, t.id, 'questions.md'),
+    // RUS-82: the worktree root, threaded as CODEBASE_PATH into every lens prompt so the
+    // node-validity `design-review` lens can Read/Grep real source to verify the design's
+    // codebase claims. The four default edge-fidelity lenses ignore it (default-OFF lens).
+    codebasePath: wd,
     // RUS-59 N-select: candidates (clamped [1,3]) gates the pre-critic N-select stage in
     // runPhase (N>1 only); templatePath is the candidate produce input it needs.
     candidates: critics.design.candidates,
