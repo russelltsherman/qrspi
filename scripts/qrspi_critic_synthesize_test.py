@@ -53,6 +53,30 @@ check("all-pass lenses carrying nit findings ⇒ pass:true but findings still un
       ]),
       {"pass": True, "findings": ["nit a", "nit b"]})
 
+# --- five-lens reduction (RUS-82: design-review is the fifth panel lens) -----
+# The AND-reducer is unchanged by the new lens — it must still pass only when ALL five
+# (the four edge-fidelity lenses + the new node-validity `design-review` lens) pass, and
+# fail when any single one fails (here: design-review).
+check("all five lenses pass (incl. design-review) ⇒ pass:true, no findings",
+      synthesize([
+          {"pass": True, "findings": []},
+          {"pass": True, "findings": []},
+          {"pass": True, "findings": []},
+          {"pass": True, "findings": []},
+          {"pass": True, "findings": []},
+      ]),
+      {"pass": True, "findings": []})
+
+check("five lenses, only design-review fails ⇒ pass:false with its finding (AND over 5)",
+      synthesize([
+          {"pass": True, "findings": [], "lens": "completeness"},
+          {"pass": True, "findings": [], "lens": "internal-consistency"},
+          {"pass": True, "findings": [], "lens": "edge-alignment"},
+          {"pass": True, "findings": [], "lens": "simplicity"},
+          {"pass": False, "findings": ["false codebase claim: merge_lens_findings() absent"], "lens": "design-review"},
+      ]),
+      {"pass": False, "findings": [{"text": "false codebase claim: merge_lens_findings() absent", "lens": "design-review"}]})
+
 # --- one lens fails ⇒ pass:false (AND semantics), union of findings ---------
 check("one failing lens among passing ⇒ pass:false with that lens's findings",
       synthesize([

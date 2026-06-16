@@ -22,10 +22,13 @@ import qrspi_teeth_assert as ta  # noqa: E402
 
 SCRIPT = os.path.join(_HERE, "qrspi_teeth_assert.py")
 
+# RUS-82: the design-review (node-validity) lens joins the panel with its own teeth marker.
+# This map mirrors LENS_MARKERS in .claude/workflows/qrspi-teeth-eval.js.
 MARKERS = {
     "completeness": "AC-TEETH-COMPLETENESS",
     "internal-consistency": "TEETH-INCONSISTENCY",
     "edge-alignment": "frobnicate_widget()",
+    "design-review": "TEETH-NODE-VALIDITY",
 }
 
 
@@ -112,14 +115,32 @@ class TestEvaluateThreshold(unittest.TestCase):
         self.assertFalse(rep["perLens"]["edge-alignment"]["pass"])
         self.assertFalse(rep["overallPass"])
 
-    def test_all_three_lenses_catch(self):
+    def test_all_lenses_catch(self):
+        # RUS-82: now FOUR owning lenses (incl. design-review) must each catch their
+        # marker by the majority threshold for overallPass.
         trials = {
             "completeness": [_fail("AC-TEETH-COMPLETENESS"), _fail("AC-TEETH-COMPLETENESS"), _fail("AC-TEETH-COMPLETENESS")],
             "internal-consistency": [_fail("TEETH-INCONSISTENCY"), _fail("TEETH-INCONSISTENCY"), _pass("ok")],
             "edge-alignment": [_fail("frobnicate_widget()"), _fail("frobnicate_widget()"), _pass("ok")],
+            "design-review": [_fail("TEETH-NODE-VALIDITY: merge_lens_findings() absent"), _fail("TEETH-NODE-VALIDITY absent"), _pass("ok")],
         }
         rep = ta.evaluate(trials, MARKERS, threshold=2)
+        self.assertTrue(rep["perLens"]["design-review"]["pass"])
         self.assertTrue(rep["overallPass"])
+
+    def test_design_review_marker_owned_and_independent(self):
+        # The design-review lens owns TEETH-NODE-VALIDITY: it catches via its own marker,
+        # and a failure on it alone sinks overallPass (AND over all four lenses).
+        trials = {
+            "completeness": [_fail("AC-TEETH-COMPLETENESS"), _fail("AC-TEETH-COMPLETENESS")],
+            "internal-consistency": [_fail("TEETH-INCONSISTENCY"), _fail("TEETH-INCONSISTENCY")],
+            "edge-alignment": [_fail("frobnicate_widget()"), _fail("frobnicate_widget()")],
+            "design-review": [_pass("clean"), _pass("clean")],
+        }
+        rep = ta.evaluate(trials, MARKERS, threshold=2)
+        self.assertTrue(rep["perLens"]["completeness"]["pass"])
+        self.assertFalse(rep["perLens"]["design-review"]["pass"])
+        self.assertFalse(rep["overallPass"])
 
     def test_lens_with_no_trials_fails(self):
         rep = ta.evaluate({}, {"completeness": "AC-TEETH-COMPLETENESS"}, threshold=2)
