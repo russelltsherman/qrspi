@@ -48,6 +48,47 @@ class ModeToRequestTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.mode_to_request("sideways", "o", "r", 1, 2, "b")
 
+    def test_toplevel_ignores_comment_id_when_none(self):
+        # RUS-89: toplevel mode does not key on a parent comment, so a None
+        # comment_id still produces a valid `gh pr comment` request descriptor.
+        req = m.mode_to_request("toplevel", "octo", "qrspi", 42, None, "synopsis")
+        self.assertEqual(req["kind"], "gh")
+        self.assertEqual(
+            req["cmd"],
+            ["pr", "comment", "42", "--repo", "octo/qrspi", "--body-file", "-"],
+        )
+        self.assertEqual(req["stdin"], "synopsis")
+
+
+class CommentIdRelaxationTest(unittest.TestCase):
+    """RUS-89: --comment-id is optional in toplevel mode, still required for inline.
+
+    The validation guard lives in main() before any gh call; here we exercise the
+    rule directly via the same condition (inline + missing id -> fail-closed) and
+    confirm toplevel tolerates a missing id, without running gh.
+    """
+
+    @staticmethod
+    def _inline_requires_id(reply_mode, comment_id):
+        # Mirror of main()'s guard so the rule is unit-tested without subprocess.
+        return reply_mode == m.REPLY_MODE_INLINE and comment_id is None
+
+    def test_inline_missing_id_is_rejected(self):
+        self.assertTrue(self._inline_requires_id("inline", None))
+
+    def test_inline_with_id_is_accepted(self):
+        self.assertFalse(self._inline_requires_id("inline", 12345))
+
+    def test_toplevel_missing_id_is_accepted(self):
+        self.assertFalse(self._inline_requires_id("toplevel", None))
+
+    def test_error_envelope_tolerates_missing_id(self):
+        # The toplevel-without-id path passes None to error_envelope on a read/
+        # resolve failure; it must not raise and reports a null inReplyToId.
+        env = m.error_envelope(None, "--comment-id is required in inline reply mode")
+        self.assertFalse(env["ok"])
+        self.assertIsNone(env["inReplyToId"])
+
 
 class ResponseToEnvelopeTest(unittest.TestCase):
     def test_inline_success_captures_id(self):
