@@ -66,3 +66,36 @@
 - The leftover stray `.review-scratch/` dir (a prior-run scratch copy, NOT produced by the authored SKILL — the SKILL writes scratch to `/tmp/phase-stage/<id>/review/`) was removed; the authored SKILL never writes into the worktree's `.review-scratch/`.
 
 ---
+
+## Session 4 — Slice 4: /review-implementation + impl node-validity lens (AC4)
+
+**Timestamp:** 2026-06-17T23:06:45Z
+**Tasks completed:** Steps 31, 32, 33, 34 (omit-open-question, by design), 35, 36
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py` (full suite) → 41 passed, 0 failed (no regressions; Slice 4 adds only a SKILL + a lens agent — no Python/tracked-code changes, so the suite count is unchanged from Slices 1–3)
+- Contract-chain smoke (the exact invocations the SKILL prescribes): `qrspi_critic_synthesize.py` → `{pass, findings}`; `qrspi_critic_loop.py --round/--max-rounds` → `converged` / `revise` / `cap_reached` for the round-0-pass / round-0-fail / round-2-fail cases respectively; `qrspi_review_record.build_record(phase="implementation", rounds=[{lens,pass,findings}], terminal_action="converged", agreement=compute(True, None))` → `{phase:"implementation", rounds:[{lens,pass,findingsCount}], terminalAction:"converged", agreement:{panelVerdict:"pass", humanVerdict:null, agreement:"pending"}, mode:"on-demand-review"}` — matches AC2/AC4 (no human review ⇒ `agreement:"pending"`).
+- Frontmatter well-formed: agent `qrspi-impl-critic-impl-review.md` carries `name`/`description`/`claude` (`tools: Read, Grep` nested under `claude`, mirroring `qrspi-plan-critic-plan-review.md`); skill `review-implementation/SKILL.md` carries `name`/`description`/`allowed-tools: Agent, Bash, Read`.
+- Referenced subagents exist: `qrspi-impl-critic-impl-review` (lens, new this slice) and `qrspi-implement` (producer-as-reviser).
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- none — Step 34 is an explicit omission by design (no open-question pass for `/review-implementation`, per the plan-time OQ1 resolution: design-phase-only in v1).
+
+**Verification notes (sandbox limitations — flagged in plan):**
+
+- Step 36's checkpoint is "skill-creator eval loop + manual e2e on a real implementation stack". Per the plan's verification-gate note (and Session 2's confirmed experience), the skill-creator `run_eval`/`run_loop` triggering harness returns bogus uniform results in this sandbox and the substitute direct `claude -p` routing probe is not runnable to completion from inside this isolated implement subagent (an agentic review run exceeds a workable timeout). The new SKILL was authored against the Slice-2/3 structural template (the contract-faithful scratch-loop), and its triggering description is strong and disambiguated against `/review-design` / `/review-plan` / `/review`. The manual e2e bullets (single rolled-up synopsis posts to the top slice PR; ledger gains a `mode:"on-demand-review"`, `phase:"implementation"` row; PR head SHA(s) unchanged) require a live implementation stack + network and are deferred to a real-repo run — NOT verifiable from this isolated worktree.
+
+**Notes for next session:**
+
+- Slice 4 added two files: `.claude/agents/qrspi-impl-critic-impl-review.md` (read-only node-validity lens; tools Read/Grep; named PATH inputs `IMPL_PATH`/`RESEARCH_PATH`/`CODEBASE_PATH` + optional `PLAN_PATH`/`STRUCTURE_PATH`/`DESIGN_PATH`; correctness/security/efficiency/performance/test-validity focus over real code **and its tests**; emits `{pass, findings}` per `CRITIC_VERDICT_SCHEMA`; writes no files) and `.claude/skills/review-implementation/SKILL.md` (the scratch-loop command).
+- Slice 4 is the structural sibling of Slices 2/3. Slice 5 (`/review` comprehensive) REUSES all three per-phase lenses (`qrspi-design-critic-design-review`, `qrspi-plan-critic-plan-review`, `qrspi-impl-critic-impl-review`) — all now exist — and per OQ3 posts per-phase sub-synopses under ONE comment to the frontier PR (use `gh pr list --state all` to dodge the partially-landed misfire). Slice 5 also documents the whole `/review-*` family in BOTH `CLAUDE.md` copies (worktree + repo root).
+- The top slice PR is derived from the resolve envelope's `tip` field (`<id>/slice-<maxN>`), equivalently the last element of `slices`. The SKILL derives `IMPL_PR` via `gh pr list --head <tip> --json number,reviewDecision`. The envelope's `slices`/`tip` fields are populated by `slice_branches()` / the tip computation in `scripts/qrspi_resolve.py` (verified present).
+- `/review-implementation` posts exactly ONE rolled-up synopsis (top slice PR only), never per-slice — this is the AC4 distinction from `/review-design` and `/review-plan` (which each post to their single phase PR). The ledger run id pattern is `review-implementation-<id>-$(date -u +%Y%m%dT%H%M%SZ)`.
+
+---
