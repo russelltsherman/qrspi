@@ -99,3 +99,37 @@
 - `/review-implementation` posts exactly ONE rolled-up synopsis (top slice PR only), never per-slice — this is the AC4 distinction from `/review-design` and `/review-plan` (which each post to their single phase PR). The ledger run id pattern is `review-implementation-<id>-$(date -u +%Y%m%dT%H%M%SZ)`.
 
 ---
+
+## Session 5 — Slice 5: /review comprehensive + docs (AC5 + AC7)
+
+**Timestamp:** 2026-06-17T23:12:27Z
+**Tasks completed:** Steps 37, 38, 39, 40, 41, 42, 43 (worktree copy; repo-root copy out of scope — see flag), 44
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py` (full suite) → 41 passed, 0 failed (no regressions; Slice 5 adds only a SKILL + 2 doc edits — no Python/tracked-code changes, so the suite count is unchanged from Slices 1–4)
+- Contract-chain smoke (the exact invocations the `/review` SKILL prescribes, per reviewed phase): `qrspi_critic_synthesize.py` → `{pass, findings}`; `qrspi_critic_loop.py --round/--max-rounds` → `converged` / `revise` / `cap_reached` for the round-0-pass / round-0-fail / round-2-fail cases respectively; per-phase `qrspi_review_record.build_record(phase=<design|plan|implementation>, rounds=[{lens,pass,findings}], terminal_action="converged", agreement=compute(True, None))` → three `{phase, rounds:[{lens,pass,findingsCount}], terminalAction:"converged", agreement:{panelVerdict:"pass", humanVerdict:null, agreement:"pending"}, mode:"on-demand-review"}` records (one per phase) — matches AC2/AC5 (no human review ⇒ `agreement:"pending"`); and `build_record(..., terminal_action="revise", ...)` raises `ValueError` (fail-closed, terminal-only).
+- Frontmatter well-formed: `review/SKILL.md` carries `name: review` / `description` (whole-stack, frontier via `gh pr list --state all`, disambiguated against `/review-design` / `/review-plan` / `/review-implementation`) / `allowed-tools: Agent, Bash, Read`.
+- Referenced subagents all exist: lenses `qrspi-design-critic-design-review`, `qrspi-plan-critic-plan-review`, `qrspi-impl-critic-impl-review` (all reused, none new this slice) and producers-as-revisers `qrspi-design`, `qrspi-plan`, `qrspi-implement`.
+- Docs: worktree `.claude/CLAUDE.md` "Available skills" now lists all four `/review-*` entries (`grep -c "^- \`/review"` → 4; the four distinct command names present), each marked advisory/propose-only/no-branch-push (AC7).
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- Step 43 ("repo root `CLAUDE.md`") could only be applied to the **worktree** copy. The repo tracks exactly two CLAUDE.md paths: `.claude/CLAUDE.md` (the real "Available skills" doc — EDITED) and a 20-byte `CLAUDE.md` that is just `@~/.agents/AGENTS.md` (no skills list — correctly untouched). The "repo root copy" the plan/structure mean is `/workspaces/qrspi/.claude/CLAUDE.md` — the SAME tracked path checked out on `main` in the primary repo, which is OUTSIDE this worktree. The implement-phase hard scope boundary forbids writing outside `WORKTREE_DIR`, and that file lives on a different branch (commits are the orchestrator's job). The worktree edit IS the change committed on this slice's branch; it reconciles to the repo-root checkout when the stack lands. Flagged for the orchestrator: if the two copies must be physically in sync before land, apply the identical four-entry block to `/workspaces/qrspi/.claude/CLAUDE.md` on `main` (or let the land merge carry it).
+
+**Verification notes (sandbox limitations — flagged in plan):**
+
+- Step 44's checkpoint is "skill-creator eval loop for `review` + manual e2e on a multi-phase stack + docs check". Per the plan's verification-gate note and Sessions 2/4's confirmed experience, the skill-creator `run_eval`/`run_loop` triggering harness returns bogus uniform results in this sandbox, and the substitute direct `claude -p` routing probe is not runnable to completion from inside this isolated implement subagent (an agentic review run exceeds a workable timeout). The new SKILL was authored against the Slice-2/3/4 structural template (the contract-faithful scratch loop) with a strong, disambiguated triggering description; the docs check passed (both command-name coverage and the advisory/propose-only framing). The manual e2e bullets (one rolled-up per-phase-section synopsis posts to the FRONTIER PR; no misfire on a partially-landed stack since the SKILL resolves the frontier via `gh pr list --state all`; frontier PR head SHA unchanged; one `mode:"on-demand-review"` ledger row per reviewed phase, all sharing the run's `runId`) require a live multi-phase stack + network and are deferred to a real-repo run — NOT verifiable from this isolated worktree.
+
+**Notes for next session:**
+
+- Slice 5 is the LAST implementation slice (5/5). It added one file — `.claude/skills/review/SKILL.md` (the comprehensive whole-stack command) — and edited the worktree `.claude/CLAUDE.md` "Available skills" section (four `/review-*` entries). No new agents (it composes the three existing per-phase lenses).
+- `/review` resolves the frontier (highest existing) phase via `gh pr list --state all --json number,headRefName,reviewDecision` filtered to `<id>/` branches, ordering `slice-* (implementation) > plan > design`. It runs the per-phase scratch loop for EVERY reviewed phase from design up to the frontier, appends one ledger row per phase (all sharing a single `review-<id>-<UTC-ts>` `runId` computed once at run start), and posts ONE synopsis with per-phase sub-sections to the frontier PR (per OQ3 resolution — per-phase sub-synopses under one comment, no cross-phase verdict reducer invented).
+- OPEN for the PR phase: the repo-root `CLAUDE.md` (`/workspaces/qrspi/.claude/CLAUDE.md` on `main`) does NOT yet carry the `/review-*` entries (out of worktree scope this slice). Confirm at land that the worktree copy's docs reconcile, or apply the block to `main` directly.
+- OQ3 remains flagged for reviewer ratification (per-phase sub-synopses vs a single whole-stack verdict). If the reviewer wants one rolled-up verdict, `/review`'s Step 4 aggregation changes (the loop/ledger structure is unaffected).
+
+---
