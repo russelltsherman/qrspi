@@ -123,6 +123,10 @@ Selected (assigned)
 - `/qrspi-worktree <ticket-id>` — Build a session-aware task DAG
 - `/qrspi-implement <ticket-id> <slice-number>` — Implement one vertical slice
 - `/qrspi-pr <ticket-id>` — Prepare pull request summary
+- `/review-design <ticket-id>` — **Advisory, propose-only** on-demand review of a ticket's design. Runs the read-only design node-validity lens (`qrspi-design-critic-design-review`) over `design.md` against the real codebase via a scratch loop, answers the design's open questions, then posts a synopsis comment to the design PR and appends an agreement-extended ledger row — **never pushes a branch** (PR head SHA unchanged).
+- `/review-plan <ticket-id>` — **Advisory, propose-only** on-demand review of a ticket's plan. Same scratch-loop pattern with the plan node-validity lens (`qrspi-plan-critic-plan-review`) over `plan.md`; posts a synopsis to the plan PR; no branch push.
+- `/review-implementation <ticket-id>` — **Advisory, propose-only** on-demand review of a ticket's implementation. Runs the impl node-validity lens (`qrspi-impl-critic-impl-review`) over the slice stack's code + tests; posts ONE rolled-up synopsis to the top slice PR; no branch push.
+- `/review <ticket-id>` — **Advisory, propose-only** whole-stack review. Resolves the frontier (highest existing) phase via `gh pr list --state all` (dodging the partially-landed misfire), runs each reviewed phase's lens, and posts ONE rolled-up synopsis (per-phase sub-sections) to the frontier PR with one ledger row per phase; no branch push. Composes the three per-phase lenses — does not advance the lifecycle.
 - `/using-terraform-cli <what you want to do>` — Operate Terraform/OpenTofu safely from the CLI (lifecycle, remote state, version pinning, import/moved/removed, CI/CD with OIDC, secrets, workspaces, modules + testing)
 
 ### Workflow rules
