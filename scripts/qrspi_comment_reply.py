@@ -201,14 +201,24 @@ def main():
                     "ReplyEnvelope JSON (self-locating).")
     parser.add_argument("--ticket", required=True, help="Ticket id, e.g. RUS-54")
     parser.add_argument("--pr", required=True, help="PR number to reply on")
-    parser.add_argument("--comment-id", required=True,
+    parser.add_argument("--comment-id", required=False, default=None,
                         help="Target comment id (the review-comment databaseId for inline; "
-                             "the comment being addressed for top-level)")
+                             "the comment being addressed for top-level). REQUIRED in inline "
+                             "mode; OPTIONAL in toplevel mode (a synopsis with no parent "
+                             "comment posts a fresh PR comment).")
     parser.add_argument("--reply-mode", required=True, choices=list(REPLY_MODES),
                         help="inline -> threaded review-comment reply; toplevel -> fresh PR comment")
     parser.add_argument("--body-file", required=True,
                         help="Path to a file holding the reply body (avoids shell quoting)")
     args = parser.parse_args()
+
+    # --comment-id is now optional at the parser level so a toplevel synopsis with no
+    # parent comment can post (RUS-89). Inline mode still REQUIRES it — the replies
+    # endpoint is keyed on the comment id — so enforce that here, fail-closed.
+    if args.reply_mode == REPLY_MODE_INLINE and args.comment_id is None:
+        _emit(error_envelope(
+            None, "--comment-id is required in inline reply mode"))
+        return 1
 
     repo_root = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
     worktree = os.path.join(repo_root, ".worktrees", args.ticket)
