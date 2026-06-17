@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Splice the edge-critic's RESIDUAL FINDINGS into a design/plan phase commit message, so
-Graphite seeds the PR description with the critic's unresolved concerns at creation time.
+"""Splice a critic's RESIDUAL FINDINGS into a phase / slice commit message, so Graphite
+seeds the PR description with the critic's unresolved concerns at creation time.
 
 Why this exists
 ---------------
-The RUS-55 edge-critic loop (`runCriticLoop` in `.claude/workflows/qrspi-batch.js`) runs
-produce -> critique -> revise on a phase artifact. When the loop hits its per-phase round
-cap WITHOUT the critic passing (`cap_reached`), the artifact is still finalized — but the
-critic's residual findings (the upstream requirements it judged still dropped/distorted)
-must be surfaced to the human reviewer. The only non-interactive lever for a design/plan PR
-body is the branch commit message Graphite reads at creation (`gt submit` has no body flag —
-see qrspi_pr_body.py). The design/plan finalize workers create a SUBJECT-ONLY commit, so
+A critic loop (the design-critic PANEL `runCriticPanelLoop`, or the whole-stack coherence
+pass `runCoherenceCritic`, in `.claude/workflows/qrspi-batch.js`; the fidelity-only edge
+loop was retired in RUS-88) runs produce -> critique -> revise on a phase artifact / stack.
+When the loop hits its round cap WITHOUT the critic passing (`cap_reached`), the artifact is
+still finalized — but the critic's residual findings (the requirements it judged still
+dropped/distorted) must be surfaced to the human reviewer. The only non-interactive lever
+for a PR body is the branch commit message Graphite reads at creation (`gt submit` has no
+body flag — see qrspi_pr_body.py). The finalize workers create a SUBJECT-ONLY commit, so
 this script amends that commit's message to append a "Residual critic findings" section.
 
 Same one-shot, self-locating design as qrspi_pr_body.py / qrspi_persist.py: the repo root is

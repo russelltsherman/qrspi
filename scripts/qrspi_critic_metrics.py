@@ -3,9 +3,10 @@
 
 Why this exists
 ---------------
-A single critic *step* — one edge-critic loop in ``runCriticLoop`` OR one panel
-loop in ``runCriticPanelLoop`` (``qrspi-batch.js:710-773``) — runs N rounds of M
-per-lens verdicts and then terminates. To make the critic effective-or-not
+A single critic *step* — one panel loop in ``runCriticPanelLoop`` (the design
+panel, in ``qrspi-batch.js``) — runs N rounds of M per-lens verdicts and then
+terminates. (The single-edge ``runCriticLoop`` that also emitted these records was
+retired in RUS-88; the reduction is unchanged.) To make the critic effective-or-not
 question measurable (AC-INSTR), each terminated step must be reduced to ONE
 canonical machine-readable record (``CriticStepMetrics``) that a durable ledger
 can carry. That reduction is the only piece of the instrumentation worth
@@ -19,16 +20,17 @@ Record shapes (ref: structure.md §New Types):
                            terminalAction: str, tokensIn?: int, tokensOut?: int }``
 
 ``terminalAction`` is validated against the four ACTUAL loop terminations in
-``runCriticLoop`` / ``runCriticPanelLoop`` (``qrspi-batch.js:710-773``):
-  - ``converged``   — decision.action == 'converged' (:743)
-  - ``cap_reached`` — decision.action == 'cap_reached' (:747)
+``runCriticPanelLoop`` (the single-edge ``runCriticLoop`` that shared this enum was
+retired in RUS-88; the terminations are unchanged):
+  - ``converged``   — decision.action == 'converged'
+  - ``cap_reached`` — decision.action == 'cap_reached'
   - ``exhausted``   — the defensive ``ok:true`` tail, loop ran out of rounds
-                      without an explicit decision return (:773)
+                      without an explicit decision return
   - ``aborted``     — any ``ok:false`` early return (verdict / decision / reviser
-                      failure, :728/:739/:766) — so aborted steps STILL emit a
+                      failure) — so aborted steps STILL emit a
                       record and AC-INSTR base rates are not biased toward
                       successful terminations.
-``revise`` is deliberately NOT in the enum: it is a mid-loop continuation (:749)
+``revise`` is deliberately NOT in the enum: it is a mid-loop continuation
 after which the loop re-critiques, never a terminal state, so a record is only
 ever built once the loop has actually terminated. Anything else raises
 ``ValueError`` (fail-closed). (Note: ``design.md:76`` is stale — it lists only

@@ -65,26 +65,21 @@ def run_one(parser, seam, variant):
     return run_parser(parser, fixture(seam, variant))[0]
 
 
-# The DEFAULT_CRITIC_PHASES constant as defined in qrspi-batch.js (line ~612).
-# Kept here so the critics fail-OPEN assertion can compare against the canonical
-# value; the runner also exposes it (see DEFAULT_CRITIC_PHASES helper below) so we
-# fetch it from the source rather than trusting this literal blindly.
+# The DEFAULT_CRITIC_PHASES constant as defined in qrspi-batch.js. Kept here so the
+# critics fail-OPEN assertion can compare against the canonical value. RUS-88 retired
+# the fidelity-only edge critic on questions/research/structure/plan and the per-slice
+# edge critic, so the shape is now exactly two phases: the design PANEL and the
+# implementation coherence pass (no gateBehindEdge, no top-level implementation
+# enabled/maxRounds).
 EXPECTED_DEFAULT_CRITIC_PHASES = {
-    "questions": {"enabled": False, "maxRounds": 2},
-    "research": {"enabled": False, "maxRounds": 2},
     "design": {
         "enabled": False,
         "maxRounds": 2,
         "lenses": ["completeness", "internal-consistency", "edge-alignment", "simplicity"],
         "candidates": 1,
         "digest": {"enabled": False},
-        "gateBehindEdge": {"enabled": False},
     },
-    "structure": {"enabled": False, "maxRounds": 2},
-    "plan": {"enabled": False, "maxRounds": 2},
     "implementation": {
-        "enabled": False,
-        "maxRounds": 2,
         "coherence": {"enabled": False, "maxRounds": 2},
     },
 }
@@ -147,18 +142,18 @@ class WellFormedAcceptance(unittest.TestCase):
         self.assertEqual([t["id"] for t in result], ["RUS-1", "RUS-2"])
 
     def test_critics_wellformed_accepted(self):
-        # Uses the consumer-specific fixture (`wellformed_consumer`) which flips
-        # `questions` to enabled:true so the parsed value DIFFERS from
-        # DEFAULT_CRITIC_PHASES. The all-defaults `wellformed` fixture is the
-        # PRODUCER golden (it must equal qrspi_critics_config.default_phases()),
-        # so it cannot also serve as the consumer discriminator — a parser that
-        # always fail-OPENed to defaults would pass against it. This separate
-        # input makes "accepts well-formed" genuinely distinguish a real parse
-        # from the fail-open fallback.
+        # Uses the consumer-specific fixture (`wellformed_consumer`) which flips a
+        # SURVIVING key (`implementation.coherence` to enabled:true, RUS-88) so the
+        # parsed value DIFFERS from DEFAULT_CRITIC_PHASES. The all-defaults `wellformed`
+        # fixture is the PRODUCER golden (it must equal
+        # qrspi_critics_config.default_phases()), so it cannot also serve as the consumer
+        # discriminator — a parser that always fail-OPENed to defaults would pass against
+        # it. This separate input makes "accepts well-formed" genuinely distinguish a real
+        # parse from the fail-open fallback.
         result = run_one("parseCriticsEnvelope", "critics", "wellformed_consumer")
         expected = {
             **EXPECTED_DEFAULT_CRITIC_PHASES,
-            "questions": {"enabled": True, "maxRounds": 2},
+            "implementation": {"coherence": {"enabled": True, "maxRounds": 2}},
         }
         self.assertEqual(result, expected)
         # Guard the discriminator explicitly: the accepted value must NOT equal the
@@ -249,8 +244,9 @@ class CriticsShallowMerge(unittest.TestCase):
         # `design` is replaced wholesale by the partial — it equals ONLY {enabled:true},
         # NOT the DEFAULT-augmented block (no lenses/candidates/maxRounds).
         self.assertEqual(result["design"], {"enabled": True})
-        # The five untouched phases keep their DEFAULT values.
-        for phase in ("questions", "research", "structure", "plan", "implementation"):
+        # The untouched phase (implementation, the only other surviving key) keeps its
+        # DEFAULT value (RUS-88: the four planning phases no longer exist).
+        for phase in ("implementation",):
             self.assertEqual(result[phase], EXPECTED_DEFAULT_CRITIC_PHASES[phase])
 
 

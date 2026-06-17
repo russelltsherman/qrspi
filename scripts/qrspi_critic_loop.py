@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Pure critic-loop decision core for the QRSPI edge-critic primitive.
+"""Pure critic-loop decision core for the QRSPI design-panel and coherence critic loops.
 
 Why this exists
 ---------------
-The edge-critic loop (`runCriticLoop` JS glue in `.claude/workflows/qrspi-batch.js`)
-spawns one critic agent per round against an upstream/produced artifact edge, then must
-decide whether the produced artifact has CONVERGED (latest critic passed), needs another
-REVISE round, or has hit its per-phase round CAP and must surface its residual findings
-into the finalize PR body. That decision is the one piece of the loop worth unit-testing,
-so it lives here as a pure stdlib-only module with no agent or IO coupling (ref: design.md
-Decision 3, Pattern 7, Q12/Q13). The JS glue keeps only the untestable agent-spawn
-mechanics and delegates the converge/continue/cap decision to `next_action` below.
+The QRSPI critic loops (`runCriticPanelLoop` — the design panel — and `runCoherenceCritic`,
+the JS glue in `.claude/workflows/qrspi-batch.js`) spawn critic agent(s) per round against a
+produced artifact, then must decide whether it has CONVERGED (latest round passed), needs
+another REVISE round, or has hit its per-phase round CAP and must surface its residual
+findings into the finalize PR body. (The single-edge `runCriticLoop` that also drove this
+core was retired in RUS-88; the convergence math is unchanged.) That decision is the one
+piece of the loop worth unit-testing, so it lives here as a pure stdlib-only module with no
+agent or IO coupling (ref: design.md Decision 3, Pattern 7, Q12/Q13). The JS glue keeps only
+the untestable agent-spawn mechanics and delegates the converge/continue/cap decision to
+`next_action` below.
 
 Two functions:
   - `parse_critic_verdict(text)` — fail-closed parser. The critic verdict is contractually

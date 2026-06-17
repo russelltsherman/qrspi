@@ -376,16 +376,15 @@ function parseConfigEnvelope(text, key) {
 }
 
 // Parse the resolved per-phase critic config emitted by scripts/qrspi_critics_config.py — the
-// single tested source of truth that replaces the former ~6 inline JS parsers/resolvers AND the
-// two separate `--key critics` reads (the "single read discipline"). The script reads
+// single tested source of truth (the "single read discipline"). The script reads
 // .qrspi/config.json ONCE and prints { ok, phases, warnings }; this extracts `phases` and logs
-// each warning (the lens-drop / candidate-clamp notices the inline resolvers used to log()).
-// Best-effort: ANY of no JSON, a parse failure, or a missing/non-object `phases` ⇒
-// DEFAULT_CRITIC_PHASES, so a garbled critic config silently falls back to defaults and NEVER
-// gates the run. Returns the full phases object — every phase resolved to { enabled, maxRounds,
-// … } with the UNIFORM `enabled` flag (default ON for questions/research/design/structure/plan,
-// OFF for the opt-in implementation seam). A present-but-partial envelope is shallow-merged over
-// the defaults so every phase key is always present for the consumers below.
+// each warning (the lens-drop / candidate-clamp notices). Best-effort: ANY of no JSON, a parse
+// failure, or a missing/non-object `phases` ⇒ DEFAULT_CRITIC_PHASES, so a garbled critic config
+// silently falls back to defaults and NEVER gates the run. Returns the two surviving phases —
+// `design` (the PANEL) and `implementation` (the coherence pass), both default OFF (opt-in); the
+// fidelity-only edge critic on questions/research/structure/plan and the per-slice edge critic
+// were retired (RUS-88). A present-but-partial envelope is shallow-merged over the defaults so
+// both phase keys are always present for the consumers below.
 function parseCriticsEnvelope(text) {
   const raw = extractJsonObject(text)
   if (!raw) return DEFAULT_CRITIC_PHASES
@@ -493,9 +492,9 @@ const NODECHECK_SCHEMA = {
   },
 }
 
-// The qrspi-critic agent's verdict (Decision 2 — schema'd return, no staged file). The
-// edge-critic judges the produced artifact as a faithful DERIVATION of its upstream input
-// and replies { pass, findings }: pass:true => findings empty; pass:false => findings is a
+// A critic agent's verdict (Decision 2 — schema'd return, no staged file). A critic (the
+// design panel lenses, or the coherence pass) judges its input and replies
+// { pass, findings }: pass:true => findings empty; pass:false => findings is a
 // non-empty list of self-contained strings, each naming a specific upstream requirement
 // the artifact dropped/contradicted/distorted. Shape matches qrspi_critic_loop.py's
 // canonical verdict ({pass, findings}); findings elements are pinned to strings here.
@@ -566,22 +565,6 @@ const LOOP_DECISION_SCHEMA = {
   },
 }
 
-// The decision returned by scripts/qrspi_slice_critic.py's `decide` CLI shim (RUS-75): whether
-// to run the per-slice edge critic for one slice and, if so, the Graphite diff range that scopes
-// it. The JS glue (sliceCriticDecide) never re-derives this — the tested pure module is the
-// single source of truth. `run` is the only required field; the nullable string fields are
-// `null` on a skip (alreadyCommitted / single-slice) and populated on a run.
-const SLICE_DECIDE_SCHEMA = {
-  type: 'object',
-  required: ['run'],
-  properties: {
-    run: { type: 'boolean' },
-    skipReason: { type: ['string', 'null'] },
-    diffBase: { type: ['string', 'null'] },
-    diffHead: { type: ['string', 'null'] },
-  },
-}
-
 // The synthesized round verdict the qrspi_critic_synthesize.py worker emits (RUS-56): the M
 // per-lens { pass, findings } replies reduced to one authoritative { pass, findings } for the
 // round (pass only if every lens passed; findings is the exact-string-deduped union, each
@@ -630,15 +613,13 @@ const DEFAULT_DESIGN_FRAMINGS = ['mvp-first', 'risk-first', 'extensibility-first
 // sets `enabled: true` (critics are opt-in across the board). Keep this in lockstep with the
 // Python resolver's defaults (verified there by qrspi_critics_config_test.py).
 const DEFAULT_CRITIC_PHASES = {
-  questions: { enabled: false, maxRounds: 2 },
-  research: { enabled: false, maxRounds: 2 },
   // RUS-77 cost-lever gates all default OFF/absent (lockstep with resolve_design):
-  // `digest`/`gateBehindEdge` are nested {enabled:false} blocks; `lensModel` is ABSENT
-  // (the key is omitted, not null) until config supplies a non-empty model string.
-  design: { enabled: false, maxRounds: 2, lenses: DEFAULT_DESIGN_LENSES, candidates: 1, digest: { enabled: false }, gateBehindEdge: { enabled: false } },
-  structure: { enabled: false, maxRounds: 2 },
-  plan: { enabled: false, maxRounds: 2 },
-  implementation: { enabled: false, maxRounds: 2, coherence: { enabled: false, maxRounds: 2 } },
+  // `digest` is a nested {enabled:false} block; `lensModel` is ABSENT (the key is
+  // omitted, not null) until config supplies a non-empty model string. The fidelity-only
+  // edge critic on questions/research/structure/plan and the per-slice edge critic were
+  // retired (RUS-88), so only the design PANEL and the implementation coherence pass remain.
+  design: { enabled: false, maxRounds: 2, lenses: DEFAULT_DESIGN_LENSES, candidates: 1, digest: { enabled: false } },
+  implementation: { coherence: { enabled: false, maxRounds: 2 } },
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -718,119 +699,21 @@ return that JSON as-is — HARD STOP, do NOT retry, do NOT improvise alternative
   return { ok: env.ok === true, unresolved: Array.isArray(env.unresolved) ? env.unresolved : [] }
 }
 
-// Edge-critic loop (RUS-55). Runs ENTIRELY inside the pre-persist staging window of
-// runPhase: it critiques the just-produced artifact at stg(id, name) against its upstream
-// input (the rubric anchor), and on a non-pass spawns a reviser that REWRITES stg(id, name)
-// in place, then re-critiques — up to the cap. The converge / continue / cap decision is
-// NOT re-derived here; it is delegated to the tested pure module scripts/qrspi_critic_loop.py
-// (single-critic per round => the verdict is passed to next_action as a one-element list,
-// OQ2). Returns { ok, residualFindings }: ok is true whenever the loop completed (converged
-// OR cap_reached — a cap-reached artifact is still finalized, with its residual findings
-// surfaced into the PR body, AC2); residualFindings is [] on converge and the last verdict's
-// findings on cap_reached. A spawn failure (critic or reviser returns null) is ok:false
-// (the loop could not run) — runPhase treats that like any other phase failure.
-//
-// criticConfig fields consumed here:
-//   upstreamPath : absolute path to the upstream artifact (rubric anchor) — resolved at the
-//                  call site where `wd` is in scope (doDesign/doPlan), so this function needs
-//                  no `wd` (ref: structure §Unverified Assumptions, deferred-ctx note).
-//   maxRounds    : cap, default 2 when omitted.
-//   rubric       : optional extra rubric text spliced into the critic prompt; omitted when absent.
-async function runCriticLoop(name, id, criticConfig) {
-  const maxRounds = criticConfig.maxRounds ?? 2
-  const upstreamPath = criticConfig.upstreamPath
-  const artifactPath = stg(id, name)
-  const rubricLine = criticConfig.rubric ? `RUBRIC = ${criticConfig.rubric}\n` : ''
-
-  // AC-INSTR: accumulate the per-round verdict ({lens, pass, findings}) so every termination
-  // (including aborts) can be reduced+appended to the per-ticket ledger as one CriticStepMetrics
-  // record. The reduction (findingsCount) is done in PYTHON (recordCriticMetrics → reducer); JS
-  // only collects the raw verdicts. The single critic has no panel lens, so lens is null.
-  const metricRounds = []
-
-  for (let round = 0; round < maxRounds; round++) {
-    // One critic per round (single-critic, not parallel() — OQ2). The agent reads both
-    // paths itself and returns the schema'd { pass, findings } verdict.
-    const verdict = await agent(
-      `You are the qrspi-critic for ${id} artifact "${name}", round ${round + 1}/${maxRounds}.
-UPSTREAM_PATH = ${upstreamPath}
-ARTIFACT_PATH = ${artifactPath}
-${rubricLine}Read BOTH paths and judge ARTIFACT_PATH as a faithful derivation of UPSTREAM_PATH (review the EDGE, not the node). Return { pass, findings } per the schema.`,
-      { label: `critic:${id}:${name}#${round + 1}`, phase: 'Critic', agentType: 'qrspi-critic', schema: CRITIC_VERDICT_SCHEMA }
-    )
-    if (verdict === null) {
-      log(`  ${id}: ${name} critic round ${round + 1} failed/skipped — stopping this ticket`)
-      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
-      return { ok: false, residualFindings: [], metrics }
-    }
-    const passed = verdict.pass === true
-    const findings = Array.isArray(verdict.findings) ? verdict.findings : []
-    // AC-INSTR: capture this round's verdict (single-critic ⇒ no lens) for the ledger record.
-    metricRounds.push({ lens: null, pass: passed, findings })
-    log(`  ${id}: ${name} critic round ${round + 1}/${maxRounds} → ${passed ? 'PASS' : `FAIL (${findings.length} finding(s))`}`)
-
-    // Delegate the converge/revise/cap decision to the tested pure module. The verdict is
-    // passed as a one-element list (single-critic). The script self-locates from __file__.
-    const decision = await criticDecision([verdict], round, maxRounds)
-    if (!decision) {
-      log(`  ${id}: ${name} critic-loop decision failed to compute — stopping this ticket`)
-      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
-      return { ok: false, residualFindings: [], metrics }
-    }
-    if (decision.action === 'converged') {
-      log(`  ${id}: ${name} critic CONVERGED at round ${round + 1}`)
-      const metrics = await recordCriticMetrics(id, name, metricRounds, 'converged')
-      return { ok: true, residualFindings: [], metrics }
-    }
-    if (decision.action === 'cap_reached') {
-      log(`  ${id}: ${name} critic CAP-REACHED at round ${round + 1} — ${decision.residual_findings.length} residual finding(s) carried to PR body`)
-      const metrics = await recordCriticMetrics(id, name, metricRounds, 'cap_reached')
-      return { ok: true, residualFindings: decision.residual_findings, metrics }
-    }
-    // action === 'revise': spawn a reviser to rewrite stg(id, name) in place addressing the
-    // findings, then re-critique on the next iteration. The reviser is the same typed phase
-    // PRODUCER agent re-prompted with the findings (it already knows how to write this
-    // artifact to the staging path; the findings are the only new input).
-    log(`  ${id}: ${name} critic REVISE at round ${round + 1} — rewriting artifact to address findings`)
-    const rev = await agent(
-      `You are the REVISER for ${id} artifact "${name}". A critic reviewed it as a derivation of its upstream input and found it does NOT yet faithfully preserve every upstream requirement.
-ARTIFACT_PATH = ${artifactPath}
-UPSTREAM_PATH = ${upstreamPath}
-FINDINGS (each names a specific upstream requirement the current artifact dropped/contradicted/distorted):
-${findings.map((f, i) => `  ${i + 1}. ${f}`).join('\n')}
-
-Read the current artifact at ARTIFACT_PATH and the upstream at UPSTREAM_PATH, then REWRITE the artifact IN PLACE at ARTIFACT_PATH so it resolves EVERY finding while keeping everything already correct. Write the full revised artifact to ARTIFACT_PATH (non-empty). Do not change any other file. Return a one-line summary.`,
-      { label: `revise:${id}:${name}#${round + 1}`, phase: 'Critic' }
-    )
-    if (rev === null) {
-      log(`  ${id}: ${name} reviser round ${round + 1} failed/skipped — stopping this ticket`)
-      const metrics = await recordCriticMetrics(id, name, metricRounds, 'aborted')
-      return { ok: false, residualFindings: [], metrics }
-    }
-  }
-  // Loop exhausted without an explicit decision return (defensive — next_action's cap branch
-  // returns cap_reached at round == maxRounds-1, so we normally exit inside the loop). Treat
-  // as cap-reached with no captured findings rather than silently passing.
-  log(`  ${id}: ${name} critic loop exhausted ${maxRounds} round(s) without converging`)
-  const metrics = await recordCriticMetrics(id, name, metricRounds, 'exhausted')
-  return { ok: true, residualFindings: [], metrics }
-}
-
-// Multi-lens edge-critic PANEL loop (RUS-56) — the design-phase peer to the single-critic
-// runCriticLoop. Same pre-persist staging window, same { ok, residualFindings } return shape,
-// so runPhase's existing write-back (criticConfig.residualFindings) is unchanged. The ONLY
-// difference is the round body: instead of one critic, it fans out criticConfig.lenses lens
-// agents in PARALLEL, reduces their M { pass, findings } replies to one authoritative round
-// verdict via the tested pure synthesize reducer (scripts/qrspi_critic_synthesize.py — the JS
-// never re-derives the reduction), then delegates the converge/revise/cap decision to the SAME
-// tested next_action (via criticDecision) the single critic uses. On `revise` it re-spawns the
-// design producer with the synthesized findings, rewriting stg(id, name) IN PLACE (never
-// emptying it). On `cap_reached` it returns the residual findings for the PR-body splice; on a
-// round-0 all-lens pass it converges with zero revise spawns.
+// Multi-lens design-critic PANEL loop (RUS-56) — the design phase's pre-persist critic, and
+// (since RUS-88 retired the single-critic edge loop) the ONLY lenses-carrying critic path. It
+// runs inside runPhase's pre-persist staging window with the { ok, residualFindings } return
+// shape runPhase's write-back (criticConfig.residualFindings) consumes. Round body: it fans out
+// criticConfig.lenses lens agents in PARALLEL, reduces their M { pass, findings } replies to one
+// authoritative round verdict via the tested pure synthesize reducer
+// (scripts/qrspi_critic_synthesize.py — the JS never re-derives the reduction), then delegates
+// the converge/revise/cap decision to the tested next_action (via criticDecision). On `revise` it
+// re-spawns the design producer with the synthesized findings, rewriting stg(id, name) IN PLACE
+// (never emptying it). On `cap_reached` it returns the residual findings for the PR-body splice;
+// on a round-0 all-lens pass it converges with zero revise spawns.
 //
 // Each lens id maps to agentType `qrspi-design-critic-<lens-id>` (the landed lens prompt
-// files), and is spawned with CRITIC_VERDICT_SCHEMA — the same { pass, findings } contract the
-// single critic returns. Every lens receives the identical input set: the staged design plus
+// files), and is spawned with CRITIC_VERDICT_SCHEMA — the { pass, findings } critic verdict
+// contract. Every lens receives the identical input set: the staged design plus
 // the persisted upstream ticket/research/questions paths (resolved at the call site, passed on
 // criticConfig).
 //
@@ -1348,7 +1231,7 @@ Run EXACTLY this one command verbatim — no path edits, no exploration, no alte
   python3 ${engineCmd('scripts/qrspi_critics_config.py')}
 
 It reads the repo's .qrspi/config.json (self-locating) and prints a one-line JSON envelope
-{ "ok": true, "phases": { … six phases … }, "warnings": [ … ] } to stdout. Output that JSON as
+{ "ok": true, "phases": { design, implementation }, "warnings": [ … ] } to stdout. Output that JSON as
 your FINAL message, exactly and verbatim — NO surrounding prose, NO code fences, NO edits. Do NOT
 call any structured-output tool. If it printed ok:false, still output that JSON verbatim (do NOT
 retry or improvise).`,
@@ -1377,53 +1260,33 @@ return that as-is — HARD STOP, do NOT retry or improvise.`,
   return out
 }
 
-// Invoke the tested pure decision module qrspi_slice_critic.py's `decide` shim via a worker (the
-// JS sandbox cannot run python) to decide whether to run the per-slice edge critic for slice `n`
-// and, if so, the Graphite diff range scoping it (RUS-75, AC1). Returns the parsed
-// { run, skipReason, diffBase, diffHead } envelope or null on failure. The worker `setup` object
-// lacks the ticket id, so it is injected here into the projected { id, slices } blob the script
-// reads from stdin (the `decide` shim derives the branch names from it). Mirrors criticDecision:
-// the blob is piped on stdin so the slice list never round-trips through the worker's stdout echo.
-async function sliceCriticDecide(t, setup, n) {
-  const blob = JSON.stringify({ id: t.id, slices: setup.slices })
-  const out = await agent(
-    `You are the SLICE-CRITIC-DECIDE worker. Your cwd is the main repo root. Run EXACTLY this one
-command verbatim (no path edits, no exploration) and return its JSON stdout verbatim:
-
-  printf '%s' ${JSON.stringify(blob)} | python3 ${engineCmd('scripts/qrspi_slice_critic.py')} --slice-index ${n}
-
-It prints JSON { run, skipReason, diffBase, diffHead }. Parse and return it verbatim. If it errors,
-return that as-is — HARD STOP, do NOT retry or improvise.`,
-    { label: `slice-decide:${t.id}#${n}`, phase: 'Critic', schema: SLICE_DECIDE_SCHEMA }
-  )
-  if (!out || typeof out.run !== 'boolean') return null
-  return out
-}
-
-// Build the finalize-prompt FRAGMENT that splices the critic's residual findings (cap-reached
-// only) into the phase commit message BEFORE `gt submit` — so Graphite seeds the PR body with
-// them at creation (a body amended AFTER submit would not update the PR, since gt seeds the
-// body from the commit message at creation only). No findings ⇒ '' (the finalize prompt is
+// Build the finalize-prompt FRAGMENT that splices the design-critic panel's residual findings
+// (cap-reached only) into the phase commit message BEFORE `gt submit` — so Graphite seeds the PR
+// body with them at creation (a body amended AFTER submit would not update the PR, since gt seeds
+// the body from the commit message at creation only). No findings ⇒ '' (the finalize prompt is
 // byte-for-byte unchanged). Mirrors qrspi_pr_body.py's seam: the findings are written to a
 // token-free staged JSON file (the script owns the worktree path and reads the file) so the
-// fragile finding text never round-trips through heredoc quoting. `phase` is 'design'|'plan'.
+// fragile finding text never round-trips through heredoc quoting. `phase` is 'design' (the only
+// surviving phase critic since RUS-88 retired the single-critic edge loop on the other phases).
 function criticBodyStep(id, phase, findings, wd) {
   if (!Array.isArray(findings) || findings.length === 0) return ''
   const stageFile = `/tmp/phase-stage/${id}/critic-findings-${phase}.json`
-  return ` Then surface the edge-critic's residual findings into the PR body BEFORE submitting: (a) write this EXACT JSON verbatim (a JSON array of strings) to ${stageFile}: ${JSON.stringify(findings)} ; (b) run EXACTLY this one command verbatim from ${wd}: \`python3 ${engineCmd('scripts/qrspi_critic_body.py')} --ticket ${id} --phase ${phase} --findings-file ${stageFile}\` — it amends the ${id}/${phase} commit message to append the residual findings (self-locating); if it reports ok:false, return ok:false (do NOT submit).`
+  return ` Then surface the design-critic panel's residual findings into the PR body BEFORE submitting: (a) write this EXACT JSON verbatim (a JSON array of strings) to ${stageFile}: ${JSON.stringify(findings)} ; (b) run EXACTLY this one command verbatim from ${wd}: \`python3 ${engineCmd('scripts/qrspi_critic_body.py')} --ticket ${id} --phase ${phase} --findings-file ${stageFile}\` — it amends the ${id}/${phase} commit message to append the residual findings (self-locating); if it reports ok:false, return ok:false (do NOT submit).`
 }
 
 // Run one phase agent, then deterministically persist its staged artifact. Reuses an
 // existing non-empty canonical artifact (resume). Returns true on success, false on
 // failure/skip.
 //
-// criticConfig (RUS-55, OPTIONAL trailing arg): when present, the edge-critic loop runs in
-// the pre-persist staging window — produce → critique → revise on stg(id, name) — before the
-// persist gate. Absent (undefined) ⇒ the guard is false ⇒ the four original statements run
-// VERBATIM (AC1, byte-for-byte unchanged no-critic behavior). On cap-reached the loop's
-// residual findings are written back onto the passed criticConfig object as
-// `criticConfig.residualFindings` so the caller (doDesign/doPlan) can splice them into the
-// finalize commit body; this keeps runPhase's existing boolean return contract intact.
+// criticConfig (OPTIONAL trailing arg): when it carries `lenses` (only the design phase does),
+// the design-critic PANEL loop runs in the pre-persist staging window — produce → critique →
+// revise on stg(id, name) — before the persist gate. A criticConfig may also carry a `nodeCheck`
+// (research's deterministic citation validator) which runs independently of the panel gate. A
+// criticConfig with neither (or an absent/undefined criticConfig) ⇒ the phase persists ungated
+// (the fidelity-only single-critic edge loop on the non-design phases was retired, RUS-88). On
+// cap-reached the panel's residual findings are written back onto the passed criticConfig object
+// as `criticConfig.residualFindings` so doDesign can splice them into the finalize commit body;
+// this keeps runPhase's existing boolean return contract intact.
 async function runPhase(name, agentType, prompt, existing, id, phaseLabel, criticConfig) {
   if (existing && existing[name]) {
     log(`  ${id}: reusing existing ${name}.md`)
@@ -1463,40 +1326,14 @@ async function runPhase(name, agentType, prompt, existing, id, phaseLabel, criti
     }
     log(`  ${id}: ${name} node-check passed`)
   }
-  // Edge-critic loop (RUS-55): runs BETWEEN produce-success and the persist gate, on the
-  // still-staged artifact, so persist remains the single success gate. No-critic phases skip
-  // this block entirely and behave byte-for-byte as before.
-  if (criticConfig) {
-    // AC-COST speculative lever (RUS-77): gate the panel behind a passing upstream edge-critic.
-    // HONESTY (plan §25 scope note): the design phase routes to EITHER the panel OR a single edge
-    // critic at THIS dispatch — they are mutually-exclusive alternatives, not a sequence — so there
-    // is no in-scope edge-critic pass/fail outcome for the design panel to gate behind in the
-    // current call graph. The honest behavior is therefore: when gateBehindEdge.enabled AND an
-    // upstream edge outcome was plumbed onto criticConfig.edgePassed and is true, SKIP the panel;
-    // otherwise (default OFF, or no edge outcome available) run the panel as today and RECORD the
-    // gap rather than fabricating a sequence. Default OFF ⇒ this branch is never taken ⇒ unchanged.
-    if (criticConfig.lenses?.length && criticConfig.gateBehindEdge && criticConfig.gateBehindEdge.enabled) {
-      if (criticConfig.edgePassed === true) {
-        log(`  ${id}: ${name} panel SKIPPED — gateBehindEdge ON and upstream edge critic passed`)
-        criticConfig.residualFindings = []
-        criticConfig.criticSummary = 'panel skipped (gateBehindEdge: edge passed)'
-        // Persist still runs below — skipping the panel does NOT skip the success gate.
-        const p = await persistArtifact(id, name, phaseLabel)
-        if (!p || !p.ok) {
-          log(`  ${id}: ${name} reported done but no artifact was staged/persisted — ${p?.error ?? 'no result'} (stopping this ticket)`)
-          return false
-        }
-        log(`  ${id}: ${name} → saved ${p.bytes ?? '?'}B (panel gated out)`)
-        return true
-      }
-      log(`  ${id}: ${name} gateBehindEdge ON but no upstream edge outcome in scope (design routes to panel OR edge, not a sequence) — running panel (lever no-op; see plan §25)`)
-    }
-    // Dispatch on lenses: a non-empty criticConfig.lenses selects the multi-lens PANEL
-    // (design phase); its absence (the single-critic plan phase, or any other caller) keeps
-    // the landed single-critic path byte-for-byte unchanged.
-    const cr = criticConfig.lenses?.length
-      ? await runCriticPanelLoop(name, id, criticConfig)
-      : await runCriticLoop(name, id, criticConfig)
+  // Design-critic PANEL loop (RUS-56): runs BETWEEN produce-success and the persist gate, on the
+  // still-staged artifact, so persist remains the single success gate. ONLY the design panel
+  // survives — the fidelity-only single-critic edge loop was retired (RUS-88), so the gate is now
+  // purely `criticConfig?.lenses?.length`: a panel config (the design phase carries lenses) runs
+  // the panel; every non-panel config (planning phases now pass criticConfig undefined) falls
+  // through to the ungated persist below, byte-for-byte as the old no-critic path.
+  if (criticConfig?.lenses?.length) {
+    const cr = await runCriticPanelLoop(name, id, criticConfig)
     if (!cr || !cr.ok) {
       log(`  ${id}: ${name} critic loop did not complete — stopping this ticket`)
       return false
@@ -1677,45 +1514,34 @@ async function doDesign(t, r) {
   phase('Design')
 
   // ONE resolver read up front (the single read discipline): scripts/qrspi_critics_config.py
-  // resolves EVERY phase's critic — the uniform `enabled` flag, maxRounds, and the design panel's
-  // lenses/candidates — so questions/research/design here (and structure/plan in doPlan) index off
-  // one shared resolution. A disabled phase ⇒ undefined criticConfig ⇒ runPhase skips its critic.
+  // resolves the two surviving critic phases — the design PANEL (lenses/candidates) and the
+  // implementation coherence pass. The fidelity-only edge critic on questions/research/structure/
+  // plan was retired (RUS-88), so those phases no longer carry an edge-critic config.
   const critics = await readCriticsConfig('Design')
 
-  // Single edge-critic on questions (RUS-57), anchored on the TICKET (Q12 — questions are derived
-  // from the ticket). No `lenses` ⇒ runPhase routes to the single-critic runCriticLoop. Gated on
-  // critics.questions.enabled (uniform vocabulary; default ON).
-  const questionsCritic = critics.questions.enabled ? {
-    upstreamPath: r.ticketContentPath,
-    maxRounds: critics.questions.maxRounds,
-  } : undefined
-  if (!critics.questions.enabled) log(`  ${t.id}: questions critic DISABLED by config`)
+  // Questions phase carries no critic (the edge critic was retired, RUS-88) — runPhase persists it
+  // ungated.
   if (!await runPhase('questions', 'qrspi-questions',
     `TICKET_ID = ${t.id}
 TICKET_CONTENT_PATH = ${r.ticketContentPath}
 
 OUTPUT_PATH = ${stg(t.id, 'questions')}
-TEMPLATE_PATH = ${tpl(wd, 'questions.md')}`, r.existing, t.id, 'Design', questionsCritic)) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'questions.md')}`, r.existing, t.id, 'Design')) return failTicket(t)
 
-  // Single edge-critic on research (RUS-57). upstreamPath is questions.md and NEVER
-  // r.ticketContentPath — the research phase is firewalled from the ticket (Risk Register
-  // med/high; Q12). Research ALSO carries the citation node-check: runPhase runs the validator on
-  // the STAGED research.md before the critic, failing the phase on a provably-broken citation
-  // (out-of-bounds line/range) without persisting. The validator joins citations against `wd`
-  // (the worktree root) explicitly — never resolve_repo_root() (RUS-57 Decision 3; impl-log
-  // slice 1: pass --worktree-root wd). engineCmdFor(r,…) anchors the script on the host checkout
-  // root (not the worktree HEAD, which a relocating ticket may have moved).
-  // Gated on critics.research.enabled (default ON). Disabling the research critic also skips its
-  // bundled citation node-check — they ride the same criticConfig, so `enabled:false` turns the
-  // whole research-critic bundle off.
-  const researchCritic = critics.research.enabled ? {
-    upstreamPath: art(wd, t.id, 'questions.md'),
-    maxRounds: critics.research.maxRounds,
+  // Research carries the deterministic citation node-check (RUS-57 Decision 2 — a separate
+  // validator, NOT the retired edge critic): runPhase runs the validator on the STAGED research.md
+  // before persisting, failing the phase on a provably-broken citation (out-of-bounds line/range)
+  // without persisting. The validator joins citations against `wd` (the worktree root) explicitly —
+  // never resolve_repo_root() (RUS-57 Decision 3; impl-log slice 1: pass --worktree-root wd).
+  // engineCmdFor(r,…) anchors the script on the host checkout root (not the worktree HEAD, which a
+  // relocating ticket may have moved). The edge critic that used to ride this same config was
+  // retired (RUS-88); the node-check now rides a criticConfig that carries ONLY `nodeCheck` (no
+  // `lenses`, no edge-loop fields), so runPhase runs the node-check and otherwise persists ungated.
+  const researchCritic = {
     nodeCheck: {
       cmd: `python3 ${engineCmdFor(r, 'scripts/qrspi_verify_citations.py')} --artifact-path ${stg(t.id, 'research')} --worktree-root ${wd}`,
     },
-  } : undefined
-  if (!critics.research.enabled) log(`  ${t.id}: research critic DISABLED by config (citation node-check also skipped)`)
+  }
   if (!await runPhase('research', 'qrspi-research',
     `TICKET_ID = ${t.id}
 QUESTIONS_PATH = ${art(wd, t.id, 'questions.md')}
@@ -1765,20 +1591,11 @@ TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, r.existing, t.id, 'Design', designCrit
 
   phase('Finalize')
   // Residual critic findings (cap-reached only) to splice into the Design PR body. runPhase wrote
-  // each phase's findings back onto its criticConfig object; absent ⇒ converged ⇒ nothing. All
-  // three phases (questions/research/design) land on the SAME ${t.id}/design branch + PR, so their
-  // residual findings are AGGREGATED into the one design-commit splice (RUS-57 T16). qrspi_critic_
-  // body.py only knows the design/plan branch suffixes — there is no questions/research branch —
-  // so questions/research findings ride the design phase, each tagged with its source phase.
-  // cfg is undefined when that phase's critic was disabled by config — null-safe so a disabled
-  // phase simply contributes no findings.
-  const tagFindings = (phaseName, cfg) =>
-    ((cfg?.residualFindings) ?? []).map(f => `[${phaseName}] ${f}`)
-  const designFindings = [
-    ...tagFindings('questions', questionsCritic),
-    ...tagFindings('research', researchCritic),
-    ...(designCritic?.residualFindings ?? []),
-  ]
+  // the design panel's findings back onto its criticConfig object; absent ⇒ converged ⇒ nothing.
+  // Only the design PANEL survives (the questions/research edge critics were retired, RUS-88), so
+  // the design-commit splice carries only the design panel's residual findings. cfg is undefined
+  // when the panel was disabled by config — null-safe so it simply contributes no findings.
+  const designFindings = [...(designCritic?.residualFindings ?? [])]
   const designBodyStep = criticBodyStep(t.id, 'design', designFindings, wd)
   const fin = await agent(
     `You are the DESIGN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: run_design" commit+submit steps of ${SKILL}.
@@ -1789,17 +1606,13 @@ Return: ok, prUrl, newStatus, summary (1-2 sentences).`,
     { label: `finalize-design:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
   const out = finResult(t, fin, 'run_design')
-  // AC-INSTR (RUS-77 Modified Types: TicketResult.criticMetrics): collect each phase's
-  // CriticStepMetrics record (surfaced by runPhase onto its criticConfig when that phase's critic
-  // ran) into one array and fold it into the result object. A phase whose critic was disabled by
-  // config has an undefined criticConfig (so no `.criticMetrics`); records ride one design
-  // branch/PR in phase order (questions → research → design). Per plan §12, when EVERY phase
-  // critic is disabled (the critics-DISABLED path) NO record is surfaced and the `criticMetrics`
-  // key is OMITTED entirely — the disabled path returns the byte-for-byte-unchanged result object
-  // (no ledger write either: the loops were never dispatched).
+  // AC-INSTR (RUS-77 Modified Types: TicketResult.criticMetrics): collect the design panel's
+  // CriticStepMetrics record (surfaced by runPhase onto designCritic when the panel ran) and fold
+  // it into the result object. Only the design panel survives (the questions/research edge critics
+  // were retired, RUS-88); a disabled panel has an undefined criticConfig (so no `.criticMetrics`)
+  // and the `criticMetrics` key is OMITTED entirely — the disabled path returns the byte-for-byte-
+  // unchanged result object (no ledger write either: the loop was never dispatched).
   const criticMetrics = [
-    questionsCritic?.criticMetrics,
-    researchCritic?.criticMetrics,
     designCritic?.criticMetrics,
   ].filter(Boolean)
   if (criticMetrics.length) out.criticMetrics = criticMetrics
@@ -1821,36 +1634,21 @@ async function doPlan(t, r) {
   const wd = r.worktreeDir
   phase('Plan')
 
-  // ONE resolver read for the plan action (the single read discipline). doPlan is a SEPARATE batch
-  // action from doDesign, so reading here is the single read for this invocation — not a duplicate.
-  const critics = await readCriticsConfig('Plan')
-
-  // Single edge-critic on structure (RUS-57), anchored on its upstream design.md. No `lenses` ⇒
-  // runPhase routes to the single-critic runCriticLoop. Gated on critics.structure.enabled (default ON).
-  const structureCritic = critics.structure.enabled ? {
-    upstreamPath: art(wd, t.id, 'design.md'),
-    maxRounds: critics.structure.maxRounds,
-  } : undefined
-  if (!critics.structure.enabled) log(`  ${t.id}: structure critic DISABLED by config`)
+  // Structure and plan carry no critic (the edge critic was retired, RUS-88) — runPhase persists
+  // each ungated. The whole-stack coherence pass at the planning→implementation seam (in
+  // doImplementation) is the surviving planning-stack critic.
   if (!await runPhase('structure', 'qrspi-structure',
     `TICKET_ID = ${t.id}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
 OUTPUT_PATH = ${stg(t.id, 'structure')}
-TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, r.existing, t.id, 'Plan', structureCritic)) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'structure.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
 
-  // Edge-critic on the plan artifact, anchored on its upstream structure.md (OQ4). maxRounds is
-  // config-overridable per-phase (RUS-57). Gated on critics.plan.enabled (default ON).
-  const planCritic = critics.plan.enabled ? {
-    upstreamPath: art(wd, t.id, 'structure.md'),
-    maxRounds: critics.plan.maxRounds,
-  } : undefined
-  if (!critics.plan.enabled) log(`  ${t.id}: plan critic DISABLED by config`)
   if (!await runPhase('plan', 'qrspi-plan',
     `TICKET_ID = ${t.id}
 STRUCTURE_PATH = ${art(wd, t.id, 'structure.md')}
 DESIGN_PATH = ${art(wd, t.id, 'design.md')}
 OUTPUT_PATH = ${stg(t.id, 'plan')}
-TEMPLATE_PATH = ${tpl(wd, 'plan.md')}`, r.existing, t.id, 'Plan', planCritic)) return failTicket(t)
+TEMPLATE_PATH = ${tpl(wd, 'plan.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
 
   if (!await runPhase('worktree', 'qrspi-worktree',
     `TICKET_ID = ${t.id}
@@ -1859,26 +1657,18 @@ OUTPUT_PATH = ${stg(t.id, 'worktree')}
 TEMPLATE_PATH = ${tpl(wd, 'worktree.md')}`, r.existing, t.id, 'Plan')) return failTicket(t)
 
   phase('Finalize')
-  // structure + plan both land on the SAME ${t.id}/plan branch + PR (qrspi_critic_body.py only
-  // knows the design/plan branch suffixes — there is no structure branch), so structure's residual
-  // findings are AGGREGATED into the one plan-commit splice, tagged with their source phase (T16).
-  const planFindings = [
-    ...((structureCritic?.residualFindings ?? []).map(f => `[structure] ${f}`)),
-    ...(planCritic?.residualFindings ?? []),
-  ]
-  const planBodyStep = criticBodyStep(t.id, 'plan', planFindings, wd)
+  // The structure/plan edge critics were retired (RUS-88), so the plan commit carries no residual
+  // findings splice (the surviving planning-stack critic is the coherence pass in doImplementation,
+  // whose findings ride the slice-1 PR).
   const fin = await agent(
     `You are the PLAN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: advance → nextPhase == plan" steps of ${SKILL}.
 1. Verify structure.md, plan.md, worktree.md exist and are non-empty under ${wd}/.qrspi/${t.id}/. If any missing/empty, return ok:false.
-2. gt checkout ${t.id}/design; stage ONLY those three artifacts; create the ${t.id}/plan branch STACKED on ${t.id}/design with \`gt create\` (single commit "${t.id} [SP]: Plan — ${t.title}").${planBodyStep} Then submit the Plan PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (submit the reviewer flag EXACTLY as written — it is what surfaces the PR in the reviewer\'s Graphite queue)' : ''}.
+2. gt checkout ${t.id}/design; stage ONLY those three artifacts; create the ${t.id}/plan branch STACKED on ${t.id}/design with \`gt create\` (single commit "${t.id} [SP]: Plan — ${t.title}"). Then submit the Plan PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (submit the reviewer flag EXACTLY as written — it is what surfaces the PR in the reviewer\'s Graphite queue)' : ''}.
 3. BEST-EFFORT project Linear → "Plan Review" (WARN on failure, still ok:true if the PR was created).
 Return: ok, prUrl, newStatus, summary.`,
     { label: `finalize-plan:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
   const out = finResult(t, fin, 'advance:plan')
-  if (out.action === 'advance:plan' && fin && fin.ok && planFindings.length) {
-    out.summary = `${out.summary} [critic: ${planFindings.length} residual finding(s) in PR body]`
-  }
   return out
 }
 
@@ -1886,7 +1676,7 @@ Return: ok, prUrl, newStatus, summary.`,
 // HELPER: runCoherenceCritic — the whole-stack coherence pass at the planning→
 // implementation seam (RUS-58, AC2). Runs ONCE before the slice loop, judging the six
 // frozen planning artifacts together for intent drift, and returns { ok, residualFindings }
-// in the SAME shape runCriticLoop uses (so doImplementation carries findings the same way).
+// (so doImplementation carries the findings to the slice-1 PR body).
 //   - There is NO reviser at the seam: per Decision 3 the disposition is surface-only — the
 //     coherence pass never rewrites an upstream artifact (that high-blast-radius path is the
 //     reviewer-initiated `reset`, not this critic). So the loop converges (pass) or carries
@@ -1937,82 +1727,6 @@ Read all six paths and return { pass, findings } per the schema.`,
   return { ok: true, residualFindings: [] }
 }
 
-// ---------------------------------------------------------------------------
-// HELPER: runSliceCritic — the per-slice edge critic inside doImplementation's slice loop
-// (RUS-58, AC1/AC3). Judges ONE slice's diff (${diffBase}..${diffHead}) as a faithful
-// implementation of that slice's plan/structure rubric, with the SINGLE-CRITIC path (NO panel
-// — AC3: no `lenses`). Returns { ok, residualFindings } (same shape as runCriticLoop):
-//   - Spawns the EXISTING qrspi-critic agent against the slice diff; the rubric is the slice's
-//     planSlice + structureSlice (passed inline). The critic reads the diff via the worker's
-//     git/gt access — it is given the Graphite diff range and the rubric text.
-//   - On a non-pass verdict, routes to the EXISTING qrspi_revise_amend.py --branch ${id}/slice-N
-//     (Decision 2 / Q7), then re-critiques on the next round.
-//   - The converge/revise/cap decision is the EXISTING tested next_action via criticDecision
-//     (Decision 5 — NOT re-implemented); cap_reached is ship-with-disclosure (carry findings).
-//   - A critic or revise-amend SPAWN failure (null) ⇒ ok:false ⇒ doImplementation maps it to
-//     skip(...) (no silent ship; Risk Register row 2).
-async function runSliceCritic(t, r, wd, sliceN, dec, planSlice, structureSlice, maxRounds) {
-  const rounds = Number.isInteger(maxRounds) && maxRounds > 0 ? maxRounds : 2
-  const id = t.id
-  const branch = `${id}/slice-${sliceN}`
-  const diffRange = `${dec.diffBase}..${dec.diffHead}`
-  const rubric = `PLAN_SLICE (the planned steps this slice must faithfully implement):\n${planSlice}\n\nSTRUCTURE_SLICE (the types/contracts/slice definition):\n${structureSlice}`
-
-  for (let round = 0; round < rounds; round++) {
-    const verdict = await agent(
-      `You are the qrspi-critic for ${id} slice ${sliceN}, round ${round + 1}/${rounds}, judging an IMPLEMENTATION slice as a faithful derivation of its planned steps. Your cwd is ${wd}.
-1. Read the slice's code diff with: \`gt checkout ${branch} --no-interactive\` then \`git diff ${diffRange}\` (the Graphite parent..this-slice range). This diff is the produced artifact you judge.
-2. The rubric (the upstream you judge against) is the slice's plan + structure below:
-${rubric}
-Judge the EDGE: does the slice diff faithfully implement every planned step / contract for this slice — preserved, correctly built, or explicitly resolved? A planned step silently dropped, contradicted, or distorted is a finding. Do NOT judge prose; judge whether the code realizes the plan. Return { pass, findings } per the schema (each finding names the specific planned step/contract the diff drops/contradicts/distorts). Do NOT amend or commit anything — you only judge.`,
-      { label: `slice-critic:${id}#${sliceN}r${round + 1}`, phase: 'Critic', agentType: 'qrspi-critic', schema: CRITIC_VERDICT_SCHEMA }
-    )
-    if (verdict === null) {
-      log(`  ${id}: slice ${sliceN} critic round ${round + 1} failed/skipped — stopping this ticket`)
-      return { ok: false, residualFindings: [] }
-    }
-    const passed = verdict.pass === true
-    const findings = Array.isArray(verdict.findings) ? verdict.findings : []
-    log(`  ${id}: slice ${sliceN} critic round ${round + 1}/${rounds} → ${passed ? 'PASS' : `FAIL (${findings.length} finding(s))`}`)
-
-    const decision = await criticDecision([verdict], round, rounds)
-    if (!decision) {
-      log(`  ${id}: slice ${sliceN} critic-loop decision failed to compute — stopping this ticket`)
-      return { ok: false, residualFindings: [] }
-    }
-    if (decision.action === 'converged') {
-      log(`  ${id}: slice ${sliceN} critic CONVERGED at round ${round + 1}`)
-      return { ok: true, residualFindings: [] }
-    }
-    if (decision.action === 'cap_reached') {
-      log(`  ${id}: slice ${sliceN} critic CAP-REACHED at round ${round + 1} — ${decision.residual_findings.length} residual finding(s) carried to the slice PR body (ship-with-disclosure)`)
-      return { ok: true, residualFindings: decision.residual_findings }
-    }
-    // action === 'revise': route to the existing qrspi_revise_amend.py to fix the slice IN PLACE,
-    // then re-critique the amended branch on the next round.
-    log(`  ${id}: slice ${sliceN} critic REVISE at round ${round + 1} — amending the slice to address findings`)
-    const rev = await agent(
-      `You are the SLICE REVISER for ${id} slice ${sliceN}, in ${wd}. The per-slice edge critic judged the slice diff (${diffRange}) and found it does NOT yet faithfully implement its planned steps.
-FINDINGS (each names a specific planned step/contract the slice diff dropped/contradicted/distorted):
-${findings.map((f, i) => `  ${i + 1}. ${f}`).join('\n')}
-Do:
-1. \`gt checkout ${branch} --no-interactive\`.
-2. Edit the slice's code in ${wd} to resolve EVERY finding while keeping everything already correct (do NOT touch other slices' files or any phase artifact beyond what the findings require).
-3. Stage your edits AND amend the slice commit IN PLACE by running EXACTLY this one self-locating command verbatim — no path edits, no alternatives:
-     python3 ${engineCmdFor(r, 'scripts/qrspi_revise_amend.py')} --ticket ${id} --branch ${branch}
-   It checks out the branch, stages every edit (excluding caches), amends with \`gt modify\` keeping the EXACT subject+trailers, and VERIFIES the amend captured your changes (it FAILS if nothing was staged or the tree is left dirty). It prints JSON { ok, branch, oldOid, newOid, dirty, error? }. If it prints ok:false, return ok:false — HARD STOP; do NOT hand-run gt modify/git add/git commit/git reset to work around it, and never run a bare \`gt modify --no-interactive\` (without staging it amends an empty index and silently drops your edits).
-Return: ok, summary (one line naming what you changed), or ok:false with the verbatim reason.`,
-      { label: `slice-revise:${id}#${sliceN}r${round + 1}`, phase: 'Critic', schema: WORKER_SCHEMA }
-    )
-    if (!rev || rev.ok !== true) {
-      log(`  ${id}: slice ${sliceN} revise-amend round ${round + 1} failed — ${rev?.error ?? 'no result'} (stopping this ticket)`)
-      return { ok: false, residualFindings: [] }
-    }
-  }
-  log(`  ${id}: slice ${sliceN} critic loop exhausted ${rounds} round(s) without converging`)
-  return { ok: true, residualFindings: [] }
-}
-
 // ===========================================================================
 // ACTION: advance → implementation  (slice stack on plan, then land at the end)
 // ===========================================================================
@@ -2043,10 +1757,6 @@ Return: ok, worktreeDir, slices[]. Do NOT implement anything or change Linear.`,
   // (AC2: no slice commit exists yet at the seam).
   const implCriticCfg = (await readCriticsConfig('Implementation')).implementation
   let coherenceFindings = []
-  // RUS-75: cross-iteration accumulator of each slice's per-slice edge-critic residual findings,
-  // keyed by 1-based slice number. Populated only on the enabled path (implCriticCfg.enabled);
-  // surfaced into the matching slice-N PR body in the finalize worker. Stays {} when disabled.
-  const perSliceFindings = {}
   if (implCriticCfg.coherence.enabled) {
     // T13: resolve the six coherence inputs inline — the five frozen planning artifacts via
     // art(wd,id,name) + the ticket content via r.ticketContentPath (mirrors the doDesign panel).
@@ -2122,29 +1832,9 @@ Return: ok, branch, notesForNext (empty string if none).`,
     }
     previousNotes = commit.notesForNext || ''
     log(`  ${t.id}: slice ${s.n}/${setup.slices.length} committed (${commit.branch})`)
-
-    // RUS-75 (AC1/AC2/AC3/AC6): per-slice edge critic, run IN-LOOP after this slice's commit.
-    // Gated by implCriticCfg.enabled so the disabled path stays byte-for-byte unchanged (AC5).
-    // alreadyCommitted slices `continue` above and never reach here; `decide` also returns
-    // run:false for them as a second guard (single-slice tickets likewise skip via skipReason).
-    if (implCriticCfg.enabled) {
-      const dec = await sliceCriticDecide(t, setup, s.n)
-      if (!dec) {
-        log(`  ${t.id}: slice ${s.n} critic decide failed — stopping (prior slices preserved)`)
-        return skip(t, r.decision, `Slice ${s.n} critic decide failed; stopped without shipping.`)
-      }
-      if (!dec.run) {
-        // Critic-SKIP (NOT a ticket skip()): the slice still ships. Mirrors the coherence
-        // "skipping" log lines, naming the reason the decide shim returned.
-        log(`  ${t.id}: slice ${s.n} critic skipped (${dec.skipReason ?? 'no reason'}) — slice ships unjudged`)
-      } else {
-        const sc = await runSliceCritic(t, r, wd, s.n, dec, s.planSlice, s.structureSlice, implCriticCfg.maxRounds)
-        if (!sc.ok) {
-          return skip(t, r.decision, `Slice ${s.n} critic spawn failed; stopped without shipping.`)
-        }
-        perSliceFindings[s.n] = sc.residualFindings
-      }
-    }
+    // The per-slice edge critic was retired (RUS-88): each slice ships with no per-slice
+    // edge-fidelity judgment. The whole-stack coherence pass above (the surviving impl critic)
+    // is unaffected.
   }
 
   await agent(
@@ -2158,29 +1848,22 @@ REPO_ROOT = ${wd}`,
     { label: `pr:${t.id}`, phase: 'Implementation', agentType: 'qrspi-pr' }
   )
 
-  // RUS-75 (AC4/AC4b): build the per-slice / coherence findings-splice steps for the finalize
-  // worker, amended lowest-N-first, BEFORE the existing pr-summary splice + the single
-  // `gt submit --stack`. Skip-on-empty is CALLER-SIDE and MANDATORY: a bucket whose findings are
-  // empty (or whitespace-only) produces NO instruction, so qrspi_critic_body.py is never invoked
-  // for it (its empty handling is message-level only; set_findings still runs gt checkout + gt
-  // modify, which needlessly restacks — OQ3). The whole block is dormant when implCriticCfg is
-  // off: coherenceFindings stays [] (gated by coherence.enabled) and perSliceFindings stays {}
-  // (populated only on the enabled path), so the disabled transcript is byte-for-byte unchanged.
+  // RUS-58 (AC4): build the coherence findings-splice step for the finalize worker, amended
+  // BEFORE the existing pr-summary splice + the single `gt submit --stack`. Skip-on-empty is
+  // CALLER-SIDE and MANDATORY: empty (or whitespace-only) findings produce NO instruction, so
+  // qrspi_critic_body.py is never invoked for it (its empty handling is message-level only;
+  // set_findings still runs gt checkout + gt modify, which needlessly restacks — OQ3). The block
+  // is dormant when the coherence pass is off (coherenceFindings stays [], gated by
+  // coherence.enabled), so the disabled transcript is byte-for-byte unchanged. The per-slice edge
+  // critic was retired (RUS-88), so only coherence findings (→ slice-1) are spliced now.
   const nonEmpty = (arr) => Array.isArray(arr) && arr.filter(f => String(f).trim() !== '').length > 0
   const spliceTargets = []
-  // (a) coherence findings → slice-1 (no slice commit existed at the seam; AC2).
+  // Coherence findings → slice-1 (no slice commit existed at the seam; AC2).
   if (nonEmpty(coherenceFindings)) {
     spliceTargets.push({ slice: 1, kind: 'coherence', findings: coherenceFindings })
   }
-  // (b) per-slice residual findings, lowest-N-first.
-  for (const n of Object.keys(perSliceFindings).map(Number).sort((a, b) => a - b)) {
-    if (nonEmpty(perSliceFindings[n])) {
-      spliceTargets.push({ slice: n, kind: 'per-slice', findings: perSliceFindings[n] })
-    }
-  }
-  // Ordering for slice 1: coherence first, then slice-1 per-slice findings, then (below) pr-summary.
   const findingsSpliceStep = spliceTargets.length === 0 ? '' :
-    `\n1b. Splice the edge-critic residual findings into the matching slice commit MESSAGES, in EXACTLY this order, EACH before the pr-summary splice in step 2 — for EACH item run EXACTLY the two commands verbatim (no path edits, no alternatives); if any prints ok:false, return ok:false — HARD STOP:\n` +
+    `\n1b. Splice the coherence-critic residual findings into the matching slice commit MESSAGES, in EXACTLY this order, EACH before the pr-summary splice in step 2 — for EACH item run EXACTLY the two commands verbatim (no path edits, no alternatives); if any prints ok:false, return ok:false — HARD STOP:\n` +
     spliceTargets.map((tg, i) => {
       const stageFile = `/tmp/phase-stage/${t.id}/critic-findings-slice-${tg.slice}-${tg.kind}.json`
       return `   (${i + 1}) [${tg.kind} findings → slice ${tg.slice}] write this EXACT JSON verbatim (a JSON array of strings) to ${stageFile}: ${JSON.stringify(tg.findings)} ; then run: python3 ${engineCmdFor(r, 'scripts/qrspi_critic_body.py')} --ticket ${t.id} --phase slice --slice ${tg.slice} --findings-file ${stageFile} (it appends the findings to the ${t.id}/slice-${tg.slice} commit message via gt modify, self-locating).`
