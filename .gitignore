@@ -4,5 +4,7 @@ __pycache__
 .claude/scheduled_tasks.lock
 # Local config override (per-user); see .qrspi/config.example.json
 .qrspi/config.json
+# Local /qrspi-feature elicitation scratch (per-user, pre-ticket)
+.qrspi/features/
 # Local API key file (per-user); parsed by scripts/grade.py load_api_key()
 .env
