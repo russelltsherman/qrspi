@@ -19,7 +19,6 @@ from qrspi_critics_config import (  # noqa: E402
     default_phases,
     resolve_critics,
     resolve_design,
-    resolve_edge_phase,
     resolve_enabled,
     resolve_implementation,
 )
@@ -55,45 +54,6 @@ class ResolveEnabledTests(unittest.TestCase):
         self.assertFalse(resolve_enabled("nope", False))
 
 
-class ResolveEdgePhaseTests(unittest.TestCase):
-    """questions/research/structure/plan — default ON, bare {enabled, maxRounds}."""
-
-    def test_defaults_when_absent(self):
-        self.assertEqual(
-            resolve_edge_phase(None),
-            {"enabled": False, "maxRounds": DEFAULT_MAX_ROUNDS},
-        )
-
-    def test_enabled_true_honored(self):
-        self.assertEqual(
-            resolve_edge_phase({"enabled": True}),
-            {"enabled": True, "maxRounds": DEFAULT_MAX_ROUNDS},
-        )
-
-    def test_enabled_false_honored(self):
-        self.assertEqual(
-            resolve_edge_phase({"enabled": False}),
-            {"enabled": False, "maxRounds": DEFAULT_MAX_ROUNDS},
-        )
-
-    def test_max_rounds_positive_int_honored(self):
-        self.assertEqual(resolve_edge_phase({"maxRounds": 5})["maxRounds"], 5)
-
-    def test_max_rounds_zero_falls_back(self):
-        self.assertEqual(resolve_edge_phase({"maxRounds": 0})["maxRounds"], DEFAULT_MAX_ROUNDS)
-
-    def test_max_rounds_negative_falls_back(self):
-        self.assertEqual(resolve_edge_phase({"maxRounds": -3})["maxRounds"], DEFAULT_MAX_ROUNDS)
-
-    def test_max_rounds_bool_falls_back(self):
-        # True is an int subclass but must not read as maxRounds 1.
-        self.assertEqual(resolve_edge_phase({"maxRounds": True})["maxRounds"], DEFAULT_MAX_ROUNDS)
-
-    def test_max_rounds_non_int_falls_back(self):
-        self.assertEqual(resolve_edge_phase({"maxRounds": 2.5})["maxRounds"], DEFAULT_MAX_ROUNDS)
-        self.assertEqual(resolve_edge_phase({"maxRounds": "3"})["maxRounds"], DEFAULT_MAX_ROUNDS)
-
-
 class ResolveDesignTests(unittest.TestCase):
     def _resolve(self, cfg):
         warnings = []
@@ -108,13 +68,14 @@ class ResolveDesignTests(unittest.TestCase):
                 "maxRounds": DEFAULT_MAX_ROUNDS,
                 "lenses": DEFAULT_DESIGN_LENSES,
                 "candidates": 1,
-                # RUS-77 cost-lever gates all default OFF/absent.
+                # RUS-77 cost-lever gates default OFF/absent (gateBehindEdge retired in RUS-88).
                 "digest": {"enabled": False},
-                "gateBehindEdge": {"enabled": False},
             },
         )
-        # lensModel key is OMITTED entirely (absent, not None) by default.
+        # lensModel key is OMITTED entirely (absent, not None) by default; the retired
+        # gateBehindEdge key must NOT appear (RUS-88).
         self.assertNotIn("lensModel", out)
+        self.assertNotIn("gateBehindEdge", out)
         self.assertEqual(warnings, [])
 
     def test_enabled_true_honored(self):
@@ -205,29 +166,20 @@ class ResolveDesignTests(unittest.TestCase):
         self.assertNotIn("lensModel", self._resolve({"lensModel": True})[0])
         self.assertNotIn("lensModel", self._resolve({"lensModel": None})[0])
 
-    def test_gate_behind_edge_default_off(self):
-        out, _ = self._resolve({})
-        self.assertEqual(out["gateBehindEdge"], {"enabled": False})
+    def test_gate_behind_edge_key_never_emitted(self):
+        # RUS-88: gateBehindEdge was retired — a config that still carries the key is
+        # silently ignored and the resolved shape never includes it.
+        self.assertNotIn("gateBehindEdge", self._resolve({})[0])
+        self.assertNotIn("gateBehindEdge", self._resolve({"gateBehindEdge": {"enabled": True}})[0])
 
-    def test_gate_behind_edge_enabled_true_parses(self):
-        out, _ = self._resolve({"gateBehindEdge": {"enabled": True}})
-        self.assertEqual(out["gateBehindEdge"], {"enabled": True})
-
-    def test_gate_behind_edge_non_dict_falls_back_off(self):
-        self.assertEqual(
-            self._resolve({"gateBehindEdge": "yes"})[0]["gateBehindEdge"],
-            {"enabled": False},
-        )
-
-    def test_all_three_levers_on_parse_together(self):
+    def test_surviving_levers_on_parse_together(self):
         out, warnings = self._resolve({
             "digest": {"enabled": True},
             "lensModel": "claude-haiku",
-            "gateBehindEdge": {"enabled": True},
         })
         self.assertEqual(out["digest"], {"enabled": True})
         self.assertEqual(out["lensModel"], "claude-haiku")
-        self.assertEqual(out["gateBehindEdge"], {"enabled": True})
+        self.assertNotIn("gateBehindEdge", out)
         self.assertEqual(warnings, [])
 
 
@@ -324,17 +276,19 @@ class JsMirrorParityTests(unittest.TestCase):
 
 class ResolveImplementationTests(unittest.TestCase):
     def test_defaults_all_off(self):
+        # RUS-88: the per-slice edge critic was retired, so the top-level enabled/maxRounds
+        # (which gated ONLY that loop) are gone — only the coherence sub-block survives.
         self.assertEqual(
             resolve_implementation(None),
-            {
-                "enabled": False,
-                "maxRounds": DEFAULT_MAX_ROUNDS,
-                "coherence": {"enabled": False, "maxRounds": DEFAULT_MAX_ROUNDS},
-            },
+            {"coherence": {"enabled": False, "maxRounds": DEFAULT_MAX_ROUNDS}},
         )
 
-    def test_enabled_true_honored(self):
-        self.assertTrue(resolve_implementation({"enabled": True})["enabled"])
+    def test_only_coherence_key_present(self):
+        # The retired top-level enabled/maxRounds keys must NOT reappear.
+        out = resolve_implementation({"enabled": True, "maxRounds": 7})
+        self.assertEqual(set(out), {"coherence"})
+        self.assertNotIn("enabled", out)
+        self.assertNotIn("maxRounds", out)
 
     def test_coherence_enabled_true_honored(self):
         out = resolve_implementation({"coherence": {"enabled": True, "maxRounds": 4}})
@@ -345,40 +299,47 @@ class ResolveImplementationTests(unittest.TestCase):
         out = resolve_implementation({"coherence": "yes"})
         self.assertEqual(out["coherence"], {"enabled": False, "maxRounds": DEFAULT_MAX_ROUNDS})
 
-    def test_top_level_max_rounds_honored(self):
-        self.assertEqual(resolve_implementation({"maxRounds": 7})["maxRounds"], 7)
-
 
 class ResolveCriticsTests(unittest.TestCase):
-    """Top-level aggregation: every phase present, defaults preserve historical behavior."""
+    """Top-level aggregation: only the two surviving phases present (RUS-88 retired the
+    fidelity-only edge critic on questions/research/structure/plan), defaults all OFF."""
 
-    def test_absent_block_all_defaults(self):
+    def test_absent_block_two_phases_only(self):
+        # RUS-88: resolve_critics emits EXACTLY {design, implementation} — no edge phase.
         for critics in (None, "", {}, [], 42):
             phases, warnings = resolve_critics(critics)
-            self.assertEqual(set(phases), {
-                "questions", "research", "design", "structure", "plan", "implementation",
-            })
+            self.assertEqual(set(phases), {"design", "implementation"})
             self.assertEqual(warnings, [])
-            # EVERY phase defaults OFF — critics are uniformly opt-in.
-            for p in ("questions", "research", "design", "structure", "plan", "implementation"):
-                self.assertFalse(phases[p]["enabled"], f"{p} should default disabled with critics={critics!r}")
+            # The design panel defaults OFF (opt-in); the coherence pass defaults OFF.
+            self.assertFalse(phases["design"]["enabled"], f"design should default disabled with critics={critics!r}")
             self.assertFalse(phases["implementation"]["coherence"]["enabled"])
+            # No retired edge phase leaks back in.
+            for gone in ("questions", "research", "structure", "plan"):
+                self.assertNotIn(gone, phases)
 
-    def test_default_phases_matches_empty_resolution(self):
-        self.assertEqual(default_phases(), resolve_critics({})[0])
+    def test_no_lenses_config_still_emits_no_edge_phase(self):
+        # A config with no lenses (or no design block) still resolves the panel + coherence,
+        # and emits no edge phase — the 2-key shape is invariant of the lens set.
+        phases, _ = resolve_critics({})
+        self.assertEqual(set(phases), {"design", "implementation"})
+        self.assertEqual(phases["design"]["lenses"], DEFAULT_DESIGN_LENSES)
+        self.assertIn("coherence", phases["implementation"])
 
-    def test_per_phase_enabled_independently_toggled(self):
+    def test_panel_and_coherence_still_resolve_when_enabled(self):
+        # Lenses present ⇒ the panel resolves with that lens set; coherence sub-shape retained.
         phases, _ = resolve_critics({
-            "design": {"enabled": True},
-            "plan": {"enabled": True, "maxRounds": 3},
-            "implementation": {"enabled": True, "coherence": {"enabled": True}},
+            "design": {"enabled": True, "lenses": ["completeness"]},
+            "implementation": {"coherence": {"enabled": True, "maxRounds": 3}},
         })
         self.assertTrue(phases["design"]["enabled"])
-        self.assertFalse(phases["questions"]["enabled"])  # untouched ⇒ default OFF
-        self.assertTrue(phases["plan"]["enabled"])
-        self.assertEqual(phases["plan"]["maxRounds"], 3)
-        self.assertTrue(phases["implementation"]["enabled"])
+        self.assertEqual(phases["design"]["lenses"], ["completeness"])
         self.assertTrue(phases["implementation"]["coherence"]["enabled"])
+        self.assertEqual(phases["implementation"]["coherence"]["maxRounds"], 3)
+
+    def test_default_phases_matches_empty_resolution(self):
+        # Structurally the two are equal; the expectation now reflects exactly 2 keys.
+        self.assertEqual(default_phases(), resolve_critics({})[0])
+        self.assertEqual(set(default_phases()), {"design", "implementation"})
 
     def test_warnings_aggregated_from_design(self):
         _, warnings = resolve_critics({"design": {"lenses": ["x"], "candidates": 50}})

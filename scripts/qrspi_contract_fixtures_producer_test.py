@@ -142,10 +142,11 @@ class ProducerShapeAndFormatTests(unittest.TestCase):
         env = {"ok": True, "phases": phases, "warnings": []}
         for key in ("ok", "phases", "warnings"):
             self.assertIn(key, env)
-        # Six-phase shape (mirrors DEFAULT_CRITIC_PHASES in qrspi-batch.js).
+        # Two-phase shape (RUS-88 retired the edge critic; mirrors DEFAULT_CRITIC_PHASES
+        # in qrspi-batch.js — design PANEL + implementation coherence pass only).
         self.assertEqual(
             set(env["phases"].keys()),
-            {"questions", "research", "design", "structure", "plan", "implementation"},
+            {"design", "implementation"},
         )
         self.assertEqual(json.dumps(env) + "\n", _read_fixture("critics"))
 

@@ -21,7 +21,7 @@ logic-free shell.
 **QRSPI already does this — with Python as the functional core and
 `qrspi-batch.js` as the imperative shell.** The hard decisions
 (`qrspi_resolve_state.py`, `qrspi_critic_loop.py`, `qrspi_design_select.py`,
-`qrspi_slice_critic.py`, …) live in unit-tested Python scripts the workflow only
+`qrspi_critics_config.py`, …) live in unit-tested Python scripts the workflow only
 shells out to; the workflow "does **not** re-derive any decision logic." So the
 goal is not "make the dynamic JS testable" — it is **keep starving the JS shell
 of logic, and test the residual deterministic seam deliberately.**
@@ -197,8 +197,8 @@ tricky residual is the `extractJson*` brace-scanners.
 
 5. **(Defer) Agent-behavior evals.** Reference-trajectory tests and
    LLM-judge-in-CI for the `agent()` seams are real but flaky/costly; the
-   in-pipeline critics (`qrspi-critic`, design panel) already act as live
-   LLM-judges. Keep these out of the per-PR gate.
+   in-pipeline critics (the design-critic panel + the coherence pass) already act
+   as live LLM-judges. Keep these out of the per-PR gate.
 
 ## Open experiment — RESOLVED
 

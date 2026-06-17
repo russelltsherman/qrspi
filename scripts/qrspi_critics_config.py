@@ -4,34 +4,32 @@
 Why this exists
 ---------------
 The qrspi-batch orchestrator (`.claude/workflows/qrspi-batch.js`) gates a critic on
-every phase: a single edge-critic on questions/research/structure/plan, a multi-lens
-PANEL on design, and an opt-in whole-stack coherence pass on implementation. Each phase
-needs the same three things resolved from config with config-value > JS-default
-precedence: whether the critic is `enabled`, its `maxRounds`, and (design-only) its
+two phases: a multi-lens PANEL on design, and an opt-in whole-stack coherence pass on
+implementation. The fidelity-only edge critic on questions/research/structure/plan and
+the per-slice edge critic were retired (RUS-88), so this resolver emits exactly those
+two phases. Each needs config resolved with config-value > JS-default precedence:
+whether the critic is `enabled`, its `maxRounds`, and (design-only) its
 `lenses`/`candidates`, (implementation-only) its nested `coherence` block.
 
-Historically this resolution lived as ~6 inline JS functions in qrspi-batch.js, split
-across TWO separate `--key critics` config reads (one for design/planning, one for
-implementation). That JS is non-importable (it runs orchestration at module load) so it
-could not be unit-tested, and the two reads duplicated the parse logic. This module is
-the single tested source of truth: it reads config ONCE and emits a fully-resolved
-per-phase envelope, so the JS becomes thin glue with ONE read feeding every phase
-(the "single read discipline").
+Historically this resolution lived as inline JS functions in qrspi-batch.js, split
+across separate `--key critics` config reads. That JS is non-importable (it runs
+orchestration at module load) so it could not be unit-tested, and the reads duplicated
+the parse logic. This module is the single tested source of truth: it reads config ONCE
+and emits a fully-resolved per-phase envelope, so the JS becomes thin glue with ONE read
+feeding every phase (the "single read discipline").
 
 Uniform `enabled` vocabulary
 ----------------------------
-EVERY phase honors an `enabled` flag with the SAME default: OFF. Critics are uniformly
-opt-in — a phase runs its critic only when its block sets `enabled: true`. Only an
-explicit boolean flips the flag; any non-boolean `enabled` value falls back to the
-default (OFF). This closes the prior footgun where `enabled` was load-bearing for
-implementation but a silent no-op everywhere else, AND makes the default consistent
-across all phases (the five planning/design critics no longer default ON).
+The design panel and the implementation coherence pass each honor an `enabled` flag with
+the SAME default: OFF. Critics are uniformly opt-in — a phase runs its critic only when
+its block sets `enabled: true`. Only an explicit boolean flips the flag; any non-boolean
+`enabled` value falls back to the default (OFF).
 
 Like qrspi_config.py / qrspi_resolve.py / qrspi_persist.py, it self-locates the repo
 root from `__file__` (two levels up), so the JS caller types only the invocation.
 
 Output: a single JSON envelope on stdout:
-    { "ok": true,  "phases": {<six resolved phases>}, "warnings": [<str>, ...] }   (exit 0)
+    { "ok": true,  "phases": {<design, implementation>}, "warnings": [<str>, ...] }   (exit 0)
     { "ok": false, "phases": {<all defaults>},        "warnings": [], "error": "<verbatim>" }  (exit !=0)
 
 `phases` is ALWAYS present and complete (defaults on any failure) so the best-effort JS
@@ -74,10 +72,6 @@ KNOWN_DESIGN_LENSES = set(DEFAULT_DESIGN_LENSES) | {"design-review"}
 # qrspi-batch.js. `candidates` (N) is clamped to [2, len(framings)] when > 1, else 1 (OFF).
 DEFAULT_DESIGN_FRAMINGS = ["mvp-first", "risk-first", "extensibility-first"]
 
-# The four single-edge-critic planning phases (default ON, bare {enabled, maxRounds}).
-EDGE_PHASES = ("questions", "research", "structure", "plan")
-
-
 def _pos_int_or(value, default):
     """Return value when it is a positive int (NOT a bool), else default.
 
@@ -107,33 +101,19 @@ def resolve_enabled(cfg, default):
     return default
 
 
-def resolve_edge_phase(cfg):
-    """Resolve a single-edge-critic planning phase (questions/research/structure/plan).
-
-    Default OFF (opt-in). Returns {enabled, maxRounds}."""
-    cfg = cfg if isinstance(cfg, dict) else {}
-    return {
-        "enabled": resolve_enabled(cfg, False),
-        "maxRounds": _pos_int_or(cfg.get("maxRounds"), DEFAULT_MAX_ROUNDS),
-    }
-
-
 def resolve_design(cfg, warnings):
     """Resolve the design-critic PANEL phase. Default OFF (opt-in).
 
-    Returns {enabled, maxRounds, lenses, candidates, digest, lensModel?, gateBehindEdge}.
+    Returns {enabled, maxRounds, lenses, candidates, digest, lensModel?}.
     Unknown lenses are dropped (warned); an all-unknown/empty set falls back to the default
     four. `candidates` (N-select) is 1 (OFF) unless a finite number > 1, then clamped to
     [2, len(framings)] (clamp-down warned).
 
-    The three RUS-77 AC-COST cost-lever gates all default OFF / absent so the default
-    resolution preserves current behavior (ref: design.md §Delta Decision 3; OQ3 RESOLVED
-    keeps `gateBehindEdge` default OFF):
+    The RUS-77 AC-COST cost-lever gates default OFF / absent so the default resolution
+    preserves current behavior (ref: design.md §Delta Decision 3):
       - `digest: {enabled: bool}`     — shared research digest (default {"enabled": False})
       - `lensModel: str`              — per-lens model override (default ABSENT — the key is
                                         omitted entirely, not None, when not configured)
-      - `gateBehindEdge: {enabled}`   — gate the panel behind an edge-critic pass
-                                        (default {"enabled": False})
 
     `warnings` is appended to in place so the CLI can surface what JS used to `log()`."""
     cfg = cfg if isinstance(cfg, dict) else {}
@@ -175,17 +155,12 @@ def resolve_design(cfg, warnings):
     digest_cfg = cfg.get("digest") if isinstance(cfg.get("digest"), dict) else {}
     digest = {"enabled": resolve_enabled(digest_cfg, False)}
 
-    # gateBehindEdge: nested {enabled} block, default {"enabled": False}.
-    gate_cfg = cfg.get("gateBehindEdge") if isinstance(cfg.get("gateBehindEdge"), dict) else {}
-    gate_behind_edge = {"enabled": resolve_enabled(gate_cfg, False)}
-
     result = {
         "enabled": enabled,
         "maxRounds": max_rounds,
         "lenses": lenses,
         "candidates": candidates,
         "digest": digest,
-        "gateBehindEdge": gate_behind_edge,
     }
 
     # lensModel: optional model-name override. The key is OMITTED entirely (not None)
@@ -201,14 +176,13 @@ def resolve_design(cfg, warnings):
 def resolve_implementation(cfg):
     """Resolve the implementation-critic phase. Default OFF (the opt-in seam, RUS-58).
 
-    Returns {enabled, maxRounds, coherence: {enabled, maxRounds}}. The nested coherence
-    block (the whole-stack pass) also defaults OFF. Field shape is preserved verbatim so
-    doImplementation's existing consumers are untouched."""
+    Returns {coherence: {enabled, maxRounds}}. The per-slice edge critic was retired
+    (RUS-88), so the top-level `enabled`/`maxRounds` (which gated ONLY that per-slice
+    loop) are gone; only the nested coherence block (the whole-stack pass, default OFF)
+    survives."""
     cfg = cfg if isinstance(cfg, dict) else {}
     coh = cfg.get("coherence") if isinstance(cfg.get("coherence"), dict) else {}
     return {
-        "enabled": resolve_enabled(cfg, False),
-        "maxRounds": _pos_int_or(cfg.get("maxRounds"), DEFAULT_MAX_ROUNDS),
         "coherence": {
             "enabled": resolve_enabled(coh, False),
             "maxRounds": _pos_int_or(coh.get("maxRounds"), DEFAULT_MAX_ROUNDS),
@@ -225,11 +199,7 @@ def resolve_critics(critics):
     warnings = []
     c = critics if isinstance(critics, dict) else {}
     phases = {
-        "questions": resolve_edge_phase(c.get("questions")),
-        "research": resolve_edge_phase(c.get("research")),
         "design": resolve_design(c.get("design"), warnings),
-        "structure": resolve_edge_phase(c.get("structure")),
-        "plan": resolve_edge_phase(c.get("plan")),
         "implementation": resolve_implementation(c.get("implementation")),
     }
     return phases, warnings

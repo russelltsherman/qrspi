@@ -4,19 +4,16 @@
   "$comment_reviewers": "REVIEWERS — by default (no config file) the qrspi-batch finalizer requests review from '@me' (the gh-authenticated user running the harness), so a fresh clone needs zero setup and ships no hard-coded username. 'reviewers' are GitHub logins (the literal '@me' expands to the authenticated user; set [] to request no reviewer). 'teamReviewers' are Graphite/GitHub team slugs ('org/team' or 'team').",
   "$comment_ci": "CI-GATED REVISION — 'ciReviseCap' (flat top-level key, positive integer, default 3) caps the consecutive autonomous CI-failure revises qrspi-batch will attempt on a red frontier PR before parking it as 'wait' for manual attention. A red frontier under the cap is auto-revised (the worker reads the failing-check output, fixes the code, amends, re-pushes); at/above the cap it stops. Any non-positive-integer value (0, negative, non-integer) falls back to 3. Omit the key to take the default.",
   "critics": {
-    "$comment": "Per-phase critic config, resolved by scripts/qrspi_critics_config.py (the tested resolver). Every phase honors a uniform 'enabled' flag that defaults OFF — critics are opt-in across the board (questions, research, design, structure, plan, implementation, and implementation's coherence sub-pass). A phase runs its critic ONLY when its block sets 'enabled': true; only an explicit boolean overrides the default (a non-boolean value falls back to OFF). This example mirrors the defaults — every phase 'enabled': false — so as written it changes nothing; flip a phase's 'enabled' to true to opt it in. Omit the whole 'critics' block, or any phase, to take the same defaults. Each phase block below documents its own knobs.",
+    "$comment": "Per-phase critic config, resolved by scripts/qrspi_critics_config.py (the tested resolver). The fidelity-only edge critic on questions/research/structure/plan and the per-slice implementation edge critic were retired (RUS-88); only TWO critic phases remain — the 'design' multi-lens PANEL and the 'implementation' whole-stack 'coherence' pass — each honoring a uniform 'enabled' flag that defaults OFF (critics are opt-in). A phase runs its critic ONLY when its block sets 'enabled': true; only an explicit boolean overrides the default (a non-boolean value falls back to OFF). This example mirrors the defaults — both OFF — so as written it changes nothing. Omit the whole 'critics' block, or either phase, to take the same defaults.",
     "design": {
       "$comment": "Design-phase multi-lens critic PANEL. 'maxRounds' caps the produce->critique->revise loop (default 2). 'lenses' selects which lens agents run (default all four: completeness, internal-consistency, edge-alignment, simplicity); unknown names are dropped (logged) and an all-unknown/empty set falls back to the default four. Each lens id maps to agent .claude/agents/qrspi-design-critic-<id>.md. 'candidates' (numeric, default 1 = OFF) enables the N-select stage: when N>1 the phase produces N candidate designs under orthogonal framings (mvp-first, risk-first, extensibility-first), a judge scores them, the highest wins, and runner-up ideas are grafted in. Absent / non-numeric / <=1 => N=1 (OFF, zero extra spawns); values clamp to [1,3] (the framing count), clamping down with a log line.",
-      "$comment_cost_levers": "RUS-77 AC-COST cost levers — all default OFF/absent, so as shown they change nothing. 'digest.enabled' (default false): when true, build a deterministic trimmed digest of research.md ONCE and pass it by path to every lens (strips the verbose evidence code fences, the measured cost driver) instead of re-reading the full research.md per lens. 'lensModel' (default ABSENT — omit the key): a model name passed as the per-lens agent() 'model' option (rides an unverified harness seam; if the harness ignores it the knob is inert). 'gateBehindEdge.enabled' (default false): when true, skip the design panel if an upstream edge-critic outcome passed (no-op when no edge outcome exists; digest is the primary lever).",
+      "$comment_cost_levers": "RUS-77 AC-COST cost levers — all default OFF/absent, so as shown they change nothing. 'digest.enabled' (default false): when true, build a deterministic trimmed digest of research.md ONCE and pass it by path to every lens (strips the verbose evidence code fences, the measured cost driver) instead of re-reading the full research.md per lens. 'lensModel' (default ABSENT — omit the key): a model name passed as the per-lens agent() 'model' option (rides an unverified harness seam; if the harness ignores it the knob is inert).",
       "candidates": 1,
       "digest": {
         "$comment_optin": "COST LEVER — OPT-IN. The shipped RUS-77 digest lever (commit c6fa275). This block mirrors the runtime DEFAULT, which is OFF ('enabled': false) — as written it changes nothing. To opt in and cut design-panel token cost, copy this file to .qrspi/config.json and set 'enabled': true, i.e. \"digest\": { \"enabled\": true }. When ON, research.md is trimmed of its verbose evidence code fences ONCE into a deterministic digest passed by path to every lens, instead of each lens re-reading the full research.md (the measured cost driver). The structural cost claim (digest strictly shorter than research) and config-resolution are covered by the shipped tests scripts/qrspi_research_digest_test.py:test_digest_strictly_shorter and scripts/qrspi_critics_config_test.py:test_digest_default_off / test_digest_enabled_true_parses; the literal external-token A/B procedure is docs/critic-cost-ab.md.",
         "enabled": false
       },
       "enabled": false,
-      "gateBehindEdge": {
-        "enabled": false
-      },
       "lenses": [
         "completeness",
         "internal-consistency",
@@ -26,33 +23,11 @@
       "maxRounds": 2
     },
     "implementation": {
-      "$comment": "Implementation-phase critics (default OFF, like every phase — opt-in). 'enabled'/'maxRounds' cap the per-slice edge critic (one single critic per non-first/non-committed slice, judging the slice diff against its plan-slice rubric; a single-slice ticket skips it — the coherence pass covers the lone slice). The nested 'coherence.enabled'/'coherence.maxRounds' gate the whole-stack coherence pass that runs ONCE at the planning->implementation seam over all six artifacts and surfaces its residual findings into the slice-1 PR body. Set both 'enabled' flags false (or omit this block) to keep the byte-for-byte-unchanged no-critic implementation path.",
+      "$comment": "Implementation-phase critic (default OFF — opt-in). The per-slice edge critic was retired (RUS-88), so the only knob is the nested 'coherence.enabled'/'coherence.maxRounds', which gate the whole-stack coherence pass that runs ONCE at the planning->implementation seam over all six artifacts and surfaces its residual findings into the slice-1 PR body. Set 'coherence.enabled' false (or omit this block) to keep the byte-for-byte-unchanged no-critic implementation path. NOTE: research's deterministic citation node-check (scripts/qrspi_verify_citations.py) still runs unconditionally on the staged research.md — it is NOT a configurable critic.",
       "coherence": {
         "enabled": false,
         "maxRounds": 2
-      },
-      "enabled": false,
-      "maxRounds": 2
-    },
-    "plan": {
-      "$comment": "Single-edge-critic planning phase — same shape as 'questions' ('enabled' + 'maxRounds' only).",
-      "enabled": false,
-      "maxRounds": 2
-    },
-    "questions": {
-      "$comment": "Single-edge-critic planning phase: only 'enabled' (default false, like every phase) and 'maxRounds' (positive integer, default 2) cap its produce->critique->revise loop — there is no 'lenses'/'candidates' knob. A non-positive-integer maxRounds falls back to 2. The same shape applies to 'research', 'structure', and 'plan'.",
-      "enabled": false,
-      "maxRounds": 2
-    },
-    "research": {
-      "$comment": "Single-edge-critic planning phase (same shape as 'questions'). Additionally runs a deterministic citation node-check (scripts/qrspi_verify_citations.py) on its staged artifact before the critic; that gate is not separately configurable, but setting 'enabled': false skips it too (the node-check rides the same critic bundle).",
-      "enabled": false,
-      "maxRounds": 2
-    },
-    "structure": {
-      "$comment": "Single-edge-critic planning phase — same shape as 'questions' ('enabled' + 'maxRounds' only).",
-      "enabled": false,
-      "maxRounds": 2
+      }
     }
   },
   "ciReviseCap": 3,
