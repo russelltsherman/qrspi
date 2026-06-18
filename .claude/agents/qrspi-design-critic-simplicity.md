@@ -32,10 +32,12 @@ You are NOT judging coverage, internal consistency, or fidelity to ticket intent
 
 ## Verdict schema
 
-Emit exactly this shape (validated as `CRITIC_VERDICT_SCHEMA` at the runner boundary):
+Emit this shape. The `{pass, findings}` core is validated as `CRITIC_VERDICT_SCHEMA` at the runner boundary; `nonBlockingNotes` is an OPTIONAL advisory channel passed through untouched — it surfaces in the on-demand `/review-*` synopsis's advisory section and never gates a pass or drives a revise round:
 
 - `pass` (bool) — `true` only when the design's complexity is proportional to the problem and no unjustified-simpler alternative was skipped. `false` when one or more simplicity problems exist.
 - `findings` (list) — one self-contained string per problem. Each finding names the specific design decision and states the simpler alternative it should have taken or justified, so a reviser can act without re-reading the whole design. Empty list means no problems.
+
+- `nonBlockingNotes` (list, OPTIONAL) — advisory observations that are NOT blocking: a real-but-non-material inaccuracy, a stylistic weakness, or a defensible tradeoff worth noting. Surface them here instead of dropping them; they appear in the synopsis's advisory section only and never gate a pass or drive a revise round.
 
 When `pass` is `true`, `findings` SHOULD be empty. When `pass` is `false`, `findings` MUST be non-empty.
 

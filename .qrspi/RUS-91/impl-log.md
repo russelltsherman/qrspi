@@ -69,3 +69,36 @@
   - `TICKET_CONTENT_PATH` is now a declared+consumed input on all five lenses; Slice 3/4 must actually pass it (= `/tmp/phase-stage/<id>/review/ticket.md`) to the fidelity/completeness/decision-readiness lenses ONLY (node-validity `*-review` lenses stay research+code-only, unchanged).
 
 ---
+
+## Session 3 — Slice 3
+
+**Timestamp:** 2026-06-18T03:00:00Z
+**Tasks completed:** T28, T29, T30, T31, T32, T33, T34 (the SKILL.md wiring; T35–T37 are live e2e — see deviations)
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py` → 42 passed, 0 failed (regression gate; Slice 3 touches no Python source, so the suite is unchanged-green)
+- Embedded-snippet verification (inline harness): executed the two `python3 - <<'PY'` blocks now embedded in `review-design/SKILL.md` (Step 4b partition+synthesize; Step 6 build_record + `ledger_row_fields` merge; Step 7 `render_synopsis`) against a representative 6-element verdict array (5 panel lenses + 1 decision-readiness). Asserted: panel array excludes decision-readiness; `synthesize(panel)` reduces fail-closed (internal-consistency dissent ⇒ `pass:false`); record dict carries merged `axes`+`nonBlockingNotes`; synopsis renders all five lens rows + Advisory + Decision-readiness sections. ALL ASSERTIONS PASS.
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- **T35–T37 (live end-to-end `/review-design <id>` run + PR head-SHA before/after guard) NOT run.** Rationale, not skipped silently: these require a real Linear ticket with an existing design PR, live `mcp__linear__get_issue`, live `Agent`-tool subagent spawns, and `gh` PR-comment writes — none of which a deterministic implement-phase agent runs (and the slice-2 hand-off already recorded that live `claude -p`/subagent routing validation of these `subagent_type`s is deferred to a human/e2e pass). Instead I verified the DETERMINISTIC core the SKILL.md depends on: the exact Python snippets embedded in Steps 4b/6/7 execute correctly against a representative verdict array (above), every referenced `subagent_type` agent file exists in `.claude/agents/` (the five `qrspi-design-critic-*` panel lenses + `qrspi-design-critic-decision-readiness` + `qrspi-critic-reviser`), and `qrspi_critic_summary.summarize` reads new row fields via `.get()` (additive `axes`/`nonBlockingNotes` are inert to it). The four T37 checkboxes (axis-enumerated synopsis posted; head SHA identical; decision-readiness triggers no reviser round; ticket passed to fidelity/coverage/DR lenses only) are now ENCODED in the SKILL.md prose + Hard rules 5/6 and the head-SHA guard (Steps 2/8) but their LIVE confirmation remains for the human/e2e pass.
+
+**Notes for next session:**
+
+- `.claude/skills/review-design/SKILL.md` is now the fully-wired REFERENCE skill Slice 4 (`/review-plan`, `/review-implementation`) and Slice 5 (`/review`) must follow. The Slice-3 wiring pattern, step by step:
+  - **Step 3 (ticket plumbing):** fetch `mcp__linear__get_issue` (id=`<ticket-id>`), `Write` title+description to `TICKET_CONTENT` = `/tmp/phase-stage/<id>/review/ticket.md`. Fetch failure / empty description ⇒ write an "unavailable" note and proceed (lenses treat missing ticket as "no AC to check"). Front-matter `allowed-tools` gained `mcp__linear__get_issue`.
+  - **Step 4a (fan-out):** spawn the WHOLE panel from `DEFAULT_REVIEW_DESIGN_LENSES` — `qrspi-design-critic-<lens-id>` for each of `completeness`/`internal-consistency`/`edge-alignment`/`simplicity`/`design-review`. Collect a PRE-reduction verdict array tagged `{"lens":"<id>", "pass":..., "findings":[...], "nonBlockingNotes":[...]}`. `TICKET_CONTENT_PATH` passed to `completeness` + `edge-alignment` ONLY (NOT internal-consistency/simplicity/design-review).
+  - **Step 4b (partition→synthesize):** `partition_decision_readiness(verdicts)` (guard — DR not in the in-loop panel) THEN `qrspi_critic_synthesize.synthesize(panel)`. Embedded as a `python3 - <<'PY'` block importing both modules from `scripts/`.
+  - **Step 4c (rounds[]):** append EVERY per-lens element of the round's pre-reduction array to `rounds` (N lenses × R rounds) — do NOT collapse to one synthesized entry per round (keeps `qrspi_critic_summary` per-lens bucketing intact).
+  - **Step 4d (reviser swap):** `subagent_type: qrspi-critic-reviser`, `PHASE=design`, `OUTPUT_PATH`=scratch design, `RESIDUAL_FINDINGS`=round's residual (DR-free). Replaces the old `qrspi-design` producer spawn.
+  - **Step 5 (decision-readiness):** post-loop, spawn `qrspi-design-critic-decision-readiness` over the final scratch design (gets `TICKET_CONTENT_PATH`). Captures the `DecisionReadinessVerdict` for the synopsis ONLY — terminal-advisory, never the loop. This REPLACED the old self-grading open-question producer pass.
+  - **Step 6 (ledger):** `build_record(phase=..., rounds=<per-lens entries>, terminal_action=..., agreement=...)` THEN `record.update(qrspi_review_synopsis.ledger_row_fields(<final round's pre-reduction array>))`. `ledger_row_fields` is a MERGE, not a `build_record` param.
+  - **Step 7 (synopsis):** `render_synopsis(<final round's pre-reduction array>, <DR verdict>, <terminal_action>)` wrapped with an advisory header + an appended `**Agreement:**` line, emitted to a scratch `.md` via `python3 - <<'PY' > file`, posted top-level via `qrspi_comment_reply.py`.
+- For plan/impl in Slice 4, the only structural differences from this template: (1) source from `DEFAULT_REVIEW_PLAN_LENSES`/`DEFAULT_REVIEW_IMPL_LENSES` (3 lenses each, phase-qualified ids → `qrspi-plan-critic-<id>` / `qrspi-impl-critic-<id>`); (2) there is NO decision-readiness lens for plan/impl, so `decision_readiness` passed to `render_synopsis` is `None` and Step 5 is dropped (pass `None`, `partition_decision_readiness` still a safe guard); (3) `TICKET_CONTENT_PATH` goes to the fidelity+completeness lenses (NOT the `*-review` node-validity lens); (4) impl lenses run over the AGGREGATED slice stack (one pass) and `/review-implementation` must add the `gh pr list --state all` frontier guard.
+
+---
