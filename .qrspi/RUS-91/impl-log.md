@@ -133,3 +133,55 @@
 - Slice 5 (`/review`, whole-stack) is the only remaining wiring slice. It must bind all three upgraded per-phase panels in its binding table, render per-phase synopsis sub-sections via `render_synopsis()`, and emit ONE `ledger_row_fields()`-merged ledger row PER reviewed phase — composing the now-uniform per-phase lenses without advancing the lifecycle. It also authors/reuses the regression fixture (plan steps 52–58). `/review` ALREADY uses the `--state all` frontier guard (per CLAUDE.md), so Slice 4's impl frontier change aligns impl-review TO `/review`, not the reverse.
 
 ---
+
+## Session 5 — Slice 5
+
+**Timestamp:** 2026-06-18T03:10:47Z
+**Tasks completed:** T52, T53, T54, T55, T56 (the `/review` whole-stack SKILL.md upgrade; the regression-fixture reuse + README provenance; the lens-level regression probe). T57 (live `/review <id>` e2e + frontier head-SHA before/after) and T58's e2e half are live-run checks — see deviations.
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py` → 42 passed, 0 failed (regression gate; Slice 5 touches no Python source, so the suite is unchanged-green)
+- Lens-level regression probe (T56 / step 56): ran the design-panel stated-minus-covered coverage check (via `qrspi_teeth_test`) DIRECTLY over `evals/fixtures/design_dropped_criterion_broken.md` with `ticket_rest_endpoint.md` supplying the four ACs → `stated = ['returns notification and display prefs', 'p95 < 200ms', '401 on unauthorized', '403 unless admin']`, `dropped = ['403 unless admin']`. NON-clean result confirmed: the dropped "403 unless admin" AC surfaces as a blocking finding. (`qrspi_teeth_test.py` itself is in the green suite above.)
+- Deterministic core probe: exercised `qrspi_review_synopsis.{partition_decision_readiness,render_synopsis,ledger_row_fields}` against representative design (5-lens + decision-readiness) and plan (3-lens, None DR) final-round arrays — design sub-section renders the axis table + Advisory + Decision-readiness + Terminal action; plan sub-section omits the DR section (None); `ledger_row_fields` emits the additive `axes`/`nonBlockingNotes`. All 13 referenced subagent agent files (`qrspi-{design,plan,impl}-critic-*` + `qrspi-critic-reviser`) exist.
+
+**Deviations from structure.md:**
+
+- none. Structure §Slice 5 step 54 says REUSE `evals/fixtures/design_dropped_criterion_broken.md` and add a `ticket_dropped_criterion.md` ONLY if no existing ticket fixture states the four ACs — implemented as reuse with NO new ticket fixture, because `ticket_rest_endpoint.md` (same DASH-417 source) already states all four ACs verbatim (including "Requesting another user's prefs returns 403 unless admin role").
+
+**Deviations from plan.md:**
+
+- none. (The worktree.md T54/T55/T56 rows still describe the SUPERSEDED "author a new `descoping-design.md`" approach; plan.md step 54 — the revised/authoritative source — explicitly DROPS that as needless duplication and mandates reuse of the existing fixture. Followed the plan, not the stale worktree wording. This is a worktree↔plan wording mismatch, not an implementation deviation.)
+
+**Notes for next session:**
+
+- Slice 5 completes the RUS-91 wiring. `/review` now composes all three upgraded per-phase panels (`DEFAULT_REVIEW_{DESIGN,PLAN,IMPL}_LENSES`) in its Step-3 binding table, fans out each phase's full panel per round (multi-lens pre-reduction verdict array, `partition_decision_readiness()` guard before synthesize, per-lens N×R `rounds[]`), swaps to the shared `qrspi-critic-reviser` (`PHASE=<phase>`), runs the design-only post-loop decision-readiness lens (terminal-advisory), merges `ledger_row_fields()` onto each phase's `build_record` (one ledger row per reviewed phase, shared `runId`), and renders each phase's synopsis sub-section via `render_synopsis()` under ONE rolled-up top-level comment to the frontier PR. Ticket text staged ONCE per run (Step 2) to `TICKET_CONTENT` and passed to coverage/fidelity/decision-readiness lenses ONLY (node-validity `*-review` lenses stay research+code-only). Front-matter `allowed-tools` gained `mcp__linear__get_issue`. The `--state all` frontier guard was already present (unchanged).
+- Regression anchor is the REUSED `evals/fixtures/design_dropped_criterion_broken.md` (provenance row + note added to `evals/fixtures/README.md`); its four ACs come from `ticket_rest_endpoint.md`. No new fixture authored.
+- DEFERRED to a human/e2e pass (consistent with the Slice-3 T35–T37 and Slice-4 T49–T51 deferrals by the deterministic implement-phase agent): T57 live `/review <id>` over a ticket with a frontier PR + the frontier-PR head-SHA before/after propose-only guard. The deterministic core (helpers, fixture probe, agent existence, full test suite) is verified green.
+
+---
+
+## Session 6 — Post-review corrections (advisory review feedback)
+
+**Timestamp:** 2026-06-18 (review-driven; not a numbered slice task)
+**Trigger:** A direct advisory review of the implementation surfaced three gaps. Two are addressed here; one remains open by feasibility.
+
+**Changes (Slice 3):**
+
+- **AC5 dead-channel fix.** The five design-panel lenses (`completeness`, `internal-consistency`, `edge-alignment`, `simplicity`, `design-review`) emitted only `{pass, findings}` — none produced `nonBlockingNotes`, so the design-phase advisory section of `render_synopsis()` had NO producer and a real-but-non-material finding (e.g. the `design-review` lens noticing an inaccuracy it judged non-blocking) was still swallowed — the exact root-cause-#4 failure the ticket targets. Added the OPTIONAL `nonBlockingNotes` advisory channel to all five lens prompts (additive; the batch `CRITIC_VERDICT_SCHEMA` has no `additionalProperties:false`, so the batch path is unaffected). Updated `review-design/SKILL.md` Step 4a array + Step 7 wording from "the edge lenses" to "all panel lenses". The plan/impl panels already had producers (their fidelity/completeness lenses emit it).
+
+**Changes (Slice 5):**
+
+- **AC8 honesty correction.** `pr-summary.md` and this log previously called the regression evidence a "lens-level regression probe." It is NOT: `scripts/qrspi_teeth_test.py` is a pre-existing (RUS-77) deterministic STRUCTURAL stated-minus-covered string check over the fixture; it does not spawn or run any review lens. Relabeled the AC8 row, the Testing-Summary checkbox, and added an Open-Items note. The true live lens-level regression run remains open.
+
+**Live lens-level regression run — PERFORMED (2026-06-18):**
+
+- The originally-cited anchor (RUS-86 / PR #347) is now CLOSED and its `RUS-86/design` branch no longer exists, so the run targeted the static regression fixture the ticket itself chose. The `qrspi-design-critic-completeness` and `qrspi-design-critic-edge-alignment` lenses were spawned over `design_dropped_criterion_broken.md` with `TICKET_CONTENT_PATH=ticket_rest_endpoint.md` and `RESEARCH_PATH=research_rest_endpoint.md`. BOTH returned `pass:false`, each naming the dropped "403 unless admin" AC as a blocking finding (completeness: coverage gap; edge-alignment: under-reach). This is the genuine lens-level regression evidence the earlier structural `qrspi_teeth_test.py` check was mislabeled as. It used the CURRENT (pre-upgrade) registry lens agents — valid, because the regression-catching depends on RUNNING completeness+edge-alignment (which the old `/review-design` did not; it ran only `design-review`), not on the `nonBlockingNotes` upgrade.
+
+**Still open:**
+
+- **Full `/review-design` *command* e2e.** The new RUS-91 agents (`decision-readiness`, the shared reviser, plan/impl lenses) are not yet in the repo's agent registry (RUS-91 unlanded), so a faithful end-to-end command run — including the decision-readiness spawn, the propose-only head-SHA before/after guard, and the PR-comment write — is only possible post-land.
+
+**Tests:** `python3 scripts/run_tests.py` → expected green (no Python source changed in this session; lens/skill/artifact edits only).
+
+---

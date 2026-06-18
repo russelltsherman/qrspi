@@ -49,6 +49,7 @@ integrity / freshness check can parse provenance rather than only read prose:
 | plan_broken_contract_slice1.md | broken_contract | GUARD-808 | hand-edited | plan (slice-1) |
 | worktree_session_broken_contract.md | broken_contract | GUARD-808 | hand-edited | worktree (session) |
 | ticket_15_acceptance_criteria.md | acceptance_criteria_stress | RPT-2100 | generated | ticket |
+| design_dropped_criterion_broken.md | dropped_criterion | DASH-417 | hand-edited | design (descoping regression anchor) |
 
 ## Notes
 
@@ -65,3 +66,14 @@ integrity / freshness check can parse provenance rather than only read prose:
 - **Curated chains are `generated`; only the `_broken_contract` set is `hand-edited`**
   (design Decision 1): the broken set carries a deliberately unimplementable signature
   verbatim across its three fixtures so case_012 fails behaviorally for the right reason.
+- **`design_dropped_criterion_broken.md` is the RUS-91 descoping regression anchor**
+  (reused, not newly authored — RUS-77 / AC-TEETH provenance, a different purpose, so it is
+  non-circular for the review panels). It is an independently-authored DASH-417 design that
+  states four acceptance criteria in its Desired End State but SILENTLY DROPS one — **"403
+  unless admin"** — from its Delta and Pattern Decisions (no `canAccess`/403 handler, route
+  wiring, test, or decision implements it). It carries a "Do NOT fix this fixture" guard. The
+  RUS-91 design review panel (the `completeness`/`edge-alignment` coverage lenses) and the
+  deterministic `scripts/qrspi_teeth_test.py` stated-minus-covered check both surface the
+  dropped criterion as a blocking finding. Its four ACs (for `TICKET_CONTENT_PATH`) are
+  supplied verbatim by the existing `ticket_rest_endpoint.md` (same DASH-417 source ticket),
+  so no separate ticket fixture was added.
