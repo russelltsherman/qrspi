@@ -11,6 +11,10 @@ are verified by a manual end-to-end run against a deliberately-stale branch.
 import os
 import sys
 
+import shutil
+import subprocess
+import tempfile
+
 from qrspi_restack import (
     worktree_path,
     classify_result,
@@ -18,9 +22,10 @@ from qrspi_restack import (
     build_envelope,
     merged_ancestors,
     submit_scope,
+    provision_worktree,
     REPO_ROOT,
 )
-from qrspi_resolve import pick_tip
+from qrspi_resolve import pick_tip, worktree_is_healthy
 
 failures = 0
 total = 0
@@ -174,6 +179,54 @@ check("fully-landed: no merged ancestors (no open branch to sit below)",
 check("fully-landed: empty short-circuit scope",
       submit_scope(_landed_branches, _landed_flags, "RUS-1"),
       {"scope": [], "lowestOpen": None, "reparentParent": None})
+
+# --- restack re-provisions / self-heals the worktree in-process (hermetic real-git) ---
+# Regression for the orphaned-worktree restack failure (RUS-85/RUS-87 restack_conflict):
+# resolve provisions the worktree in an EARLIER agent, but the `.git/worktrees/<id>` admin
+# metadata can vanish across the agent/process boundary in the sandbox (the `.worktrees/<id>`
+# working dir survives, its admin dir is pruned/lost), re-orphaning the worktree. restack
+# runs as its OWN agent, so it must (re)provision a healthy worktree IN ITS OWN PROCESS
+# before `gt checkout` — else the checkout dies with "fatal: not a git repository". These
+# pin that in-process self-heal against a throwaway real-git repo (no gt/gh needed).
+
+def _git2(args, cwd):
+    res = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError("git %s failed: %s" % (" ".join(args), res.stderr.strip()))
+    return res
+
+
+def _run_restack_provision_tests():
+    with tempfile.TemporaryDirectory() as root:
+        _git2(["init", "-b", "main"], root)
+        _git2(["config", "user.email", "t@t.t"], root)
+        _git2(["config", "user.name", "t"], root)
+        with open(os.path.join(root, "f.txt"), "w") as fh:
+            fh.write("seed\n")
+        _git2(["add", "."], root)
+        _git2(["commit", "-m", "seed"], root)
+        _git2(["branch", "RUS-1/design"], root)
+        wt = os.path.join(root, ".worktrees", "RUS-1")
+
+        # 1. First provision creates a healthy worktree at the canonical path.
+        got = provision_worktree("RUS-1", repo_root=root)
+        check("provision_worktree returns the canonical worktree path", got, wt)
+        check("provisioned worktree is healthy", worktree_is_healthy(wt), True)
+
+        # 2. Orphan it (admin metadata gone, working dir survives) — the cross-agent
+        #    vanish — then re-provision: it must SELF-HEAL, not reuse the dead dir.
+        shutil.rmtree(os.path.join(root, ".git", "worktrees", "RUS-1"))
+        check("orphaned worktree dir survives on disk", os.path.isdir(wt), True)
+        check("orphaned worktree detected unhealthy", worktree_is_healthy(wt), False)
+        healed = provision_worktree("RUS-1", repo_root=root)
+        check("re-provision self-heals to a healthy worktree",
+              worktree_is_healthy(healed), True)
+        head = subprocess.run(["git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        check("self-healed worktree is on the branch tip", head, "RUS-1/design")
+
+
+_run_restack_provision_tests()
 
 print("\n%d passed, %d failed" % (total - failures, failures))
 sys.exit(1 if failures else 0)

@@ -33,6 +33,7 @@ Output: a single JSON envelope on stdout:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -416,11 +417,48 @@ def _existing_branches(ticket, repo_root=REPO_ROOT):
     return branch_set(out.splitlines()) if rc == 0 else set()
 
 
+def worktree_is_healthy(worktree):
+    """True iff `worktree` is a LIVE git worktree (its `.git` linkage resolves).
+
+    An ORPHANED worktree — the `.worktrees/<id>` working dir survives but its
+    `.git/worktrees/<id>` admin dir was pruned/removed out from under it — still
+    passes `os.path.isdir()`, yet EVERY git/gt command run inside it fails with
+    `fatal: not a git repository` (the `.git` file points at an admin dir that is
+    gone). That is exactly the state that wedged the restack step: resolve reused
+    the dir on a bare isdir() check and handed restack a worktree whose first
+    `gt checkout` died. `git -C <wt> rev-parse --is-inside-work-tree` is the cheap,
+    definitive liveness probe — rc==0 + "true" on a healthy worktree, non-zero on an
+    orphan. Impure (one subprocess); it gates the reuse branch in setup_worktree."""
+    if not os.path.isdir(worktree):
+        return False
+    rc, out, _ = _run(["git", "-C", worktree, "rev-parse", "--is-inside-work-tree"])
+    return rc == 0 and out.strip() == "true"
+
+
+def teardown_orphan_worktree(worktree, repo_root):
+    """Remove an orphaned worktree dir and prune its stale admin metadata so the
+    caller can recreate it cleanly.
+
+    `git worktree remove` cannot help here — it needs the very admin entry the orphan
+    is missing — so we `rm -rf` the working dir and then `git worktree prune` to drop
+    the dangling `.git/worktrees/<id>` admin entry (which is what frees the branch the
+    orphan held, letting the subsequent `git worktree add <wt> <branch>` succeed). The
+    prune is best-effort: a clean tree is the goal, and a prune that finds nothing is a
+    harmless no-op."""
+    shutil.rmtree(worktree, ignore_errors=True)
+    _run(["git", "worktree", "prune"], cwd=repo_root)
+
+
 def setup_worktree(ticket, trunk="main", create_design=False, repo_root=REPO_ROOT):
     """Provision the ticket's worktree at <repo>/.worktrees/<ticket> and return its
     path. Idempotent.
 
-    - Existing worktree dir -> reuse as-is.
+    - Existing HEALTHY worktree dir -> reuse as-is.
+    - Existing ORPHANED worktree dir (working dir present but its `.git/worktrees/<id>`
+      admin metadata was pruned) -> tear it down (rm + `git worktree prune`) and fall
+      through to recreate from the branch tip, instead of reusing a dir whose every
+      git/gt command dies with `fatal: not a git repository` (the bug that wedged the
+      restack step — see worktree_is_healthy).
     - No worktree but a phase branch exists -> check it out on the stack tip.
     - No branch at all:
         * create_design=True  -> create a fresh <ticket>/design off trunk and track
@@ -435,7 +473,11 @@ def setup_worktree(ticket, trunk="main", create_design=False, repo_root=REPO_ROO
     worktree = os.path.join(worktrees_dir, ticket)
 
     if os.path.isdir(worktree):
-        return worktree  # reuse
+        if worktree_is_healthy(worktree):
+            return worktree  # reuse a live worktree
+        # Orphaned worktree: drop the broken dir + stale admin entry, then recreate
+        # below (a bare reuse here is what handed restack a "not a git repository" tree).
+        teardown_orphan_worktree(worktree, repo_root)
 
     tip = pick_tip(_existing_branches(ticket, repo_root), ticket)
     if tip:

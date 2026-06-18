@@ -9,6 +9,7 @@ end-to-end run against a real ticket.
 """
 
 import os
+import subprocess
 import sys
 import tempfile
 
@@ -25,6 +26,9 @@ from qrspi_resolve import (
     red_branches_of,
     coerce_cap,
     load_ci_revise_cap,
+    worktree_is_healthy,
+    teardown_orphan_worktree,
+    setup_worktree,
     select_source,
     references_me,
     resolve_reviewers,
@@ -466,6 +470,74 @@ rb_env = build_envelope("/wt/RUS-7", _rb_dec, _ex, ok=True, phases=_rb_phases,
 check("envelope re-emits top-level ciRedBranches from a CI decision",
       rb_env["ciRedBranches"], ["RUS-7/slice-1"])
 check("ciRedBranches re-emit leaves decision untouched", rb_env["decision"], _rb_dec)
+
+
+# --- orphaned-worktree self-heal (hermetic real-git integration) -----------
+# These exercise the subprocess-backed worktree path against a throwaway temp repo
+# (not the pure helpers tested above). They pin the orphaned-worktree regression: a
+# `.worktrees/<id>` dir whose `.git/worktrees/<id>` admin metadata was pruned must be
+# detected as unhealthy and self-healed by setup_worktree, NOT reused (the bare reuse
+# is what fed restack a "fatal: not a git repository" worktree).
+
+def _git(args, cwd, check_rc=True):
+    res = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True)
+    if check_rc and res.returncode != 0:
+        raise RuntimeError("git %s failed: %s" % (" ".join(args), res.stderr.strip()))
+    return res
+
+
+def _seed_repo(root):
+    """A minimal repo on `main` with one commit and a `RUS-1/design` branch."""
+    _git(["init", "-b", "main"], root)
+    _git(["config", "user.email", "t@t.t"], root)
+    _git(["config", "user.name", "t"], root)
+    with open(os.path.join(root, "f.txt"), "w") as fh:
+        fh.write("seed\n")
+    _git(["add", "."], root)
+    _git(["commit", "-m", "seed"], root)
+    _git(["branch", "RUS-1/design"], root)
+
+
+def _run_worktree_selfheal_tests():
+    with tempfile.TemporaryDirectory() as root:
+        _seed_repo(root)
+        wt = os.path.join(root, ".worktrees", "RUS-1")
+
+        # 1. A freshly added worktree is healthy and reused verbatim.
+        first = setup_worktree("RUS-1", repo_root=root)
+        check("setup_worktree creates the worktree at the canonical path", first, wt)
+        check("freshly created worktree is healthy", worktree_is_healthy(wt), True)
+        reused = setup_worktree("RUS-1", repo_root=root)
+        check("a healthy worktree is reused (same path)", reused, wt)
+        check("reused worktree still healthy", worktree_is_healthy(wt), True)
+
+        # 2. Orphan it: the working dir survives but the admin metadata is gone.
+        admin = os.path.join(root, ".git", "worktrees", "RUS-1")
+        import shutil as _sh
+        _sh.rmtree(admin)
+        check("orphaned worktree dir still exists on disk",
+              os.path.isdir(wt), True)
+        check("orphaned worktree is detected UNHEALTHY",
+              worktree_is_healthy(wt), False)
+
+        # 3. setup_worktree self-heals instead of reusing the orphan.
+        healed = setup_worktree("RUS-1", repo_root=root)
+        check("self-heal returns the canonical worktree path", healed, wt)
+        check("self-healed worktree is healthy again", worktree_is_healthy(wt), True)
+        # The recreated worktree must be checked out on the ticket's branch tip.
+        head = subprocess.run(["git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        check("self-healed worktree is on the branch tip", head, "RUS-1/design")
+
+        # 4. teardown leaves a clean tree (no dangling admin entry).
+        teardown_orphan_worktree(wt, root)
+        pruned = subprocess.run(["git", "-C", root, "worktree", "list", "--porcelain"],
+                                capture_output=True, text=True).stdout
+        check("teardown removes the worktree from `git worktree list`",
+              "RUS-1" in pruned, False)
+
+
+_run_worktree_selfheal_tests()
 
 
 def run():

@@ -67,6 +67,8 @@ from qrspi_resolve import (               # noqa: E402
     pick_tip,
     parse_name_with_owner,
     _gh_name_with_owner,
+    setup_worktree,
+    worktree_is_healthy,
 )
 
 REPO_ROOT = qrspi_paths.resolve_repo_root(cwd=os.getcwd(), validate=False)
@@ -396,6 +398,23 @@ def restack(worktree, tip, ticket, branches):
     return True, restacked, True, None
 
 
+def provision_worktree(ticket, repo_root=REPO_ROOT):
+    """Ensure a HEALTHY worktree exists for `ticket` IN THIS PROCESS, returning its path.
+
+    resolve provisions the worktree in an EARLIER agent, but the `.git/worktrees/<id>` admin
+    metadata can vanish across the agent/process boundary in the sandbox (the `.worktrees/<id>`
+    working dir survives, yet its admin dir is pruned/lost), which re-orphans the worktree:
+    every git/gt command run inside it then dies with `fatal: not a git repository`. restack
+    runs as its OWN agent, so trusting resolve's provisioning is what wedged the restack step
+    (RUS-85/RUS-87 came back `restack_conflict` on the very first `gt checkout`). Re-provision
+    here, right before any gt op, to close that window. This delegates to the resolver's tested,
+    idempotent setup_worktree, which reuses a still-healthy worktree, self-heals an orphaned one
+    (teardown + recreate from the branch tip), or recreates it from the tip when the dir is gone.
+    create_design is False: restack only runs once a branch exists, so we never create a stray
+    design branch. Raises RuntimeError (from setup_worktree) when provisioning genuinely fails."""
+    return setup_worktree(ticket, create_design=False, repo_root=repo_root)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Restack a QRSPI ticket's stack onto current trunk (self-locating)")
@@ -404,14 +423,10 @@ def main():
 
     worktree = worktree_path(REPO_ROOT, args.ticket)
 
-    # Nothing to restack if the ticket has no worktree or no branch yet (e.g. a fresh
-    # run_design before its design branch exists). That is a clean no-op success.
-    if not os.path.isdir(worktree):
-        env = build_envelope(args.ticket, worktree, None, ok=True, restacked=False)
-        json.dump(env, sys.stdout, indent=2)
-        print()
-        return 0
-
+    # Nothing to restack if the ticket has no branch yet (e.g. a fresh run_design before
+    # its design branch exists). That is a clean no-op success — and a bare .worktrees/<id>
+    # dir with no branch behind it is nothing to align. (Branch existence — not the presence
+    # of a possibly-orphaned dir — is the real gate, so we read it BEFORE provisioning.)
     branches = existing_branches(args.ticket)
     tip = pick_tip(branches, args.ticket)
     if tip is None:
@@ -419,6 +434,19 @@ def main():
         json.dump(env, sys.stdout, indent=2)
         print()
         return 0
+
+    # A branch exists -> every gt op below must run inside a HEALTHY worktree. resolve's
+    # earlier provisioning can be undone by the admin-metadata vanish across the agent
+    # boundary, so re-provision (reuse / self-heal / recreate from tip) IN THIS PROCESS
+    # before `gt checkout`. A provisioning failure is a clean ok:false (no tree to abort).
+    try:
+        worktree = provision_worktree(args.ticket, repo_root=REPO_ROOT)
+    except RuntimeError as exc:
+        env = build_envelope(args.ticket, worktree, tip, ok=False, restacked=False,
+                             error="worktree provisioning failed: %s" % exc)
+        json.dump(env, sys.stdout, indent=2)
+        print()
+        return 1
 
     ok, restacked, submitted, error = restack(worktree, tip, args.ticket, branches)
     env = build_envelope(args.ticket, worktree, tip, ok=ok, restacked=restacked,
