@@ -39,8 +39,10 @@ const BATCH_JS = path.join(REPO_ROOT, '.claude', 'workflows', 'qrspi-batch.js')
 // scripts/check_workflows.js INJECTED).
 const INJECTED = ['agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow']
 
-// The parser names this harness exposes (the eight envelope parsers in
-// qrspi-batch.js). Kept here so the shim returns exactly these by name.
+// The parser names this harness exposes (the envelope parsers in qrspi-batch.js).
+// Kept here so the shim returns exactly these by name. The critics seam
+// (parseCriticsEnvelope / DEFAULT_CRITIC_PHASES) was removed when the autonomous
+// batch stopped reading critics config.
 const PARSER_NAMES = [
   'parseResolveEnvelope',
   'parseOrderedTickets',
@@ -49,10 +51,6 @@ const PARSER_NAMES = [
   'parseCleanupEnvelope',
   'parseLandVerdict',
   'parseConfigEnvelope',
-  'parseCriticsEnvelope',
-  // also expose the const so partial-merge / critics-default assertions can
-  // compare against the canonical DEFAULT_CRITIC_PHASES from the same source.
-  'DEFAULT_CRITIC_PHASES',
 ]
 
 // Build the compiled async function whose return value is the parser map.

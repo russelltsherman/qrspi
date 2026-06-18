@@ -20,7 +20,7 @@ logic-free shell.
 
 **QRSPI already does this — with Python as the functional core and
 `qrspi-batch.js` as the imperative shell.** The hard decisions
-(`qrspi_resolve_state.py`, `qrspi_critic_loop.py`, `qrspi_design_select.py`,
+(`qrspi_resolve_state.py`, `qrspi_critic_loop.py`,
 `qrspi_critics_config.py`, …) live in unit-tested Python scripts the workflow only
 shells out to; the workflow "does **not** re-derive any decision logic." So the
 goal is not "make the dynamic JS testable" — it is **keep starving the JS shell
@@ -196,9 +196,10 @@ tricky residual is the `extractJson*` brace-scanners.
      core.
 
 5. **(Defer) Agent-behavior evals.** Reference-trajectory tests and
-   LLM-judge-in-CI for the `agent()` seams are real but flaky/costly; the
-   in-pipeline critics (the design-critic panel + the coherence pass) already act
-   as live LLM-judges. Keep these out of the per-PR gate.
+   LLM-judge-in-CI for the `agent()` seams are real but flaky/costly; the on-demand
+   `/review-*` family already acts as a live LLM-judge over the produced artifacts
+   (the autonomous batch itself runs no in-pipeline critics). Keep these out of the
+   per-PR gate.
 
 ## Open experiment — RESOLVED
 
@@ -242,8 +243,7 @@ Python; the *act* of skipping lives in the JS shell and is inspection-only.
   `OSError` (missing file/dir) as `False`. The orchestrator surfaces that map on
   the resolver envelope's `existing` field, and `runPhase` in `qrspi-batch.js`
   early-returns on `if (existing && existing[name]) return true` — skipping the
-  producer agent, node-check, critic loop, and persist for any already-persisted
-  phase.
+  producer agent and persist for any already-persisted phase.
 - **Slice boundary.** Slice done-ness is decided by branch naming, not artifacts:
   `slice_numbers`/`slice_branches`/`pick_tip` enumerate exactly the present
   `slice-<n>` branches (ascending, gap-agnostic — no missing slice is ever
@@ -254,8 +254,8 @@ Python; the *act* of skipping lives in the JS shell and is inspection-only.
 
 `persistArtifact` (shelling to `scripts/qrspi_persist.py`) is the **single,
 post-validation success gate**: within `runPhase` it runs only after the producer
-and all critic/node-check stages pass, and it refuses to move a zero-byte staged
-file, re-verifying the destination is non-empty after the move. The producer
+succeeds, and it refuses to move a zero-byte staged file, re-verifying the
+destination is non-empty after the move. The producer
 writes to a token-free **staging** path, never the canonical artifact path. So a
 mid-phase/mid-slice `agent()` failure (which surfaces as a bare `null` sentinel —
 see below) never reaches persist, no half-written canonical artifact exists, and

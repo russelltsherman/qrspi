@@ -1,1 +1,0 @@
-{"ok": true, "phases": {"design": {"enabled": false, "maxRounds": 2, "lenses": ["completeness", "internal-consistency", "edge-alignment", "simplicity"], "candidates": 1, "digest": {"enabled": false}}, "implementation": {"coherence": {"enabled": true, "maxRounds": 2}}}, "warnings": []}

@@ -142,8 +142,9 @@ class ProducerShapeAndFormatTests(unittest.TestCase):
         env = {"ok": True, "phases": phases, "warnings": []}
         for key in ("ok", "phases", "warnings"):
             self.assertIn(key, env)
-        # Two-phase shape (RUS-88 retired the edge critic; mirrors DEFAULT_CRITIC_PHASES
-        # in qrspi-batch.js — design PANEL + implementation coherence pass only).
+        # Two-phase shape — design PANEL + implementation coherence pass only. The
+        # autonomous batch no longer consumes this config; qrspi_critics_config is now
+        # read only by the on-demand /review-* family.
         self.assertEqual(
             set(env["phases"].keys()),
             {"design", "implementation"},

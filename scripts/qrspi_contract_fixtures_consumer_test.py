@@ -17,9 +17,10 @@ way the Workflow harness does and exposes the parsers via an in-memory shim). Th
 whole case SKIPS (does not fail) when `node` is unavailable, mirroring
 check_workflows_test.py, so the Python suite stays green on node-less machines.
 
-Coverage is all EIGHT parsers (the six originally scoped plus restack/cleanup):
+Coverage is the SEVEN surviving parsers (the critics seam was removed when the
+autonomous batch stopped reading critics config):
 parseResolveEnvelope, parseConfigEnvelope, parseSyncTrunkEnvelope, parseLandVerdict,
-parseOrderedTickets, parseCriticsEnvelope, parseRestackEnvelope, parseCleanupEnvelope.
+parseOrderedTickets, parseRestackEnvelope, parseCleanupEnvelope.
 """
 
 import json
@@ -63,26 +64,6 @@ def run_parser(parser, *fixtures):
 def run_one(parser, seam, variant):
     """Convenience: run a single fixture and return just its result."""
     return run_parser(parser, fixture(seam, variant))[0]
-
-
-# The DEFAULT_CRITIC_PHASES constant as defined in qrspi-batch.js. Kept here so the
-# critics fail-OPEN assertion can compare against the canonical value. RUS-88 retired
-# the fidelity-only edge critic on questions/research/structure/plan and the per-slice
-# edge critic, so the shape is now exactly two phases: the design PANEL and the
-# implementation coherence pass (no gateBehindEdge, no top-level implementation
-# enabled/maxRounds).
-EXPECTED_DEFAULT_CRITIC_PHASES = {
-    "design": {
-        "enabled": False,
-        "maxRounds": 2,
-        "lenses": ["completeness", "internal-consistency", "edge-alignment", "simplicity"],
-        "candidates": 1,
-        "digest": {"enabled": False},
-    },
-    "implementation": {
-        "coherence": {"enabled": False, "maxRounds": 2},
-    },
-}
 
 
 @unittest.skipIf(NODE is None, "node not installed")
@@ -140,25 +121,6 @@ class WellFormedAcceptance(unittest.TestCase):
         result = run_one("parseOrderedTickets", "ordered-tickets", "wellformed")
         self.assertIsInstance(result, list)
         self.assertEqual([t["id"] for t in result], ["RUS-1", "RUS-2"])
-
-    def test_critics_wellformed_accepted(self):
-        # Uses the consumer-specific fixture (`wellformed_consumer`) which flips a
-        # SURVIVING key (`implementation.coherence` to enabled:true, RUS-88) so the
-        # parsed value DIFFERS from DEFAULT_CRITIC_PHASES. The all-defaults `wellformed`
-        # fixture is the PRODUCER golden (it must equal
-        # qrspi_critics_config.default_phases()), so it cannot also serve as the consumer
-        # discriminator — a parser that always fail-OPENed to defaults would pass against
-        # it. This separate input makes "accepts well-formed" genuinely distinguish a real
-        # parse from the fail-open fallback.
-        result = run_one("parseCriticsEnvelope", "critics", "wellformed_consumer")
-        expected = {
-            **EXPECTED_DEFAULT_CRITIC_PHASES,
-            "implementation": {"coherence": {"enabled": True, "maxRounds": 2}},
-        }
-        self.assertEqual(result, expected)
-        # Guard the discriminator explicitly: the accepted value must NOT equal the
-        # fail-open default that test_critics_malformed_defaults asserts.
-        self.assertNotEqual(result, EXPECTED_DEFAULT_CRITIC_PHASES)
 
     def test_restack_wellformed_accepted(self):
         result = run_one("parseRestackEnvelope", "restack", "wellformed")
@@ -226,28 +188,6 @@ class MalformedFailModes(unittest.TestCase):
     def test_ordered_tickets_malformed_null(self):
         result = run_one("parseOrderedTickets", "ordered-tickets", "malformed")
         self.assertIsNone(result)
-
-    # --- critics: silent seam → fail-OPEN to DEFAULT_CRITIC_PHASES -----------
-    def test_critics_malformed_defaults(self):
-        result = run_one("parseCriticsEnvelope", "critics", "malformed")
-        self.assertEqual(result, EXPECTED_DEFAULT_CRITIC_PHASES)
-
-
-@unittest.skipIf(NODE is None, "node not installed")
-class CriticsShallowMerge(unittest.TestCase):
-    """The shallow-spread merge at qrspi-batch.js (`{...DEFAULT_CRITIC_PHASES,
-    ...phases}`): a partial phase REPLACES the whole default block for that key,
-    while untouched phases retain their DEFAULT values."""
-
-    def test_partial_merge_shallow(self):
-        result = run_one("parseCriticsEnvelope", "critics", "partial_merge")
-        # `design` is replaced wholesale by the partial — it equals ONLY {enabled:true},
-        # NOT the DEFAULT-augmented block (no lenses/candidates/maxRounds).
-        self.assertEqual(result["design"], {"enabled": True})
-        # The untouched phase (implementation, the only other surviving key) keeps its
-        # DEFAULT value (RUS-88: the four planning phases no longer exist).
-        for phase in ("implementation",):
-            self.assertEqual(result[phase], EXPECTED_DEFAULT_CRITIC_PHASES[phase])
 
 
 if __name__ == "__main__":

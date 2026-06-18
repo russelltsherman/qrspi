@@ -238,47 +238,6 @@ class DesignReviewWhitelistTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
 
 
-class JsMirrorParityTests(unittest.TestCase):
-    """Lockstep: the Python default resolution must equal the JS DEFAULT_CRITIC_PHASES
-    mirror in .claude/workflows/qrspi-batch.js (structure.md Modified Types). The JS
-    object is parsed out of the source file by regex (the file is harness-coupled and
-    not importable), then compared field-for-field against default_phases()."""
-
-    def _js_default_critic_phases(self):
-        import json as _json
-        import re
-
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        js_path = os.path.join(repo_root, ".claude", "workflows", "qrspi-batch.js")
-        with open(js_path, "r", encoding="utf-8") as fh:
-            src = fh.read()
-        # Grab the object literal assigned to DEFAULT_CRITIC_PHASES.
-        m = re.search(r"const DEFAULT_CRITIC_PHASES = (\{.*?\n\})", src, re.DOTALL)
-        self.assertIsNotNone(m, "could not locate DEFAULT_CRITIC_PHASES in qrspi-batch.js")
-        body = m.group(1)
-        # Resolve the `lenses: DEFAULT_DESIGN_LENSES` reference to the literal array,
-        # then strip JS-only constructs (the `// ...` comment lines) before JSON-parsing.
-        body = body.replace("DEFAULT_DESIGN_LENSES", _json.dumps(DEFAULT_DESIGN_LENSES))
-        body = re.sub(r"^\s*//.*$", "", body, flags=re.MULTILINE)
-        # Quote bare object keys (identifier: -> "identifier":) and drop trailing commas.
-        body = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', body)
-        body = re.sub(r",(\s*[}\]])", r"\1", body)
-        body = body.replace("false", "false").replace("true", "true")
-        return _json.loads(body)
-
-    def test_design_defaults_match_js_mirror(self):
-        py = default_phases()["design"]
-        js = self._js_default_critic_phases()["design"]
-        self.assertEqual(py, js, "Python resolve_design defaults and JS DEFAULT_CRITIC_PHASES.design diverged")
-
-    def test_all_phase_defaults_match_js_mirror(self):
-        py = default_phases()
-        js = self._js_default_critic_phases()
-        self.assertEqual(set(py), set(js))
-        for phase in py:
-            self.assertEqual(py[phase], js[phase], f"phase {phase!r} default diverged between Python and JS mirror")
-
-
 class ReviewPanelConstantsTests(unittest.TestCase):
     """RUS-91: the on-demand /review-* panels are NEW ordered constants, DISTINCT
     from the batch DEFAULT_DESIGN_LENSES. Plan/impl lens ids are phase-qualified so
