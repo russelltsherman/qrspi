@@ -18,7 +18,7 @@ Parse `$ARGUMENTS` for a single `<ticket-id>` (Linear format, e.g. `RUS-89`). If
 
 ```
 resolve → derive design PR number → scratch-copy design.md → stage ticket text
-  → loop rounds 0..2: fan out the 5-lens design panel → partition decision-readiness
+  → loop rounds 0..MAX_ROUNDS-1 (MAX_ROUNDS from critics.design.maxRounds): fan out the 5-lens design panel → partition decision-readiness
         → synthesize the PANEL array (decision-readiness excluded) → next_action
         revise ⇒ spawn qrspi-critic-reviser (PHASE=design) to rewrite the scratch copy, continue
         converged / cap_reached ⇒ stop the loop
@@ -50,6 +50,16 @@ The artifacts you will reference:
 - `QUESTIONS` = `<worktreeDir>/.qrspi/<ticket-id>/questions.md` (optional, pass if present)
 - `CODEBASE` = `<worktreeDir>` (the lens reads/greps real source here)
 - `TICKET_CONTENT` = `/tmp/phase-stage/<ticket-id>/review/ticket.md` (staged in Step 3 — passed to the fidelity/coverage/decision-readiness lenses ONLY, never the node-validity lens)
+
+### Step 1b — Resolve the configurable round cap
+
+The review-loop cap is **not hardcoded** — it reads `critics.design.maxRounds` from `.qrspi/config.json` via the tested resolver (the SAME key the autonomous `qrspi-batch` design panel uses, so the on-demand review and the batch share one knob):
+
+```bash
+python3 scripts/qrspi_critics_config.py
+```
+
+From its JSON envelope (`{"ok":true,"phases":{"design":{...,"maxRounds":N,...}}}`) capture `MAX_ROUNDS` = `.phases.design.maxRounds`. The resolver always returns a usable integer — it falls back to the source default (`2`) when the key is absent, unreadable, or non-positive, so `MAX_ROUNDS` is never empty. Use this `MAX_ROUNDS` value everywhere Step 4 caps the loop (the loop runs rounds `0 .. MAX_ROUNDS-1`). Do not hardcode a round count.
 
 ## Step 2 — Derive the design PR number and its human review decision
 
@@ -85,9 +95,9 @@ Use `SCRATCH` = `/tmp/phase-stage/<ticket-id>/review/design.md` as the artifact 
 
 If the Linear fetch fails or the ticket has no description, write a short note to `TICKET_CONTENT` recording that the ticket text was unavailable and proceed — the lenses treat a missing/empty ticket as "no stated AC to check against" rather than failing. `TICKET_CONTENT` is passed to the `edge-alignment`, `completeness`, and `decision-readiness` lenses ONLY; the node-validity `design-review` lens stays research+code-only (unchanged).
 
-## Step 4 — The review loop (rounds 0..2)
+## Step 4 — The review loop (rounds 0..MAX_ROUNDS-1)
 
-The cap is **3 rounds** (`--max-rounds 3`). For each round `r` starting at `0`:
+The cap is **`MAX_ROUNDS` rounds** — the configurable value resolved in Step 1b from `critics.design.maxRounds` (`--max-rounds <MAX_ROUNDS>`), not a hardcoded literal. For each round `r` starting at `0`:
 
 ### 4a. Fan out the full design review panel
 
@@ -146,7 +156,7 @@ Pipe the round's synthesized verdict (as a one-element JSON array) into the alre
 
 ```bash
 printf '%s' '[{"pass":<round-pass>,"findings":<round-findings>}]' \
-  | python3 scripts/qrspi_critic_loop.py --round <r> --max-rounds 3
+  | python3 scripts/qrspi_critic_loop.py --round <r> --max-rounds <MAX_ROUNDS>
 ```
 
 It prints `{"action": ..., "residual_findings": [...]}` where `action` is one of:
