@@ -102,3 +102,34 @@
 - For plan/impl in Slice 4, the only structural differences from this template: (1) source from `DEFAULT_REVIEW_PLAN_LENSES`/`DEFAULT_REVIEW_IMPL_LENSES` (3 lenses each, phase-qualified ids → `qrspi-plan-critic-<id>` / `qrspi-impl-critic-<id>`); (2) there is NO decision-readiness lens for plan/impl, so `decision_readiness` passed to `render_synopsis` is `None` and Step 5 is dropped (pass `None`, `partition_decision_readiness` still a safe guard); (3) `TICKET_CONTENT_PATH` goes to the fidelity+completeness lenses (NOT the `*-review` node-validity lens); (4) impl lenses run over the AGGREGATED slice stack (one pass) and `/review-implementation` must add the `gh pr list --state all` frontier guard.
 
 ---
+
+## Session 4 — Slice 4
+
+**Timestamp:** 2026-06-18T03:02:59Z
+**Tasks completed:** T38, T39, T40, T41, T42, T43, T44, T45, T46, T47, T48 (the SKILL.md wiring for both `/review-plan` and `/review-implementation`; T49–T51 are live e2e — see deviations)
+**Tasks failed:** none
+**Tests:**
+
+- `python3 scripts/run_tests.py` → 42 passed, 0 failed (regression gate; Slice 4 touches no Python source, so the suite is unchanged-green)
+- Referenced-agent existence check (inline): all 7 `subagent_type`s the two upgraded SKILLs spawn exist in `.claude/agents/` (`qrspi-plan-critic-plan-review`/`-plan-fidelity`/`-plan-completeness`, `qrspi-impl-critic-impl-review`/`-impl-fidelity`/`-impl-completeness`, `qrspi-critic-reviser`) → exit 0
+- Embedded-snippet verification (inline harness): executed the three `python3 - <<'PY'` blocks now embedded in BOTH SKILLs (Step 4b partition+synthesize; Step 5 build_record + `ledger_row_fields` merge; Step 6 `render_synopsis(..., None, ...)`) against representative 3-element plan-panel and impl-panel verdict arrays. Asserted: `partition_decision_readiness` returns `(panel, None)` for a DR-free panel; `synthesize` reduces fail-closed on a single dissent (findings carried as `{text,lens}` objects); `build_record(...).update(ledger_row_fields(...))` yields a record carrying merged `axes`+`nonBlockingNotes` (verified key names against the real helpers); `qrspi_critic_summary.summarize` tolerates the merged record; `render_synopsis(verdicts, None, terminal)` lists all three lens rows AND omits the "Decision readiness" section when DR is `None`. ALL ASSERTIONS PASS.
+
+**Deviations from structure.md:**
+
+- none
+
+**Deviations from plan.md:**
+
+- **T49–T51 (live end-to-end `/review-plan <id>` and `/review-implementation <id>` runs + PR head-SHA before/after guards) NOT run.** Rationale, not skipped silently: these require real Linear tickets with existing plan PRs / slice stacks, live `mcp__linear__get_issue`, live `Agent`-tool subagent spawns, and `gh` PR-comment writes — none of which a deterministic implement-phase agent runs (consistent with the Slice-3 hand-off, which deferred the equivalent T35–T37 live `/review-design` e2e to a human/e2e pass). Instead I verified the DETERMINISTIC core both SKILLs depend on: the embedded Python snippets execute correctly against representative plan/impl verdict arrays (above), every referenced `subagent_type` agent file exists, and `summarize` tolerates the merged additive row fields. The T51 checkboxes (axis-enumerated synopsis with the panel lenses + per-lens pass; rolled-up synopsis to the top slice PR; frontier resolved via `--state all`; head SHA unchanged; ticket passed to fidelity/completeness lenses only) are now ENCODED in both SKILLs' prose + Hard rules and the head-SHA guards (Step 2 / final step) but their LIVE confirmation remains for the human/e2e pass.
+
+**Notes for next session:**
+
+- Slice 4 brings `/review-plan` and `/review-implementation` to full parity with the Slice-3 `/review-design` reference. Both now follow the identical wiring pattern, with the four documented plan/impl deltas applied:
+  - **Fan-out (Step 4a):** the full 3-lens panel from `DEFAULT_REVIEW_PLAN_LENSES` (`plan-review`, `plan-fidelity`, `plan-completeness`) / `DEFAULT_REVIEW_IMPL_LENSES` (`impl-review`, `impl-fidelity`, `impl-completeness`), `subagent_type = qrspi-<phase>-critic-<lens-id>`, collected into a tagged pre-reduction verdict array.
+  - **Ticket plumbing (Step 3):** `mcp__linear__get_issue` → `Write` to `TICKET_CONTENT` = `/tmp/phase-stage/<id>/review/ticket.md`; passed to the `*-fidelity` + `*-completeness` lenses (and the reviser) ONLY — NOT the node-validity `*-review` lens. Front-matter `allowed-tools` gained `mcp__linear__get_issue` on both.
+  - **Reviser swap (Step 4d):** `qrspi-critic-reviser` with `PHASE=plan` / `PHASE=impl` (replaces the old `qrspi-plan` / `qrspi-implement` producer spawns).
+  - **Synopsis (Step 6):** `render_synopsis(last_round_verdicts, None, terminal_action)` — `None` decision-readiness (no DR lens for plan/impl); `render_synopsis` omits the DR section. Ledger (Step 5) merges `ledger_row_fields()` onto `build_record(...)`; rounds carry per-lens entries (N×R).
+  - **Impl-only (T44/T48):** the impl panel runs ONE pass over the AGGREGATED slice stack (not per-slice — `CODEBASE_PATH` is REQUIRED for all three impl lenses), and Step 2 now resolves the top slice PR via `gh pr list --head <tip> --state all` (the partially-landed-stack frontier guard, mirroring `/review`). Both encoded as Hard rules (impl rules 3/5).
+- Slice 5 (`/review`, whole-stack) is the only remaining wiring slice. It must bind all three upgraded per-phase panels in its binding table, render per-phase synopsis sub-sections via `render_synopsis()`, and emit ONE `ledger_row_fields()`-merged ledger row PER reviewed phase — composing the now-uniform per-phase lenses without advancing the lifecycle. It also authors/reuses the regression fixture (plan steps 52–58). `/review` ALREADY uses the `--state all` frontier guard (per CLAUDE.md), so Slice 4's impl frontier change aligns impl-review TO `/review`, not the reverse.
+
+---
