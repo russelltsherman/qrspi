@@ -68,6 +68,45 @@ DEFAULT_DESIGN_LENSES = ["completeness", "internal-consistency", "edge-alignment
 # activate the heavier lens by default or, if added to the default set, defeat the opt-in.
 KNOWN_DESIGN_LENSES = set(DEFAULT_DESIGN_LENSES) | {"design-review"}
 
+# ---------------------------------------------------------------------------
+# On-demand /review-* review PANELS (RUS-91)
+# ---------------------------------------------------------------------------
+# These are the ORDERED per-phase lens panels the on-demand `/review-*` skills
+# fan out — DISTINCT from the batch DEFAULT_DESIGN_LENSES above. The fan-out
+# derives each lens's agent as `qrspi-<phase>-critic-<lens-id>`.
+#
+# Design review panel: the four batch edge lenses PLUS the node-validity
+# `design-review` lens. The batch DEFAULT_DESIGN_LENSES deliberately EXCLUDES
+# `design-review` (RUS-82 decoupling; see the "Do NOT re-couple" note above),
+# but `design-review` is the only lens `/review-design` runs today, so the
+# on-demand panel must include it. These are therefore distinct constants — do
+# NOT collapse DEFAULT_REVIEW_DESIGN_LENSES into DEFAULT_DESIGN_LENSES.
+DEFAULT_REVIEW_DESIGN_LENSES = (
+    "completeness",
+    "internal-consistency",
+    "edge-alignment",
+    "simplicity",
+    "design-review",
+)
+# Plan/impl lens ids are PHASE-QUALIFIED (`plan-fidelity`, `plan-completeness`,
+# `impl-fidelity`, `impl-completeness`) so that (a) `qrspi-<phase>-critic-<id>`
+# resolves to a distinct agent and (b) the ids do not collide in the
+# bare-lens-keyed `critic-metrics.jsonl` per-lens summary (qrspi_critic_summary
+# buckets on the bare lens id with no phase qualifier).
+DEFAULT_REVIEW_PLAN_LENSES = (
+    "plan-review",
+    "plan-fidelity",
+    "plan-completeness",
+)
+DEFAULT_REVIEW_IMPL_LENSES = (
+    "impl-review",
+    "impl-fidelity",
+    "impl-completeness",
+)
+# Per-phase allow-list sets mirroring the KNOWN_DESIGN_LENSES idiom.
+KNOWN_PLAN_LENSES = set(DEFAULT_REVIEW_PLAN_LENSES)
+KNOWN_IMPL_LENSES = set(DEFAULT_REVIEW_IMPL_LENSES)
+
 # The design-phase N-select framing axes (RUS-59) — mirrors DEFAULT_DESIGN_FRAMINGS in
 # qrspi-batch.js. `candidates` (N) is clamped to [2, len(framings)] when > 1, else 1 (OFF).
 DEFAULT_DESIGN_FRAMINGS = ["mvp-first", "risk-first", "extensibility-first"]

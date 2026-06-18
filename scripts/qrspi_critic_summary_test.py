@@ -193,6 +193,47 @@ class ReportShapeTest(unittest.TestCase):
         self.assertEqual(counts["cap_reached"], 1)
 
 
+class AdditiveFieldsBackwardCompatTest(unittest.TestCase):
+    """RUS-91: the critic-metrics row gains OPTIONAL additive fields
+    (`axes`, `nonBlockingNotes`). The summarizer reads every field via `.get()`,
+    so an OLD row (no new keys) still parses AND a NEW row (with the keys) parses
+    identically — the additive fields are ignored by the per-lens/dissent math."""
+
+    def test_old_style_row_without_new_keys_still_parses(self):
+        # An old row carrying only the original rounds[] shape summarizes fine.
+        old = _line(rounds=[{"lens": "completeness", "pass": False,
+                             "findingsCount": 2}])
+        self.assertNotIn("axes", old)
+        self.assertNotIn("nonBlockingNotes", old)
+        out = s.summarize([old])
+        self.assertEqual(out["stepCount"], 1)
+        self.assertEqual(out["dissentRate"], 1.0)
+
+    def test_new_style_row_with_additive_fields_parses_identically(self):
+        # A new row carrying the additive axes/nonBlockingNotes keys (at the row
+        # level) is summarized the same — the new keys are inert to the math.
+        new = _line(rounds=[{"lens": "completeness", "pass": False,
+                             "findingsCount": 2}])
+        new["axes"] = [{"lens": "completeness", "pass": False, "blockingCount": 2}]
+        new["nonBlockingNotes"] = ["advisory note"]
+        out = s.summarize([new])
+        self.assertEqual(out["stepCount"], 1)
+        self.assertEqual(out["dissentRate"], 1.0)
+        self.assertIn("completeness", out["perLens"])
+
+    def test_old_and_new_rows_mix_cleanly(self):
+        old = _line(run_id="run-A",
+                    rounds=[{"lens": "a", "pass": True, "findingsCount": 0}])
+        new = _line(run_id="run-A",
+                    rounds=[{"lens": "b", "pass": False, "findingsCount": 1}])
+        new["axes"] = [{"lens": "b", "pass": False, "blockingCount": 1}]
+        new["nonBlockingNotes"] = ["note"]
+        out = s.summarize([old, new])
+        self.assertEqual(out["stepCount"], 2)
+        self.assertIn("a", out["perLens"])
+        self.assertIn("b", out["perLens"])
+
+
 class CliTest(unittest.TestCase):
     def test_main_prints_json_with_all_keys(self):
         fd, path = tempfile.mkstemp(suffix=".jsonl")
