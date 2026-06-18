@@ -16,6 +16,11 @@ from qrspi_critics_config import (  # noqa: E402
     DEFAULT_DESIGN_LENSES,
     DEFAULT_DESIGN_FRAMINGS,
     DEFAULT_MAX_ROUNDS,
+    DEFAULT_REVIEW_DESIGN_LENSES,
+    DEFAULT_REVIEW_IMPL_LENSES,
+    DEFAULT_REVIEW_PLAN_LENSES,
+    KNOWN_IMPL_LENSES,
+    KNOWN_PLAN_LENSES,
     default_phases,
     resolve_critics,
     resolve_design,
@@ -272,6 +277,56 @@ class JsMirrorParityTests(unittest.TestCase):
         self.assertEqual(set(py), set(js))
         for phase in py:
             self.assertEqual(py[phase], js[phase], f"phase {phase!r} default diverged between Python and JS mirror")
+
+
+class ReviewPanelConstantsTests(unittest.TestCase):
+    """RUS-91: the on-demand /review-* panels are NEW ordered constants, DISTINCT
+    from the batch DEFAULT_DESIGN_LENSES. Plan/impl lens ids are phase-qualified so
+    `qrspi-<phase>-critic-<id>` resolves to a distinct agent and the ids do not
+    collide in the bare-lens-keyed critic-metrics summary."""
+
+    def test_review_design_panel_exact_ordered_contents(self):
+        self.assertEqual(
+            DEFAULT_REVIEW_DESIGN_LENSES,
+            ("completeness", "internal-consistency", "edge-alignment",
+             "simplicity", "design-review"),
+        )
+
+    def test_review_plan_panel_exact_ordered_contents(self):
+        self.assertEqual(
+            DEFAULT_REVIEW_PLAN_LENSES,
+            ("plan-review", "plan-fidelity", "plan-completeness"),
+        )
+
+    def test_review_impl_panel_exact_ordered_contents(self):
+        self.assertEqual(
+            DEFAULT_REVIEW_IMPL_LENSES,
+            ("impl-review", "impl-fidelity", "impl-completeness"),
+        )
+
+    def test_review_panel_is_distinct_from_batch_default(self):
+        # Locks the review-panel-vs-batch-default distinction: design-review is in
+        # the review panel but NOT in the batch default. A future edit cannot
+        # silently collapse them.
+        self.assertIn("design-review", DEFAULT_REVIEW_DESIGN_LENSES)
+        self.assertNotIn("design-review", DEFAULT_DESIGN_LENSES)
+
+    def test_known_plan_impl_allow_lists_mirror_their_panels(self):
+        self.assertEqual(KNOWN_PLAN_LENSES, set(DEFAULT_REVIEW_PLAN_LENSES))
+        self.assertEqual(KNOWN_IMPL_LENSES, set(DEFAULT_REVIEW_IMPL_LENSES))
+
+    def test_plan_impl_lens_ids_are_phase_qualified(self):
+        # Every plan/impl review-panel lens id is phase-prefixed (no bare id shared
+        # across phases) so qrspi-<phase>-critic-<id> resolves to a distinct agent
+        # and the ids do not merge in the bare-lens-keyed metrics summary.
+        for lens in DEFAULT_REVIEW_PLAN_LENSES:
+            self.assertTrue(lens.startswith("plan-"),
+                            f"plan lens id {lens!r} is not phase-qualified")
+        for lens in DEFAULT_REVIEW_IMPL_LENSES:
+            self.assertTrue(lens.startswith("impl-"),
+                            f"impl lens id {lens!r} is not phase-qualified")
+        # No id collides across the two phase panels.
+        self.assertEqual(KNOWN_PLAN_LENSES & KNOWN_IMPL_LENSES, set())
 
 
 class ResolveImplementationTests(unittest.TestCase):
