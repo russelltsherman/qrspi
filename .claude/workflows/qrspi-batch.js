@@ -104,6 +104,21 @@ const engineRootFor = (r) =>
   ENGINE_ROOT
 const engineCmdFor = (r, rel) => `${engineRootFor(r)}/${rel}`
 
+// provisionStep(r, t) — the verbatim STEP 0 EVERY worktree-touching worker must run, in its
+// OWN process, before ANY git/gt/gh command. The sandbox does NOT preserve a worktree's
+// `.git/worktrees/<id>` admin metadata across the agent/process boundary (the `.worktrees/<id>`
+// working dir survives — it lives in the working tree — but its admin dir is pruned/lost), so
+// resolve's and restack's earlier provisioning is already undone by the time THIS later worker
+// starts: without re-provisioning, the worker's first git/gt op dies with `fatal: not a git
+// repository` (the exact failure that wedged submit/land). qrspi_provision.py self-heals in
+// place, content-preservingly (any uncommitted artifacts a prior phase agent persisted survive).
+// Mirrors qrspi_restack.py's in-process provision_worktree — the same window, closed for the
+// finalize/revise/reset/land workers that lacked it. The script self-locates the repo root, so
+// it runs correctly regardless of the worker's cwd.
+const provisionStep = (r, t) =>
+  `STEP 0 (MANDATORY — before ANY git/gt/gh command): (re-)provision the worktree IN THIS PROCESS by running EXACTLY, verbatim: \`python3 ${engineCmdFor(r, 'scripts/qrspi_provision.py')} --ticket ${t.id}\`. The worktree's git admin metadata does not survive the agent boundary, so this self-heal is REQUIRED or every git/gt op below dies with "fatal: not a git repository"; it preserves any uncommitted artifacts already persisted into the worktree. If it prints ok:false, return ok:false — HARD STOP (do NOT hand-run \`git worktree add\`/\`git worktree repair\` to work around it). On ok:true, proceed with the steps below.
+`
+
 const SKILL = engineCmd('.claude/skills/qrspi-work/SKILL.md')
 
 // runId — the orchestrator's per-invocation run id, stamped onto every appended
@@ -1598,7 +1613,7 @@ TEMPLATE_PATH = ${tpl(wd, 'design.md')}`, r.existing, t.id, 'Design', designCrit
   const designFindings = [...(designCritic?.residualFindings ?? [])]
   const designBodyStep = criticBodyStep(t.id, 'design', designFindings, wd)
   const fin = await agent(
-    `You are the DESIGN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: run_design" commit+submit steps of ${SKILL}.
+    `${provisionStep(r, t)}You are the DESIGN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: run_design" commit+submit steps of ${SKILL}.
 1. Verify questions.md, research.md, design.md exist and are non-empty under ${wd}/.qrspi/${t.id}/. If any missing/empty, return ok:false (do NOT commit/transition).
 2. Stage ONLY those three artifacts; add them as the single commit (subject "${t.id} [QR]: Design — ${t.title}") on the pre-created ${t.id}/design branch with \`gt modify -c\` (the branch already exists from worktree setup — do NOT use \`gt create\`).${designBodyStep} Then submit the Design PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (the reviewer flag is required — it is what surfaces the PR in the reviewer\'s Graphite queue; submit it EXACTLY as written, do not drop or alter the reviewer)' : ''} (handle a stale closed-PR association per the SKILL "Resubmitting" steps).
 3. BEST-EFFORT project Linear → "Design Review" (a failed Linear write is a WARN, not a failure — still return ok:true with the PR created).
@@ -1661,7 +1676,7 @@ TEMPLATE_PATH = ${tpl(wd, 'worktree.md')}`, r.existing, t.id, 'Plan')) return fa
   // findings splice (the surviving planning-stack critic is the coherence pass in doImplementation,
   // whose findings ride the slice-1 PR).
   const fin = await agent(
-    `You are the PLAN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: advance → nextPhase == plan" steps of ${SKILL}.
+    `${provisionStep(r, t)}You are the PLAN-PHASE finalize worker for ${t.id}, in ${wd}. Follow the "action: advance → nextPhase == plan" steps of ${SKILL}.
 1. Verify structure.md, plan.md, worktree.md exist and are non-empty under ${wd}/.qrspi/${t.id}/. If any missing/empty, return ok:false.
 2. gt checkout ${t.id}/design; stage ONLY those three artifacts; create the ${t.id}/plan branch STACKED on ${t.id}/design with \`gt create\` (single commit "${t.id} [SP]: Plan — ${t.title}"). Then submit the Plan PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)}\`${reviewerFlags(r) ? ' (submit the reviewer flag EXACTLY as written — it is what surfaces the PR in the reviewer\'s Graphite queue)' : ''}.
 3. BEST-EFFORT project Linear → "Plan Review" (WARN on failure, still ok:true if the PR was created).
@@ -1871,7 +1886,7 @@ REPO_ROOT = ${wd}`,
 
   phase('Finalize')
   const fin = await agent(
-    `You are the implementation finalize worker for ${t.id}, in ${wd}. Follow the SKILL "advance → implementation" submit steps. PR bodies are seeded at Graphite CREATION from the commit message (\`gt submit\` has no body flag and seeds the body at creation only), so author the body via the commit message as below — this is the deterministic default. A post-hoc body correction, if ever needed, uses \`gh api repos/<owner>/<repo>/pulls/<N> -X PATCH -F body=@<file>\` (NOT \`gh pr edit\`, which can abort on the Projects-classic GraphQL bug). Do:
+    `${provisionStep(r, t)}You are the implementation finalize worker for ${t.id}, in ${wd}. Follow the SKILL "advance → implementation" submit steps. PR bodies are seeded at Graphite CREATION from the commit message (\`gt submit\` has no body flag and seeds the body at creation only), so author the body via the commit message as below — this is the deterministic default. A post-hoc body correction, if ever needed, uses \`gh api repos/<owner>/<repo>/pulls/<N> -X PATCH -F body=@<file>\` (NOT \`gh pr edit\`, which can abort on the Projects-classic GraphQL bug). Do:
 1. Amend pr-summary.md into the last slice commit as the durable artifact (git add .qrspi/${t.id}/pr-summary.md && gt modify --no-interactive).${findingsSpliceStep}
 2. Splice pr-summary.md into the SLICE-1 commit MESSAGE (so the slice-1 PR body is the full summary at creation), BEFORE submitting, by running EXACTLY this one self-locating command verbatim — no path edits, no alternatives:
      python3 ${engineCmdFor(r, 'scripts/qrspi_pr_body.py')} --ticket ${t.id} --slice 1
@@ -1891,7 +1906,7 @@ async function doSubmit(t, r) {
   phase('Finalize')
 
   const fin = await agent(
-    `You are the submit worker for ${t.id} (active phase: ${r.decision.phase}), in ${r.worktreeDir}. Follow the "action: submit" steps of ${SKILL}: the phase branch exists but its PR was not opened. Verify the phase's artifacts are present+non-empty (if any are missing AND cannot be produced, return ok:false — never fabricate). This path CREATES the PR, and PR bodies are seeded at Graphite creation from the commit message (\`gt submit\` has no body flag and seeds the body at creation only) — the deterministic default; a post-hoc body correction, if needed, is \`gh api … pulls/<N> -X PATCH -F body=@<file>\`, not \`gh pr edit\`. If the active phase is IMPLEMENTATION, FIRST splice pr-summary.md into the slice-1 commit message by running EXACTLY, verbatim: \`python3 ${engineCmdFor(r, 'scripts/qrspi_pr_body.py')} --ticket ${t.id} --slice 1\` (if it prints ok:false, return ok:false — HARD STOP). Then submit the PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)} --no-edit --no-interactive\` (add --stack for implementation)${reviewerFlags(r) ? ' — submit the reviewer flag EXACTLY as written, it surfaces the PR in the reviewer\'s Graphite queue' : ''} and BEST-EFFORT project the matching Linear review status. (The body is seeded from the commit message at creation — no gh body edit is needed here.)
+    `${provisionStep(r, t)}You are the submit worker for ${t.id} (active phase: ${r.decision.phase}), in ${r.worktreeDir}. Follow the "action: submit" steps of ${SKILL}: the phase branch exists but its PR was not opened. Verify the phase's artifacts are present+non-empty (if any are missing AND cannot be produced, return ok:false — never fabricate). This path CREATES the PR, and PR bodies are seeded at Graphite creation from the commit message (\`gt submit\` has no body flag and seeds the body at creation only) — the deterministic default; a post-hoc body correction, if needed, is \`gh api … pulls/<N> -X PATCH -F body=@<file>\`, not \`gh pr edit\`. If the active phase is IMPLEMENTATION, FIRST splice pr-summary.md into the slice-1 commit message by running EXACTLY, verbatim: \`python3 ${engineCmdFor(r, 'scripts/qrspi_pr_body.py')} --ticket ${t.id} --slice 1\` (if it prints ok:false, return ok:false — HARD STOP). Then submit the PR PUBLISHED with \`gt submit --publish${reviewerFlags(r)} --no-edit --no-interactive\` (add --stack for implementation)${reviewerFlags(r) ? ' — submit the reviewer flag EXACTLY as written, it surfaces the PR in the reviewer\'s Graphite queue' : ''} and BEST-EFFORT project the matching Linear review status. (The body is seeded from the commit message at creation — no gh body edit is needed here.)
 Return: ok, prUrl, newStatus, summary.`,
     { label: `submit:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
@@ -1905,7 +1920,7 @@ async function doReset(t, r) {
   phase('Finalize')
   const d = r.decision
   const fin = await agent(
-    `You are the RESET worker for ${t.id}, in ${r.worktreeDir}. A formal CHANGES_REQUESTED landed on the ${d.resetToPhase} PR, so discard the downstream phases [${(d.discardPhases || []).join(', ')}] AUTOMATICALLY per the "action: reset" steps of ${SKILL}:
+    `${provisionStep(r, t)}You are the RESET worker for ${t.id}, in ${r.worktreeDir}. A formal CHANGES_REQUESTED landed on the ${d.resetToPhase} PR, so discard the downstream phases [${(d.discardPhases || []).join(', ')}] AUTOMATICALLY per the "action: reset" steps of ${SKILL}:
 1. For each discarded phase (highest first — slices before plan): close its PR(s) and delete its branch(es) with gt delete --force --close.
 2. gt checkout ${t.id}/${d.resetToPhase}; remove the now-stale downstream artifacts from the working tree (e.g. structure.md/plan.md/worktree.md when discarding plan) and git clean -fd .qrspi/${t.id}/ so the skip-if-exists resume logic sees them absent. Trunk is never touched (nothing was merged).
 3. BEST-EFFORT project Linear → the ${d.resetToPhase} review status.
@@ -2023,7 +2038,7 @@ async function doRevise(t, r) {
       : '   (the gather reported a red rollup but no per-check detail; discover the failing checks yourself via `gh pr checks` / `gh pr view --json statusCheckRollup`)'
     : ''
   const fin = await agent(
-    `You are the REVISE worker for ${t.id} (frontier phase: ${d.phase}), in ${r.worktreeDir}. ${trigger} ${targets.length ? `The reviewer's INLINE/TOP-LEVEL comments have ALREADY been engaged and replied to in a prior step — do NOT re-reply to them; focus on the review SUMMARY body and any change-request feedback not tied to a specific comment.` : ''} Address it AUTONOMOUSLY, following the "action: revise" steps of ${SKILL}, with these REQUIRED adaptations:
+    `${provisionStep(r, t)}You are the REVISE worker for ${t.id} (frontier phase: ${d.phase}), in ${r.worktreeDir}. ${trigger} ${targets.length ? `The reviewer's INLINE/TOP-LEVEL comments have ALREADY been engaged and replied to in a prior step — do NOT re-reply to them; focus on the review SUMMARY body and any change-request feedback not tied to a specific comment.` : ''} Address it AUTONOMOUSLY, following the "action: revise" steps of ${SKILL}, with these REQUIRED adaptations:
 - DO NOT attempt to RESOLVE review threads (only the reviewer can mark a thread resolved). Reading feedback via \`gh pr view\`/\`gh api graphql\` queries is fine. Thread resolution is the reviewer's job — leave threads as-is.
 - Stay WITHIN the ${d.phase} phase only — never edit a downstream phase's artifacts (that is \`reset\`, not revise).
 - You are HONESTY-BOUND: never fabricate a fix, a log line, or a green result. Every fix must address a REAL failure you actually read.
@@ -2110,7 +2125,7 @@ async function respondToComments(t, r, d, targets) {
     // so the worker never quotes arbitrary markdown on a command line).
     const bodyFile = `/tmp/phase-stage/${t.id}/comment-reply-${i}.md`
     const fin = await agent(
-      `You are the PEER-REVIEWER worker for ${t.id} (phase: ${d.phase}), in ${r.worktreeDir}. A reviewer left a comment on the ${d.phase} PR and the bot has NOT yet replied to it. Engage it as an honest peer reviewer — you may ANSWER it, APPLY a sound suggested change, or DECLINE it with a concrete rationale. You are HONESTY-BOUND: never fabricate a fact, a fix, or agreement; answer only from the actual artifacts/code/PR state.
+      `${provisionStep(r, t)}You are the PEER-REVIEWER worker for ${t.id} (phase: ${d.phase}), in ${r.worktreeDir}. A reviewer left a comment on the ${d.phase} PR and the bot has NOT yet replied to it. Engage it as an honest peer reviewer — you may ANSWER it, APPLY a sound suggested change, or DECLINE it with a concrete rationale. You are HONESTY-BOUND: never fabricate a fact, a fix, or agreement; answer only from the actual artifacts/code/PR state.
 
 The comment you are addressing:
 - commentId: ${ct.commentId}
@@ -2167,7 +2182,7 @@ async function resetCiReviseTrailer(t, r, d, answered) {
     ? `the slice branch(es) you amended (e.g. ${t.id}/slice-<N>) — reset EACH one you touched`
     : `${t.id}/${d.phase}`
   const fin = await agent(
-    `You are the CI-TRAILER-RESET worker for ${t.id} (phase: ${d.phase}), in ${r.worktreeDir}. A prior step APPLIED reviewer-comment change(s) and amended the phase commit; this was a NON-CI amend, so the durable \`CI-Revise-Attempt\` counter (RUS-81) on the amended head commit(s) must be overwritten to 0. You are HONESTY-BOUND: change ONLY the trailer value; never touch any file or any other line of the message.
+    `${provisionStep(r, t)}You are the CI-TRAILER-RESET worker for ${t.id} (phase: ${d.phase}), in ${r.worktreeDir}. A prior step APPLIED reviewer-comment change(s) and amended the phase commit; this was a NON-CI amend, so the durable \`CI-Revise-Attempt\` counter (RUS-81) on the amended head commit(s) must be overwritten to 0. You are HONESTY-BOUND: change ONLY the trailer value; never touch any file or any other line of the message.
 For EACH branch that was amended (${branchHint}) — checkout the branch first (\`gt checkout <branch> --no-interactive\`):
 1. Read the head commit's FULL message verbatim: \`git log -1 --format=%B\` (subject + body + ALL trailers).
 2. If there is NO \`CI-Revise-Attempt:\` line, there is nothing to reset — skip this branch (do NOT add one; absent already means 0).
@@ -2223,7 +2238,7 @@ async function bumpCiReviseTrailers(t, r, d) {
   // .git index and a gt modify/submit on a stacked branch must not race a sibling.
   for (const branch of branches) {
     const fin = await agent(
-      `You are the CI-REVISE-BUMP worker for ${t.id} (phase: ${d.phase}), in ${r.worktreeDir}. The frontier CI is RED; the orchestrator owns the durable \`CI-Revise-Attempt\` counter (RUS-83) and advances it deterministically. Run EXACTLY this one self-locating command verbatim — no path edits, no alternatives, no extra git/gt mutations:
+      `${provisionStep(r, t)}You are the CI-REVISE-BUMP worker for ${t.id} (phase: ${d.phase}), in ${r.worktreeDir}. The frontier CI is RED; the orchestrator owns the durable \`CI-Revise-Attempt\` counter (RUS-83) and advances it deterministically. Run EXACTLY this one self-locating command verbatim — no path edits, no alternatives, no extra git/gt mutations:
 
   python3 ${engineCmdFor(r, 'scripts/qrspi_ci_revise_bump.py')} --ticket ${t.id} --branch ${branch}${stackFlag}
 
@@ -2298,7 +2313,7 @@ async function doLand(t, r) {
   // 1. Merge the stack bottom-up + best-effort Linear → Done (the land worker; it no
   //    longer does worktree/branch cleanup — that is the deterministic script below).
   const fin = await agent(
-    `You are the LAND worker for ${t.id}, in ${r.worktreeDir}. Every PR in the stack is approved+clean. Follow the "action: land" steps of ${SKILL}: ensure the stack is current (gt submit --publish --stack), merge bottom-up (gt merge --no-interactive — NOT --confirm, which forces a prompt --no-interactive cannot satisfy), then BEST-EFFORT project Linear → "Done". Do NOT remove the worktree, delete branches, or run \`gt sync --force\` — a separate deterministic cleanup step (qrspi_cleanup.py) handles all reaping AFTER the merge. Treat any infrastructure/merge error as a HARD STOP (return ok:false, and put the VERBATIM conflict/merge reason in the \`error\` field — NOT only in \`summary\`; the orchestrator surfaces \`error\` to the operator).
+    `${provisionStep(r, t)}You are the LAND worker for ${t.id}, in ${r.worktreeDir}. Every PR in the stack is approved+clean. Follow the "action: land" steps of ${SKILL}: ensure the stack is current (gt submit --publish --stack), merge bottom-up (gt merge --no-interactive — NOT --confirm, which forces a prompt --no-interactive cannot satisfy), then BEST-EFFORT project Linear → "Done". Do NOT remove the worktree, delete branches, or run \`gt sync --force\` — a separate deterministic cleanup step (qrspi_cleanup.py) handles all reaping AFTER the merge. Treat any infrastructure/merge error as a HARD STOP (return ok:false, and put the VERBATIM conflict/merge reason in the \`error\` field — NOT only in \`summary\`; the orchestrator surfaces \`error\` to the operator).
 Return: ok, error (the verbatim reason on failure), prUrl, newStatus, summary.`,
     { label: `land:${t.id}`, phase: 'Finalize', schema: WORKER_SCHEMA }
   )
