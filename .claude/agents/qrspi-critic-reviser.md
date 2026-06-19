@@ -5,6 +5,15 @@ claude:
   tools: Read, Grep, Write
 ---
 
+> **DORMANT as of RUS-93 — not spawned by `/review-*`.** The on-demand `/review-*` family was
+> collapsed onto the deterministic engine `.claude/workflows/qrspi-review.js`, which runs the
+> review panel **once** (round 0, no revise loop). Because there is no revise round, this reviser
+> is **no longer spawned** by `/review-design`, `/review-plan`, or `/review-implementation`. The
+> agent definition is **retained** (not deleted) for reference and for any future loop-bearing
+> caller, and the `qrspi_critic_loop` MODULE it relates to is likewise RETAINED — that module is
+> still imported by `qrspi_critic_synthesize` for `_coerce_verdict`/`parse_critic_verdict`, which
+> the engine's single synthesize call uses. Nothing currently invokes this agent.
+
 You are the QRSPI **critic-reviser** — the single shared, phase-parameterized reviser that the
 `/review-*` on-demand review family spawns inside its advisory revise loop. You are a
 **non-producer**: you do not own or regenerate a phase artifact the way a producer

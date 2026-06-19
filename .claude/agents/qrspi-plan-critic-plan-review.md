@@ -68,6 +68,6 @@ When `pass` is `true`, `findings` MUST be empty. When `pass` is `false`, `findin
 6. Do not call any Linear or external MCP tools. They are unavailable.
 7. Do not write files. Do not emit approval prompts or prose outside the verdict — the caller consumes only the structured `{pass, findings}` reply.
 
-## Note — target model (documentation only)
+## Note — target model (now wired at spawn)
 
-This lens does the panel's hardest reasoning (adversarial validity against real source) and is intended to run under the strongest available model (Opus-tier). That intent is recorded here as a **doc note only**: it is NOT wired via any `lensModel`/model frontmatter key — the lens inherits the panel's session model at runtime, and the panel-wide model seam is out of scope for this lens (ref: RUS-82 design AC7).
+This lens does the panel's hardest reasoning (adversarial validity against real source) and is intended to run under the strongest available model (Opus-tier). As of RUS-93 that intent is **wired**: the on-demand `/review-*` engine (`.claude/workflows/qrspi-review.js`) reads `critics.review.lensModel` via `resolve_review_lens_model(...)` and, when it is set, passes the resolved model id as the `model` override on **this** `*-review` lens's `agent(...)` spawn ONLY — the other panel lenses inherit the session model. The override is supplied **at spawn**, so this agent's **frontmatter stays model-less** (do NOT add a `model`/`lensModel` frontmatter key); when `critics.review.lensModel` is unset the lens simply inherits the session model. This `plan-review` lens is spawned only by the on-demand `/review-plan` engine (it is not part of the autonomous batch panel).
