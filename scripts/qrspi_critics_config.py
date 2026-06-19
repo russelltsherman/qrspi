@@ -229,6 +229,32 @@ def resolve_implementation(cfg):
     }
 
 
+def resolve_review_lens_model(cfg):
+    """Resolve the on-demand `/review-*` per-lens model override. Default None (RUS-93).
+
+    Reads the NEW on-demand key `critics.review.lensModel` and returns the configured
+    model id (a non-empty, stripped-non-empty string) or `None` when absent/malformed.
+    `cfg` is the parsed `critics` block (the same object `resolve_critics` receives); a
+    non-dict `critics`, a non-dict `review` sub-block, or a non-string / blank `lensModel`
+    all resolve to `None`. The engine reads this ONCE and passes it as the `model` key on
+    the `*-review` lens spawn only.
+
+    DELIBERATELY SEPARATE from the batch `critics.design.lensModel` / `resolve_design`
+    path (RUS-93 design.md §Delta, Decision 3, OQ3): this is a DISTINCT key so the
+    on-demand review family and the batch design panel stay decoupled. Do NOT couple this
+    reader to `resolve_design` / `DEFAULT_DESIGN_LENSES` / the batch `critics.design.*`
+    envelope. Fail closed — never raises; any malformed shape yields `None`."""
+    if not isinstance(cfg, dict):
+        return None
+    review = cfg.get("review")
+    if not isinstance(review, dict):
+        return None
+    lens_model = review.get("lensModel")
+    if isinstance(lens_model, str) and lens_model.strip():
+        return lens_model.strip()
+    return None
+
+
 def resolve_critics(critics):
     """Pure resolver: a parsed `critics` object (or anything) -> (phases, warnings).
 

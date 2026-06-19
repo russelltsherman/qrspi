@@ -26,6 +26,7 @@ from qrspi_critics_config import (  # noqa: E402
     resolve_design,
     resolve_enabled,
     resolve_implementation,
+    resolve_review_lens_model,
 )
 
 
@@ -286,6 +287,78 @@ class ReviewPanelConstantsTests(unittest.TestCase):
                             f"impl lens id {lens!r} is not phase-qualified")
         # No id collides across the two phase panels.
         self.assertEqual(KNOWN_PLAN_LENSES & KNOWN_IMPL_LENSES, set())
+
+
+class ResolveReviewLensModelTests(unittest.TestCase):
+    """RUS-93: the on-demand `/review-*` per-lens model override reader. Reads the NEW
+    `critics.review.lensModel` key, returns the configured id or None (fail closed), and
+    is DELIBERATELY SEPARATE from the batch `critics.design.lensModel` / resolve_design
+    path — proven by a non-coupling regression test below."""
+
+    def test_configured_id_returned(self):
+        self.assertEqual(
+            resolve_review_lens_model({"review": {"lensModel": "claude-opus"}}),
+            "claude-opus",
+        )
+
+    def test_configured_id_stripped(self):
+        # A surrounding-whitespace model id is returned stripped (clean spawn arg).
+        self.assertEqual(
+            resolve_review_lens_model({"review": {"lensModel": "  claude-opus  "}}),
+            "claude-opus",
+        )
+
+    def test_absent_review_block_is_none(self):
+        self.assertIsNone(resolve_review_lens_model({}))
+
+    def test_absent_lens_model_key_is_none(self):
+        self.assertIsNone(resolve_review_lens_model({"review": {}}))
+
+    def test_non_dict_cfg_is_none(self):
+        for junk in (None, "", "nope", [], 42, True):
+            self.assertIsNone(resolve_review_lens_model(junk))
+
+    def test_non_dict_review_is_none(self):
+        for junk in ("claude-opus", [], 7, True, None):
+            self.assertIsNone(resolve_review_lens_model({"review": junk}))
+
+    def test_blank_or_empty_lens_model_is_none(self):
+        self.assertIsNone(resolve_review_lens_model({"review": {"lensModel": ""}}))
+        self.assertIsNone(resolve_review_lens_model({"review": {"lensModel": "   "}}))
+
+    def test_non_string_lens_model_is_none(self):
+        for junk in (7, True, None, [], {}):
+            self.assertIsNone(resolve_review_lens_model({"review": {"lensModel": junk}}))
+
+    def test_separate_from_design_lens_model_non_coupling(self):
+        # A config that sets ONLY the batch design lensModel must NOT leak into the
+        # on-demand review reader (distinct keys, decoupled families), and the design
+        # resolution must be byte-identical whether or not critics.review is present —
+        # the non-coupling regression in BOTH directions.
+        cfg_no_review = {"design": {"lensModel": "claude-haiku"}}
+        # The SAME design block, but the parent config now also carries a populated
+        # critics.review block — the exact condition this test must distinguish.
+        cfg_with_review = {
+            "design": {"lensModel": "claude-haiku"},
+            "review": {"lensModel": "claude-opus"},
+        }
+        # The batch design reader never sees the review id...
+        self.assertIsNone(resolve_review_lens_model(cfg_no_review))
+        # ...and the review reader never reads the design id (it returns ITS own).
+        self.assertEqual(resolve_review_lens_model(cfg_with_review), "claude-opus")
+
+        warnings_a, warnings_b = [], []
+        design_no_review = resolve_design(cfg_no_review.get("design"), warnings_a)
+        design_with_review = resolve_design(cfg_with_review.get("design"), warnings_b)
+        # design still reads its OWN lensModel, unaffected by the review reader's key.
+        self.assertEqual(design_no_review["lensModel"], "claude-haiku")
+        # Adding a populated critics.review block to the parent config leaves the
+        # design resolution byte-identical — proven, not asserted on identical inputs.
+        self.assertEqual(design_no_review, design_with_review)
+        self.assertEqual(warnings_a, warnings_b)
+        # And resolve_design never grows a `review` key from the new reader.
+        self.assertNotIn("review", design_no_review)
+        self.assertNotIn("review", design_with_review)
 
 
 class ResolveImplementationTests(unittest.TestCase):
