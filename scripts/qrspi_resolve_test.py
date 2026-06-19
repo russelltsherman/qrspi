@@ -540,6 +540,49 @@ def _run_worktree_selfheal_tests():
 _run_worktree_selfheal_tests()
 
 
+def _run_sibling_preservation_test():
+    """Regression: the worktree-prune CASCADE. Healing ONE orphaned ticket must NOT reap a
+    SIBLING ticket's worktree. teardown must be SCOPED to its own `.git/worktrees/<id>`
+    admin dir — never a repo-global `git worktree prune`, which reaps EVERY prunable entry,
+    including a concurrent worker mid-heal whose working dir is momentarily absent (so its
+    admin's gitdir "points to a non-existent location"). The global prune is what turned a
+    single orphan into a cross-ticket cascade. Hermetic real-git integration."""
+    with tempfile.TemporaryDirectory() as root:
+        _seed_repo(root)
+        _git(["branch", "RUS-2/design"], root)
+        wt1 = os.path.join(root, ".worktrees", "RUS-1")
+        wt2 = os.path.join(root, ".worktrees", "RUS-2")
+        admin2 = os.path.join(root, ".git", "worktrees", "RUS-2")
+
+        # Both tickets provisioned and healthy.
+        setup_worktree("RUS-1", repo_root=root)
+        setup_worktree("RUS-2", repo_root=root)
+        check("sibling RUS-2 starts healthy", worktree_is_healthy(wt2), True)
+
+        # Orphan RUS-1 (admin gone, working dir present) — the heal trigger.
+        import shutil as _sh
+        _sh.rmtree(os.path.join(root, ".git", "worktrees", "RUS-1"))
+
+        # Concurrent-worker race: RUS-2's working dir is momentarily moved away, so its admin
+        # entry is now globally prunable ("gitdir file points to non-existent location").
+        held = os.path.join(root, "_held_RUS-2")
+        os.rename(wt2, held)
+        check("mid-race, RUS-2 admin entry still on disk", os.path.isdir(admin2), True)
+
+        # Heal RUS-1. A repo-global prune in teardown would reap RUS-2's admin entry here.
+        setup_worktree("RUS-1", repo_root=root)
+
+        # Restore RUS-2's working dir; it must be intact and healthy — not collateral.
+        os.rename(held, wt2)
+        check("healing RUS-1 leaves sibling RUS-2 admin intact (scoped teardown)",
+              os.path.isdir(admin2), True)
+        check("sibling RUS-2 is still a healthy worktree after the heal",
+              worktree_is_healthy(wt2), True)
+
+
+_run_sibling_preservation_test()
+
+
 def run():
     print("\n%d passed, %d failed" % (total - failures, failures))
     return 1 if failures else 0

@@ -436,17 +436,27 @@ def worktree_is_healthy(worktree):
 
 
 def teardown_orphan_worktree(worktree, repo_root):
-    """Remove an orphaned worktree dir and prune its stale admin metadata so the
-    caller can recreate it cleanly.
+    """Remove an orphaned worktree's working dir AND its own stale `.git/worktrees/<id>`
+    admin entry — SCOPED to this one worktree, never a repo-global `git worktree prune`.
 
-    `git worktree remove` cannot help here — it needs the very admin entry the orphan
-    is missing — so we `rm -rf` the working dir and then `git worktree prune` to drop
-    the dangling `.git/worktrees/<id>` admin entry (which is what frees the branch the
-    orphan held, letting the subsequent `git worktree add <wt> <branch>` succeed). The
-    prune is best-effort: a clean tree is the goal, and a prune that finds nothing is a
-    harmless no-op."""
+    `git worktree remove` cannot help here — it needs the very admin entry the orphan is
+    missing — so we delete the two directories that constitute this worktree directly: the
+    `.worktrees/<id>` working dir and its `.git/worktrees/<id>` admin dir (removing the
+    latter is what frees the branch the orphan held, letting the subsequent
+    `git worktree add <wt> <branch>` succeed). Both removals are best-effort
+    (`ignore_errors`): a true orphan's admin dir is already gone, a harmless no-op.
+
+    Why NOT `git worktree prune`: prune is repo-GLOBAL — it reaps EVERY worktree git
+    currently considers prunable, including a SIBLING ticket whose working dir is only
+    transiently absent (e.g. a concurrent worker mid-heal, whose admin gitdir momentarily
+    "points to a non-existent location"). That global reap is what turned a single orphan
+    into a cross-ticket cascade; scoping the teardown to this worktree's own admin dir
+    removes the amplification entirely. The admin-dir basename matches the worktree
+    basename (worktrees are added at `.worktrees/<ticket>`; ticket ids are unique, so git
+    never collision-suffixes the entry name)."""
     shutil.rmtree(worktree, ignore_errors=True)
-    _run(["git", "worktree", "prune"], cwd=repo_root)
+    admin = os.path.join(repo_root, ".git", "worktrees", os.path.basename(worktree))
+    shutil.rmtree(admin, ignore_errors=True)
 
 
 def setup_worktree(ticket, trunk="main", create_design=False, repo_root=REPO_ROOT):
@@ -455,7 +465,8 @@ def setup_worktree(ticket, trunk="main", create_design=False, repo_root=REPO_ROO
 
     - Existing HEALTHY worktree dir -> reuse as-is.
     - Existing ORPHANED worktree dir (working dir present but its `.git/worktrees/<id>`
-      admin metadata was pruned) -> tear it down (rm + `git worktree prune`) and fall
+      admin metadata was pruned) -> tear it down (scoped rm of the working + admin dirs,
+      NOT a global `git worktree prune` — see teardown_orphan_worktree) and fall
       through to recreate from the branch tip, instead of reusing a dir whose every
       git/gt command dies with `fatal: not a git repository` (the bug that wedged the
       restack step — see worktree_is_healthy).
