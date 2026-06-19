@@ -145,6 +145,47 @@ class RenderSynopsisTests(unittest.TestCase):
         out = render_synopsis([_verdict("a", True)], dr, "advance")
         self.assertNotIn("Decision readiness", out)
 
+    def test_blocking_finding_strings_surface_verbatim(self):
+        arr = [
+            _verdict("edge-alignment", False,
+                     findings=["edge E2 maps to no node", "node N3 unreachable"]),
+        ]
+        out = render_synopsis(arr, None, "revise")
+        # the literal finding strings appear, not just the count
+        self.assertIn("edge E2 maps to no node", out)
+        self.assertIn("node N3 unreachable", out)
+        self.assertIn("Blocking findings", out)
+
+    def test_blocking_findings_deduped(self):
+        arr = [
+            _verdict("a", False, findings=["dup finding", "dup finding", "other"]),
+        ]
+        out = render_synopsis(arr, None, "revise")
+        self.assertEqual(out.count("- dup finding"), 1)
+        self.assertIn("- other", out)
+
+    def test_no_blocking_findings_section_for_passing_lens(self):
+        arr = [_verdict("a", True, findings=[])]
+        out = render_synopsis(arr, None, "advance")
+        self.assertNotIn("Blocking findings —", out)
+
+    def test_no_blocking_findings_section_when_fail_has_no_findings(self):
+        # a FAIL with an empty findings list emits no sub-section
+        arr = [_verdict("a", False, findings=[])]
+        out = render_synopsis(arr, None, "revise")
+        self.assertNotIn("Blocking findings —", out)
+
+    def test_non_blocking_notes_unchanged_alongside_blocking_findings(self):
+        arr = [
+            _verdict("a", False, findings=["a blocker"], non_blocking=["consider Z"]),
+        ]
+        out = render_synopsis(arr, None, "revise")
+        # blocking finding text surfaces
+        self.assertIn("a blocker", out)
+        # advisory section still renders the non-blocking note, distinctly
+        self.assertIn("Advisory (non-blocking)", out)
+        self.assertIn("consider Z", out)
+
     def test_terminal_action_rendered(self):
         out = render_synopsis([_verdict("a", True)], None, "revise")
         self.assertIn("Terminal action:", out)

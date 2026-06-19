@@ -49,6 +49,18 @@ def _as_list(value):
     return value if isinstance(value, list) else []
 
 
+def _dedupe(items):
+    """Return ``items`` with duplicates removed, preserving first-seen order."""
+    seen = set()
+    out = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
 def _blocking_count(verdict):
     """Blocking finding count for one LensVerdict — len of its `findings` list.
 
@@ -128,7 +140,12 @@ def render_synopsis(verdict_array, decision_readiness, terminal_action):
       4. **Terminal action** — the reducer's resolved terminal action.
 
     ``decision_readiness`` may be ``None`` (lens absent) — its section is then
-    omitted. Pure; returns a string and performs no I/O."""
+    omitted. Pure; returns a string and performs no I/O.
+
+    Beneath the per-lens table, each FAIL lens that carries blocking findings
+    gets a "Blocking findings" sub-section that emits its deduped finding
+    strings verbatim (RUS-93) — the count alone hid the actual blockers from the
+    human reading the synopsis. The advisory non-blocking section is unchanged."""
     verdict_array = _as_list(verdict_array)
     lines = []
 
@@ -146,6 +163,24 @@ def render_synopsis(verdict_array, decision_readiness, terminal_action):
         verdict_label = "PASS" if passed else "FAIL"
         lines.append(f"| {lens} | {verdict_label} | {count} |")
     lines.append("")
+
+    # 1b. Blocking findings text per FAIL lens --------------------------------
+    # The table shows only a COUNT; surface the literal finding strings beneath
+    # it so a human (and the reviser) sees the actual blockers, not a number.
+    for verdict in verdict_array:
+        if not isinstance(verdict, dict) or bool(verdict.get("pass")):
+            continue
+        findings = _dedupe([
+            f for f in _as_list(verdict.get("findings")) if f
+        ])
+        if not findings:
+            continue
+        lens = verdict.get("lens")
+        lines.append(f"#### Blocking findings — {lens}")
+        lines.append("")
+        for finding in findings:
+            lines.append(f"- {finding}")
+        lines.append("")
 
     # 2. Advisory non-blocking notes -----------------------------------------
     non_blocking = []
