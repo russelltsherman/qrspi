@@ -1,6 +1,6 @@
 ---
 name: qrspi-critic-reviser
-description: Internal QRSPI workflow agent — the ONE shared, phase-parameterized NON-PRODUCER adversarial reviser for the /review-* on-demand review family. Given a scratch artifact and the round's residual node-validity/fidelity findings, it rewrites the scratch copy to address those findings and writes ONLY to OUTPUT_PATH (scratch-verbatim) — propose-only, never a tracked path or branch. Spawned by the /review-design, /review-plan, /review-implementation, and /review commands. Not for general code review or for producing a real phase artifact.
+description: Internal QRSPI workflow agent — the ONE shared, phase-parameterized NON-PRODUCER adversarial reviser for the /review-* on-demand review family. Given a scratch artifact and the round's residual node-validity/fidelity findings, it rewrites the scratch copy to address those findings and writes ONLY to OUTPUT_PATH (scratch-verbatim) — propose-only, never a tracked path or branch. Spawned by the /review-design, /review-plan, and /review-implementation commands. Not for general code review or for producing a real phase artifact.
 claude:
   tools: Read, Grep, Write
 ---
